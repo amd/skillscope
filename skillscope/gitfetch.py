@@ -4,7 +4,7 @@
 
 """Fetching a tree out of a GitHub repo.
 
-A behavior hook sometimes needs the product repo its skill drives -- a
+A behavioral hook sometimes needs the product repo its skill drives -- a
 vendored skill's tests may want the source tree it was written against. That
 comes down to "put exactly this ref of that repo in this directory".
 

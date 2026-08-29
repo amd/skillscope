@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/amd/skillscope/skillscope/schema/evals.schema.json",
   "title": "skillscope eval dataset",
-  "description": "One dataset per skill at <skill>/evals/evals.json, holding an `evaluations` array. The same shape describes the optional <skill>/evals/extended_evals.json, which carries no coverage requirement and only runs when the runner is asked for it. Each evaluation is a prompt plus `skill_should_trigger`, a yes/no answer to whether the skill that owns this file should fire for it. No evaluation names a skill; the folder does that. Routing mode installs the skills the workflow lists side by side and grades the trigger decision for every evaluation. Behavior mode installs only this skill and grades expected_behavior / unexpected_behavior / logs_contain / files_exist, which is why those fields exist only when skill_should_trigger is true. skillscope/datasets.py is the enforcing implementation and `skillscope structural` is how you run it; this file is the field reference, and datasets do not link to it.",
+  "description": "One dataset per skill at <skill>/evals/evals.json, holding an `evaluations` array. The same shape describes the optional <skill>/evals/extended_evals.json, which carries no coverage requirement and only runs when the runner is asked for it. Each evaluation is a prompt plus `skill_should_trigger`, a yes/no answer to whether the skill that owns this file should fire for it. No evaluation names a skill; the folder does that. `skillscope routing` installs the skills the workflow lists side by side and grades the trigger decision for every evaluation. `skillscope behavioral` installs only this skill and grades expected_behavior / unexpected_behavior / logs_contain / files_exist, which is why those fields exist only when skill_should_trigger is true. skillscope/datasets.py is the enforcing implementation and `skillscope structural` is how you run it; this file is the field reference, and datasets do not link to it.",
   "type": "object",
   "additionalProperties": false,
   "required": ["evaluations"],
@@ -17,7 +17,7 @@
     "skillscope_version": {
       "type": "string",
       "minLength": 1,
-      "description": "Which build of skillscope grades this dataset: a tag, a branch, or a commit. Optional, and the skill owner's call -- pinning it here means the harness version that runs these prompts is bumped in the same file, and the same review, as the prompts themselves. It governs this skill's behavior run. Routing installs several skills in one session and so cannot honor several pins at once; it runs at whatever version CI launched, which is also the fallback when this key is absent."
+      "description": "Which build of skillscope grades this dataset: a tag, a branch, or a commit. Optional, and the skill owner's call -- pinning it here means the harness version that runs these prompts is bumped in the same file, and the same review, as the prompts themselves. It governs this skill's behavioral run. Routing installs several skills in one session and so cannot honor several pins at once; it runs at whatever version CI launched, which is also the fallback when this key is absent."
     },
     "evaluations": {
       "type": "array",
@@ -50,7 +50,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "prompt", "skill_should_trigger"],
-      "description": "A prompt that must activate the skill that owns this file. Routing grades the trigger decision; behavior mode grades whatever else is asserted here.",
+      "description": "A prompt that must activate the skill that owns this file. Routing grades the trigger decision; behavioral grades whatever else is asserted here.",
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "prompt": { "$ref": "#/$defs/prompt" },
@@ -71,7 +71,7 @@
         "logs_contain": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
-          "description": "Case-insensitive substrings that must appear in the run transcript. Deterministic and instant, so prefer these over a judged expectation when the thing you want is a literal (a script name, a flag, a pinned image tag). Do not assert the skill's own name here: routing mode already grades that."
+          "description": "Case-insensitive substrings that must appear in the run transcript. Deterministic and instant, so prefer these over a judged expectation when the thing you want is a literal (a script name, a flag, a pinned image tag). Do not assert the skill's own name here: routing already grades that."
         },
         "files_exist": {
           "type": "array",
@@ -90,7 +90,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "prompt", "skill_should_trigger"],
-      "description": "A prompt where no skill should fire: the near misses only this skill's owner knows to write, close enough to the domain to be tempting and wrong enough that firing would be a bug. Graded on the trigger decision alone. No skill is ever loaded, so there is no behavior phase, and expected_behavior / unexpected_behavior / logs_contain / files_exist / workspace are rejected here rather than silently ignored.",
+      "description": "A prompt where no skill should fire: the near misses only this skill's owner knows to write, close enough to the domain to be tempting and wrong enough that firing would be a bug. Graded on the trigger decision alone. No skill is ever loaded, so there is no behavioral phase, and expected_behavior / unexpected_behavior / logs_contain / files_exist / workspace are rejected here rather than silently ignored.",
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "prompt": { "$ref": "#/$defs/prompt" },

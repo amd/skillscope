@@ -3,8 +3,8 @@ name: skill-evals
 # The whole eval pipeline, as one reusable workflow.
 #
 #   discover -> routing
-#            -> behavior (matrix)
-#            -> behavior-scoped (matrix)
+#            -> behavioral (matrix)
+#            -> behavioral-scoped (matrix)
 #            -> results (aggregate)
 #   external-references (on its own, and outside the aggregate)
 #
@@ -33,7 +33,7 @@ name: skill-evals
 #     means, so wherever there is a choice it is a decision a human makes
 #     rather than one this workflow guesses; a repo with a single skill has no
 #     choice to make and need not name it.
-#   * behavior installs one skill, runs the prompt to completion, and grades
+#   * behavioral installs one skill, runs the prompt to completion, and grades
 #     what the agent actually did.
 #
 # Before either of them, the discover job runs the structural checks: every
@@ -107,12 +107,12 @@ on:
         type: string
         default: ""
       behavior_runner:
-        description: "JSON runs-on labels for a behavior leg."
+        description: "JSON runs-on labels for a behavioral leg."
         type: string
         default: '["ubuntu-latest"]'
       behavior_os:
         description: >-
-          Platforms to run a skill's behavior cases on when its evals/machine.yml
+          Platforms to run a skill's behavioral cases on when its evals/machine.yml
           does not narrow them, comma-separated.
         type: string
         default: "Linux"
@@ -141,14 +141,14 @@ on:
       # --- what to run this time -------------------------------------------
       mode:
         description: >-
-          Which grader to run: both, routing, behavior, or references -- the
+          Which grader to run: both, routing, behavioral, or references -- the
           last one skipping the graded runs entirely, for a schedule that is
           only here to catch link rot.
         type: string
         default: both
       skills:
         description: >-
-          Comma-separated skill names to run behavior cases for. Blank means
+          Comma-separated skill names to run behavioral cases for. Blank means
           every skill with a dataset (or, on a pull request, whatever changed).
         type: string
         default: ""
@@ -202,7 +202,7 @@ on:
         type: number
         default: 40
       behavior_timeout_minutes:
-        description: "Cap on one behavior leg. These install models and can take a while."
+        description: "Cap on one behavioral leg. These install models and can take a while."
         type: number
         default: 45
       python_version:
@@ -231,7 +231,7 @@ on:
         default: ""
       scoped_api_key_secret:
         description: >-
-          Name of the secret holding the API key for behavior legs that run in
+          Name of the secret holding the API key for behavioral legs that run in
           `scoped_environment`. Separate because that is the point of such a
           pool: its own hardware, its own budgeted credentials.
         type: string
@@ -388,7 +388,7 @@ jobs:
           # `mode` narrows the pipeline after selection rather than before it,
           # so a dispatch cannot ask for a leg the change does not support.
           mode = os.environ.get("MODE", "both")
-          if mode in ("behavior", "references"):
+          if mode in ("behavioral", "behavior", "references"):
               plan["routing"] = False
           if mode in ("routing", "references"):
               plan["default"] = []
@@ -493,9 +493,9 @@ jobs:
       - name: Run the routing eval
         uses: amd/skillscope@bootstrap
         with:
-          command: run
+          command: routing
           # By default a wrong routing decision fails this job, the same way a
-          # failed behavior expectation does; lower min_accuracy to report the
+          # failed behavioral expectation does; lower min_accuracy to report the
           # score instead, or to hold a bar short of perfect. Either way it
           # fails on infrastructure problems (no case produced a decision, or
           # no skill activated anywhere).
@@ -504,7 +504,6 @@ jobs:
           # the way a shell would, and a comma-separated list a caller wrote
           # with spaces in it would otherwise arrive as several arguments.
           args: >-
-            --mode routing
             --routing-skills '${{ inputs.routing_skills }}'
             --min-accuracy '${{ inputs.min_accuracy }}'
             ${{ needs.discover.outputs.extended }}
@@ -528,9 +527,9 @@ jobs:
             routing-logs/
           if-no-files-found: warn
 
-  # Behavior legs that use the repo-wide credentials.
+  # Behavioral legs that use the repo-wide credentials.
   behavior:
-    name: Behavior (${{ matrix.skill }} on ${{ matrix.os }})
+    name: Behavioral (${{ matrix.skill }} on ${{ matrix.os }})
     needs: discover
     if: needs.discover.outputs.default_any == 'true'
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -584,11 +583,11 @@ jobs:
                   out.write(f"{name}<<__SKILLSCOPE_EOF__\n{value}\n__SKILLSCOPE_EOF__\n")
           print("Exported: " + ", ".join(exported))
 
-      - name: Run behavior cases for ${{ matrix.skill }}
+      - name: Run behavioral cases for ${{ matrix.skill }}
         uses: amd/skillscope@bootstrap
         with:
-          command: run
-          args: --mode behavior --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+          command: behavioral
+          args: --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
           skill: ${{ matrix.skill }}
           skills: ${{ inputs.skill_globs }}
           # The skill's own pin, resolved during selection.
@@ -598,11 +597,11 @@ jobs:
           install-claude: "true"
           node-version: ${{ inputs.node_version }}
 
-  # Behavior legs on hardware with its own environment. Those bring scoped
+  # Behavioral legs on hardware with its own environment. Those bring scoped
   # secrets, which is why they cannot share the job above: a job's credentials
   # are fixed before its matrix expands.
   behavior-scoped:
-    name: Behavior (${{ matrix.skill }} on ${{ matrix.os }}, ${{ matrix.environment }})
+    name: Behavioral (${{ matrix.skill }} on ${{ matrix.os }}, ${{ matrix.environment }})
     needs: discover
     if: needs.discover.outputs.scoped_any == 'true'
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -659,11 +658,11 @@ jobs:
                   out.write(f"{name}<<__SKILLSCOPE_EOF__\n{value}\n__SKILLSCOPE_EOF__\n")
           print("Exported: " + ", ".join(exported))
 
-      - name: Run behavior cases for ${{ matrix.skill }}
+      - name: Run behavioral cases for ${{ matrix.skill }}
         uses: amd/skillscope@bootstrap
         with:
-          command: run
-          args: --mode behavior --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+          command: behavioral
+          args: --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
           skill: ${{ matrix.skill }}
           skills: ${{ inputs.skill_globs }}
           version: ${{ inputs.version || matrix.version }}
@@ -701,8 +700,8 @@ jobs:
           echo "harness:         ${VERSION:-(the launcher's own ref)}"
           echo "discover:        $DISCOVER"
           echo "routing:         $ROUTING (requested: $ROUTING_WANTED)"
-          echo "behavior:        $BEHAVIOR (requested: $BEHAVIOR_WANTED)"
-          echo "behavior-scoped: $SCOPED (requested: $SCOPED_WANTED)"
+          echo "behavioral:        $BEHAVIOR (requested: $BEHAVIOR_WANTED)"
+          echo "behavioral-scoped: $SCOPED (requested: $SCOPED_WANTED)"
           echo "held back:       $SKIPPED"
 
           # If discovery itself failed, surface that rather than guessing. It
@@ -716,7 +715,7 @@ jobs:
 
           # Say loudly when a change went out without running on real hardware.
           if [ -n "$SKIPPED" ] && [ "$SKIPPED" != "[]" ]; then
-            echo "::warning::These skills' behavior cases were held back for a" \
+            echo "::warning::These skills' behavioral cases were held back for a" \
                  "missing gate label and did not run: $SKIPPED"
           fi
 
@@ -726,11 +725,11 @@ jobs:
             failed=1
           fi
           if [ "$BEHAVIOR_WANTED" = "true" ] && [ "$BEHAVIOR" != "success" ]; then
-            echo "Behavior cases did not pass ($BEHAVIOR)." >&2
+            echo "Behavioral cases did not pass ($BEHAVIOR)." >&2
             failed=1
           fi
           if [ "$SCOPED_WANTED" = "true" ] && [ "$SCOPED" != "success" ]; then
-            echo "Scoped-hardware behavior cases did not pass ($SCOPED)." >&2
+            echo "Scoped-hardware behavioral cases did not pass ($SCOPED)." >&2
             failed=1
           fi
           if [ "$failed" -ne 0 ]; then

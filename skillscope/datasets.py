@@ -23,12 +23,12 @@ alone -- and whether it runs at all is the caller's decision
 repo keeps the prompts it wants graded in its own CI without every consumer of
 its skills paying for them.
 
-There are two run modes to satisfy:
+There are two graded commands to satisfy:
 
   * **routing** -- the skills a workflow lists are installed side by side and
     only the trigger decision is graded ("did the right skill fire, and only
     then?"). Every evaluation of a listed skill runs here.
-  * **behavior** -- just this skill is installed, the run goes to completion,
+  * **behavioral** -- just this skill is installed, the run goes to completion,
     and ``expected_behavior`` / ``unexpected_behavior`` / ``logs_contain`` /
     ``files_exist`` are graded ("once it fired, did it do the job?"). Only a
     triggering evaluation can run here, and only if it asserts something.
@@ -39,7 +39,7 @@ with a substring match is a worse version of a check this module already
 models as a field.
 
 ``skill_should_trigger: false`` makes the evaluation routing-only. No skill
-loads for it, so there is no behavior phase to hang an assertion or a staged
+loads for it, so there is no behavioral phase to hang an assertion or a staged
 workspace off, and those fields are rejected rather than silently ignored:
 such an evaluation is an ``id``, a ``prompt``, the flag, and maybe a ``note``.
 
@@ -119,7 +119,7 @@ _REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
 # The two shapes take different fields, and the difference is not a style
 # choice. An evaluation with `skill_should_trigger: false` is graded on exactly
 # one thing -- that nothing fired -- and no skill is ever loaded for it, so
-# there is no behavior phase to hang an assertion or a staged workspace off.
+# there is no behavioral phase to hang an assertion or a staged workspace off.
 # Those are a prompt and nothing more.
 TRIGGER_CASE_KEYS = {
     "id",
@@ -217,7 +217,7 @@ def machine_path(skill: str) -> Path:
 def declared_skills() -> list[str]:
     """Every skill the repo under test declares, in or out of a routing run.
 
-    This is the set the structural checks cover, and the set behavior runs are
+    This is the set the structural checks cover, and the set behavioral runs are
     planned over. Which of them compete in a routing run is a separate, and
     much smaller, question: see ``config.Config.routing_set``.
     """
@@ -287,7 +287,7 @@ def _parse_case(
             f"{label} uses {', '.join(f'`{k}`' for k in misplaced)}, which only "
             f"apply when `{TRIGGER_KEY}` is true. An evaluation expecting nothing "
             "to fire is graded on that alone -- no skill is ever loaded for it, "
-            "so there is no behavior phase to assert anything about."
+            "so there is no behavioral phase to assert anything about."
         )
     unknown = sorted(unknown - set(misplaced))
     if unknown:
@@ -625,7 +625,7 @@ def _string_list(path: Path, key: str, value: object) -> list[str]:
 
 
 def machine_plan(skill: str) -> dict:
-    """What kind of machine `skill`'s behavior cases need.
+    """What kind of machine `skill`'s behavioral cases need.
 
     An absent ``evals/machine.yml`` is the common case: the everyday runners,
     on the platforms the repo runs on by default. A skill ships one to drop a

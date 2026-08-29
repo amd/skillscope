@@ -4,7 +4,7 @@
 
 """Routing engine: does the right skill fire, and only then?
 
-Behavior mode asks "once this skill runs, does it do the job?". This asks the
+Behavioral asks "once this skill runs, does it do the job?". This asks the
 question that comes first: **given several skills installed side by side, does
 the agent pick the right one?** It grades the routing decision only, so it
 catches the four failure modes a description can cause:

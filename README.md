@@ -1,6 +1,6 @@
 # skillscope
 
-Structural, routing, and behavior tests for agent skills, in whatever repo the
+Structural, routing, and behavioral tests for agent skills, in whatever repo the
 skills live in.
 
 A skill is a description plus a body, and each half fails in a way the other
@@ -17,10 +17,10 @@ prose:
 * **routing** — installs several skills side by side and asks which one wins a
   prompt. You cannot test this alone: a skill tested by itself will happily
   answer prompts that belong to its neighbour.
-* **behavior** — installs one skill, runs the prompt to completion, and grades
+* **behavioral** — installs one skill, runs the prompt to completion, and grades
   what the agent actually did.
 
-The prompt is written once and both graded modes read it. The alternative — a
+The prompt is written once and both graded commands read it. The alternative — a
 central routing prompt set plus a per-skill test file that re-asserts routing
 with a substring match on the transcript — is two things to maintain and one of
 them is a worse copy of the other.
@@ -34,16 +34,15 @@ uvx --from git+https://github.com/amd/skillscope skillscope structural
 # the same, plus fetching every external URL the skills link to
 uvx --from git+https://github.com/amd/skillscope skillscope structural --external
 
-# behavior for one skill (needs an authenticated `claude` CLI)
-uvx --from git+https://github.com/amd/skillscope skillscope run \
-  --mode behavior --skill my-skill
+# behavioral, for one skill (needs an authenticated `claude` CLI)
+uvx --from git+https://github.com/amd/skillscope skillscope behavioral --skill my-skill
 
 # routing, for the skills you want in the room together
-uvx --from git+https://github.com/amd/skillscope skillscope run \
-  --mode routing --routing-skills my-skill,its-neighbour
+uvx --from git+https://github.com/amd/skillscope skillscope routing \
+  --routing-skills my-skill,its-neighbour
 
 # a repo with one skill: the room is that skill, so nothing names it
-uvx --from git+https://github.com/amd/skillscope skillscope run --mode routing
+uvx --from git+https://github.com/amd/skillscope skillscope routing
 
 # what CI should run for a change
 git diff --name-only main HEAD | uvx --from git+https://github.com/amd/skillscope skillscope select --changed
@@ -72,7 +71,7 @@ jobs:
 ```
 
 That is the whole pipeline: check the structure, select what the change
-affects, run routing once, run a behavior leg per affected skill on the
+affects, run routing once, run a behavioral leg per affected skill on the
 hardware that skill asks for, and report one aggregate result. See
 [examples/skill-evals.yml](examples/skill-evals.yml) for a fully configured
 caller and
@@ -91,7 +90,7 @@ To run a single command instead of the pipeline, use the action directly:
 ### A wrong routing decision fails the run
 
 `min_accuracy` (`--min-accuracy`) defaults to `1`: every graded routing case
-has to land on the right skill, the same way every behavior expectation has to
+has to land on the right skill, the same way every behavioral expectation has to
 hold. A routing miss is a defect and not a statistic — a description that fires
 on its neighbour's prompt makes that neighbour worse — so it turns the run red
 rather than sitting in a summary nobody reads.
@@ -115,8 +114,8 @@ The version that actually grades your skills is data:
 
 | Where | Scope |
 | --- | --- |
-| the `version` input on the action or workflow | the repo, and everything that is not one skill's behavior run |
-| `skillscope_version` in a skill's `evals/evals.json` | that skill's behavior run, overriding the input |
+| the `version` input on the action or workflow | the repo, and everything that is not one skill's behavioral run |
+| `skillscope_version` in a skill's `evals/evals.json` | that skill's behavioral run, overriding the input |
 
 Both are one-line diffs a reviewer can see, which a `uses:` ref spread across
 every caller is not. Routing always runs at the workflow's version: it installs
@@ -136,7 +135,7 @@ flag if you are running the CLI by hand:
 | `excluded_urls` | `--exclude-url` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
 | `skill_files` | `--skill-files` | none | Files every skill must ship beside its `SKILL.md`, such as a governance card. What the format itself requires is checked either way. |
 | `skill_sections` | `--skill-sections` | none | `##` headings each of those markdown files must have something under, such as `Description,Owner,License`. |
-| `behavior_runner` | `--behavior-runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavior leg. |
+| `behavior_runner` | `--behavior-runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavioral leg. |
 | `behavior_os` | `--behavior-os` | `Linux` | Platforms a skill runs on when its `machine.yml` does not narrow them. |
 | `scoped_runner` | `--scoped-runner` | reuses `behavior_runner` | Base labels for a leg whose skill asks for hardware labels. |
 | `scoped_gate` | `--scoped-gate` | none | Pull-request label required before those legs run. |
@@ -154,7 +153,7 @@ default, because the answer is what the score *means*. Install every skill on
 disk and a work-in-progress directory drops everyone's number; install only the
 skill under review and it wins every prompt by walkover. Neither is a guess a
 test should make on your behalf. A skill you leave off the list still gets its
-dataset checked and its behavior cases run — it just does not move anybody's
+dataset checked and its behavioral cases run — it just does not move anybody's
 routing score.
 
 Listing them also makes the change visible: a skill joining or leaving the room
@@ -264,7 +263,8 @@ environment gets one matrix, labels and all.
 | Command | Does |
 | --- | --- |
 | `skillscope structural` | Every skill folder, every dataset, and every reference the skills' markdown makes. No agent, no tokens. `--docs`, `--skill-files`, `--skill-sections`, `--external`, `--exclude-url`. |
-| `skillscope run` | Routing and/or behavior. `--mode`, `--skill`, `--routing-skills`, `--only`, `--min-accuracy`, `--keep-logs`. |
+| `skillscope routing` | Which skill fires, with several installed together. `--routing-skills`, `--skill`, `--only`, `--min-accuracy`, `--keep-logs`. |
+| `skillscope behavioral` | What a skill does once it has fired. `--skill`, `--only`. |
 | `skillscope select` | The CI plan for a change, as JSON: which skills, which runners, which harness version. |
 | `skillscope list-skills` | The skills that have a dataset, as JSON. |
 | `skillscope template` | The dataset template a new skill starts from. |

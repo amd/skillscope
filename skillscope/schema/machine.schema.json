@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/amd/skillscope/skillscope/schema/machine.schema.json",
   "title": "skillscope skill machine requirements",
-  "description": "Optional file at <skill>/evals/machine.yml, present ONLY for a skill whose behavior cases cannot run on the everyday runners on every platform. Absent means exactly that, which is the common case. Say which platforms to use and which runner labels the work needs; what follows from asking for hardware -- the base runs-on labels, the pull-request label rationing that pool, the environment holding its credentials -- belongs to the repo and is passed to skillscope by the workflow, not restated here.",
+  "description": "Optional file at <skill>/evals/machine.yml, present ONLY for a skill whose behavioral cases cannot run on the everyday runners on every platform. Absent means exactly that, which is the common case. Say which platforms to use and which runner labels the work needs; what follows from asking for hardware -- the base runs-on labels, the pull-request label rationing that pool, the environment holding its credentials -- belongs to the repo and is passed to skillscope by the workflow, not restated here.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -17,7 +17,7 @@
       "type": "array",
       "minItems": 1,
       "items": { "type": "string", "minLength": 1 },
-      "description": "Extra `runs-on` labels the behavior cases need, added to the base labels the workflow supplies. Name the hardware, not the pool: `mi300x` says what the skill requires and lands it on any runner registered with that label. A leg that asks for labels is treated as scoped, so it is also what the repo may hold behind a gate label and pay for from a separate environment. Keep the list as short as the runners allow -- every label is a condition a pool has to satisfy, and a label no runner carries is a job that queues forever rather than an error.",
+      "description": "Extra `runs-on` labels the behavioral cases need, added to the base labels the workflow supplies. Name the hardware, not the pool: `mi300x` says what the skill requires and lands it on any runner registered with that label. A leg that asks for labels is treated as scoped, so it is also what the repo may hold behind a gate label and pay for from a separate environment. Keep the list as short as the runners allow -- every label is a condition a pool has to satisfy, and a label no runner carries is a job that queues forever rather than an error.",
       "examples": [["mi300x"]]
     }
   }

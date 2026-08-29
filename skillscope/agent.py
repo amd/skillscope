@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Agent staging and grading for behavior-mode eval runs.
+"""Agent staging and grading for behavioral eval runs.
 
 One skill is copied into an isolated temp workspace, one prompt is run to
 completion, and the result is graded against a case's expectations::
@@ -23,9 +23,9 @@ be repeated to discover the second thing wrong with it. The asserting
 variants (``logs_contains``, ``expects``, ...) are still here for skills whose
 ``evals/hooks.py`` needs to express a check the dataset format cannot.
 
-Two things are deliberately *not* graded here. Routing is not: behavior mode
+Two things are deliberately *not* graded here. Routing is not: behavioral
 installs a single skill, so "did the right one fire" is unanswerable and
-belongs to routing mode, which installs several at once. And nothing checks
+belongs to routing, which installs several at once. And nothing checks
 that the skill name appears in the transcript, which was the old stand-in for
 a routing assertion and only ever proved the staged skill was visible.
 """
@@ -46,7 +46,7 @@ from . import datasets
 DEFAULT_MODEL = os.environ.get("SKILLSCOPE_MODEL", "opus")
 DEFAULT_EFFORT = os.environ.get("SKILLSCOPE_EFFORT", "high")
 
-# Automated runs are pinned to opus: a behavior run makes real cloud calls
+# Automated runs are pinned to opus: a behavioral run makes real cloud calls
 # (agent run + LLM judge), so pinning the model keeps CI results comparable
 # between runs. No override -- the pin is non-negotiable in CI.
 AUTOMATED_MODEL = "opus"
@@ -490,7 +490,7 @@ class Agent:
         if self.workspace is None:
             raise RuntimeError("Agent.prompt() must be called inside a 'with' block")
 
-        _safe_print(f"\n[behavior] skill='{self.skill}' model='{self.model}': {text}")
+        _safe_print(f"\n[behavioral] skill='{self.skill}' model='{self.model}': {text}")
         events = _run_agent(text, self.workspace, self.model, self.effort)
         return Run(workspace=self.workspace, events=events, judge_model=self.model)
 

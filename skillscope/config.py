@@ -105,7 +105,7 @@ class Config:
     skill_files: tuple[str, ...] = ()
     skill_sections: tuple[str, ...] = ()
 
-    # `runs-on` labels for a behavior leg, and the platforms a skill runs on
+    # `runs-on` labels for a behavioral leg, and the platforms a skill runs on
     # when it does not say. A skill that asks for extra labels in its
     # evals/machine.yml gets `scoped_runner` as its base instead, because the
     # pool that has an MI300X in it is not the pool that answers to the

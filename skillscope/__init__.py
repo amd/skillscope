@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""skillscope: routing and behavior tests for agent skills.
+"""skillscope: routing and behavioral tests for agent skills.
 
 A skill is a description plus a body, and both can be wrong in ways nothing
 else catches: a description that never fires, or fires on its neighbour's work,

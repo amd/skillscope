@@ -5,29 +5,28 @@
 """The one entry point for skill evals.
 
 Every skill owns a single dataset at ``<skill>/evals/evals.json``. This runner
-reads those datasets and grades them in two modes:
+reads those datasets and grades them with three commands:
 
-  * ``routing``  -- installs the skills named by ``--routing-skills`` side by
+  * ``structural`` -- every skill folder, every dataset, and every reference
+    the skill's markdown makes. No agent, no tokens, instant.
+  * ``routing`` -- installs the skills named by ``--routing-skills`` side by
     side and checks that the right one fires (and that nothing fires when
     nothing should). Cheap, no hardware, and it pools those skills' prompts so
     each one's positives are the others' negatives. A repo with a single skill
     need not name it: there is only one room its skill can be in.
-  * ``behavior`` -- installs one skill, runs the prompt to completion, and
+  * ``behavioral`` -- installs one skill, runs the prompt to completion, and
     grades ``expected_behavior`` / ``unexpected_behavior`` / ``logs_contain``
     / ``files_exist``. Only runs evaluations that assert something beyond the
     routing decision.
 
 A skill may also ship ``<skill>/evals/extended_evals.json``, in the same format
-and under no coverage requirement of its own. Both modes include it by default;
-``--no-extended`` grades the required dataset alone.
+and under no coverage requirement of its own. Both graded commands include it
+by default; ``--no-extended`` grades the required dataset alone.
 
-The prompt is written once and both modes read it, which is the whole point:
-the alternative is a central routing prompt set plus a separate per-skill test
-file that re-asserts routing with a substring match on the transcript.
-
-Before either of them, and free: the structural checks, which grade the shape
-of a skill rather than an agent's behavior -- every skill folder, every
-dataset, and every reference the skill's markdown makes.
+The prompt is written once and both graded commands read it, which is the whole
+point: the alternative is a central routing prompt set plus a separate
+per-skill test file that re-asserts routing with a substring match on the
+transcript.
 
 Usage::
 
@@ -37,22 +36,21 @@ Usage::
     # the same, plus fetching every external URL the skills link to
     skillscope structural --external
 
-    # everything a skill owner needs before opening a pull request
-    skillscope run --skill serving-llms-on-epyc
+    # what a skill does once it has fired
+    skillscope behavioral --skill serving-llms-on-epyc
 
-    # what CI runs: a routing miss fails the run, like a behavior miss does
-    skillscope run --mode routing --routing-skills local-ai-use,tracelens \
-        --no-extended
-    skillscope run --mode behavior --skill local-ai-use --no-extended
+    # what CI runs: a routing miss fails the run, like a behavioral miss does
+    skillscope routing --routing-skills local-ai-use,tracelens --no-extended
+    skillscope behavioral --skill local-ai-use --no-extended
 
     # a routing run that reports its score instead of gating on it
-    skillscope run --mode routing --routing-skills all --min-accuracy 0
+    skillscope routing --routing-skills all --min-accuracy 0
 
     # a repo with one skill: the room is that skill, so nothing names it
-    skillscope run --mode routing
+    skillscope routing
 
     # one case, keeping the raw transcript
-    skillscope run --only qwen-on-mi300x --keep-logs eval-logs
+    skillscope routing --only qwen-on-mi300x --keep-logs eval-logs
 
     # what CI should run for a change
     git diff --name-only BASE HEAD | skillscope select --changed
@@ -95,13 +93,8 @@ def _selected_skills(names: str) -> list[str]:
 
 
 def _write_report(summary: dict, report: str, args: argparse.Namespace, label: str) -> Path:
-    # `--output` names one file, so it only applies when one mode is running;
-    # under `--mode both` the second report would otherwise clobber the first.
-    if args.output and args.mode != "both":
+    if args.output:
         output = Path(args.output)
-    elif args.output:
-        named = Path(args.output)
-        output = named.with_name(f"{named.stem}-{label}{named.suffix}")
     else:
         output = (
             config.active().root / RUNS_DIRNAME / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -265,12 +258,12 @@ def cmd_select(args: argparse.Namespace) -> int:
 
 
 def _empty_room(args: argparse.Namespace) -> None:
-    """A routing run was asked for with nobody in the room. Skip it, or refuse.
+    """A routing run was asked for with nobody in the room.
 
-    Two ways to get here. ``--routing-skills none`` is a repo saying it has no
-    routing question worth paying for, which is an answer: under the default
-    ``--mode both`` the behavior run goes ahead without it, and only asking for
-    the routing run outright is a contradiction worth stopping on.
+    ``--routing-skills none`` on this command is a contradiction: the command
+    is the routing run, and that flag empties the room. Skipping routing is
+    done by not invoking ``routing`` -- ``select`` still takes ``none`` so CI
+    can leave the job off the plan.
 
     Otherwise the repo has several skills with datasets and said nothing about
     which of them compete, and that is not a guess this harness makes: install
@@ -280,148 +273,149 @@ def _empty_room(args: argparse.Namespace) -> None:
     one room its skill can be in.
     """
     if config.wants_no_skills(args.routing_skills):
-        if args.mode == "routing":
-            raise SystemExit(
-                "error: --mode routing asks for a routing run and "
-                "`--routing-skills none` empties the room. Name the skills that "
-                "go in it, or drop --mode routing."
-            )
-        print("[routing] `--routing-skills none`: no routing run, as asked.")
-        return
+        raise SystemExit(
+            "error: `routing` asks for a routing run and "
+            "`--routing-skills none` empties the room. Name the skills that "
+            "go in it, or skip this command."
+        )
 
     available = ", ".join(datasets.skills_with_datasets()) or "(none)"
     raise SystemExit(
-        "error: routing mode needs the skills that go in the room: "
-        "`--routing-skills a,b`, `all` for every skill with a dataset, or "
-        "`none` to skip routing entirely. Only a repo with one skill gets a "
-        "default, because who a skill competes against is what its routing "
-        f"score means. Skills with a dataset here: {available}."
+        "error: `routing` needs the skills that go in the room: "
+        "`--routing-skills a,b` or `all` for every skill with a dataset. "
+        "Only a repo with one skill gets a default, because who a skill "
+        "competes against is what its routing score means. Skills with a "
+        f"dataset here: {available}."
     )
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def _prepare_graded_run(args: argparse.Namespace) -> list[str]:
+    """Structural checks, model pin, and API reachability. Shared by both graders."""
     _structural_or_exit()
-
     args.model = enforce_model_policy(args.model) or args.model
-    skills = _selected_skills(args.skill)
-
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
+    return _selected_skills(args.skill)
 
-    failed = False
+
+def cmd_routing(args: argparse.Namespace) -> int:
+    _prepare_graded_run(args)
     started = time.time()
 
-    wants_routing = args.mode in ("routing", "both")
-    routing_set = config.active().routing_set if wants_routing else {}
-    if wants_routing and not routing_set:
+    routing_set = config.active().routing_set
+    if not routing_set:
         _empty_room(args)
 
-    if routing_set:
-        if not args.routing_skills.strip():
-            only = next(iter(routing_set))
-            print(
-                f"[routing] --routing-skills was not given, and {only} is the "
-                "only skill here with a dataset, so it is the room."
-            )
-
-        # Pool the routing set's cases: skill Y's positives are skill X's
-        # negatives, which is where most of the false-trigger coverage comes
-        # from. --skill narrows what is *reported on*, not what is installed.
-        cases = datasets.routing_cases(list(routing_set), extended=args.extended)
-        if args.only:
-            cases = datasets.filter_cases(cases, args.only)
-        elif args.skill:
-            cases = datasets.filter_cases(cases, args.skill)
-
-        routing_config = routing.RoutingConfig(
-            model=args.model,
-            effort=args.effort,
-            timeout=args.timeout,
-            max_tool_calls=args.max_tool_calls,
-            max_inspection_calls=args.max_inspection_calls,
-            max_budget_usd=args.max_budget_usd,
-            keep_logs=args.keep_logs,
-            available_flags=routing.supported_flags(
-                ["--no-session-persistence", "--max-budget-usd"]
-            ),
-            isolate_config=routing.can_isolate_config(),
+    if not args.routing_skills.strip():
+        only = next(iter(routing_set))
+        print(
+            f"[routing] --routing-skills was not given, and {only} is the "
+            "only skill here with a dataset, so it is the room."
         )
-        if not routing_config.isolate_config:
-            print(
-                "[routing] warning: ANTHROPIC_API_KEY is not set, so the runner's "
-                "own config dir is used and any user-level skill in it joins the "
-                "room for every case. The report flags what was registered."
-            )
 
-        print(f"[routing] installed together: {', '.join(routing_set)}")
-        print(f"[routing] {len(cases)} cases, model={args.model}, jobs={args.jobs}")
-        if args.jobs > 1 and len(cases) > 1:
-            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-                outcomes = list(
-                    pool.map(lambda c: routing.run_case(c, routing_set, routing_config), cases)
-                )
-        else:
-            outcomes = [routing.run_case(case, routing_set, routing_config) for case in cases]
+    # Pool the routing set's cases: skill Y's positives are skill X's
+    # negatives, which is where most of the false-trigger coverage comes
+    # from. --skill narrows what is *reported on*, not what is installed.
+    cases = datasets.routing_cases(list(routing_set), extended=args.extended)
+    if args.only:
+        cases = datasets.filter_cases(cases, args.only)
+    elif args.skill:
+        cases = datasets.filter_cases(cases, args.skill)
 
-        summary = routing.summarize(
-            outcomes,
-            list(routing_set),
-            {
-                "model": args.model,
-                "effort": args.effort,
-                "skills": list(routing_set),
-                "extended": args.extended,
-                "wall_time_s": round(time.time() - started, 1),
-                "max_tool_calls": args.max_tool_calls,
-                "max_inspection_calls": args.max_inspection_calls,
-                "isolated_config_dir": routing_config.isolate_config,
-                "max_budget_usd": args.max_budget_usd,
-                "optional_cli_flags_used": sorted(routing_config.available_flags),
-                "github_run_id": os.environ.get("GITHUB_RUN_ID"),
-            },
+    routing_config = routing.RoutingConfig(
+        model=args.model,
+        effort=args.effort,
+        timeout=args.timeout,
+        max_tool_calls=args.max_tool_calls,
+        max_inspection_calls=args.max_inspection_calls,
+        max_budget_usd=args.max_budget_usd,
+        keep_logs=args.keep_logs,
+        available_flags=routing.supported_flags(
+            ["--no-session-persistence", "--max-budget-usd"]
+        ),
+        isolate_config=routing.can_isolate_config(),
+    )
+    if not routing_config.isolate_config:
+        print(
+            "[routing] warning: ANTHROPIC_API_KEY is not set, so the runner's "
+            "own config dir is used and any user-level skill in it joins the "
+            "room for every case. The report flags what was registered."
         )
-        _write_report(summary, routing.render_markdown(summary), args, "routing")
 
-        reason = routing_gate(summary["totals"], args.min_accuracy)
-        if reason:
-            print(f"[routing] {reason}", file=sys.stderr)
-            failed = True
-
-    if args.mode in ("behavior", "both"):
-        cases = []
-        for skill in skills:
-            cases.extend(datasets.load_dataset(skill, extended=args.extended))
-        if args.only:
-            cases = datasets.filter_cases(cases, args.only)
-        gradable = [c for c in cases if c.has_behavior]
-
-        if not gradable:
-            print(
-                "[behavior] no evaluation in the selected skill(s) asserts "
-                "anything beyond routing, so there is nothing to grade. Add "
-                "`expected_behavior` / `unexpected_behavior` / `logs_contain` / "
-                "`files_exist` to a triggering evaluation."
+    print(f"[routing] installed together: {', '.join(routing_set)}")
+    print(f"[routing] {len(cases)} cases, model={args.model}, jobs={args.jobs}")
+    if args.jobs > 1 and len(cases) > 1:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            outcomes = list(
+                pool.map(lambda c: routing.run_case(c, routing_set, routing_config), cases)
             )
-        else:
-            outcomes = behavior.run(skills, gradable, args.model, args.effort)
-            summary = behavior.summarize(
-                outcomes,
-                {
-                    "model": args.model,
-                    "effort": args.effort,
-                    "skills": skills,
-                    "extended": args.extended,
-                    "wall_time_s": round(time.time() - started, 1),
-                    "github_run_id": os.environ.get("GITHUB_RUN_ID"),
-                },
-            )
-            _write_report(summary, behavior.render_markdown(summary), args, "behavior")
-            if summary["totals"]["passed"] != summary["totals"]["cases"]:
-                failed = True
+    else:
+        outcomes = [routing.run_case(case, routing_set, routing_config) for case in cases]
 
-    return 1 if failed else 0
+    summary = routing.summarize(
+        outcomes,
+        list(routing_set),
+        {
+            "model": args.model,
+            "effort": args.effort,
+            "skills": list(routing_set),
+            "extended": args.extended,
+            "wall_time_s": round(time.time() - started, 1),
+            "max_tool_calls": args.max_tool_calls,
+            "max_inspection_calls": args.max_inspection_calls,
+            "isolated_config_dir": routing_config.isolate_config,
+            "max_budget_usd": args.max_budget_usd,
+            "optional_cli_flags_used": sorted(routing_config.available_flags),
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        },
+    )
+    _write_report(summary, routing.render_markdown(summary), args, "routing")
+
+    reason = routing_gate(summary["totals"], args.min_accuracy)
+    if reason:
+        print(f"[routing] {reason}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_behavioral(args: argparse.Namespace) -> int:
+    skills = _prepare_graded_run(args)
+    started = time.time()
+
+    cases = []
+    for skill in skills:
+        cases.extend(datasets.load_dataset(skill, extended=args.extended))
+    if args.only:
+        cases = datasets.filter_cases(cases, args.only)
+    gradable = [c for c in cases if c.has_behavior]
+
+    if not gradable:
+        print(
+            "[behavioral] no evaluation in the selected skill(s) asserts "
+            "anything beyond routing, so there is nothing to grade. Add "
+            "`expected_behavior` / `unexpected_behavior` / `logs_contain` / "
+            "`files_exist` to a triggering evaluation."
+        )
+        return 0
+
+    outcomes = behavior.run(skills, gradable, args.model, args.effort)
+    summary = behavior.summarize(
+        outcomes,
+        {
+            "model": args.model,
+            "effort": args.effort,
+            "skills": skills,
+            "extended": args.extended,
+            "wall_time_s": round(time.time() - started, 1),
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        },
+    )
+    _write_report(summary, behavior.render_markdown(summary), args, "behavioral")
+    if summary["totals"]["passed"] != summary["totals"]["cases"]:
+        return 1
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -453,30 +447,36 @@ def _add_docs_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_routing_skills_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--routing-skills",
-        default="",
-        metavar="A,B,C",
-        help=(
+def _add_routing_skills_argument(
+    parser: argparse.ArgumentParser, *, skip_allowed: bool = True
+) -> None:
+    if skip_allowed:
+        help_text = (
             "Skills to install side by side for the routing run: a list, `all` "
             "for every skill with a dataset, or `none` to skip routing. Left "
             "out, a repo with one skill runs that skill and a repo with "
             "several stops -- who a skill competes against is what its routing "
             "score means, so there is nothing sensible to assume."
-        ),
-    )
-
-
-def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
-    _add_skills_argument(parser)
-    _add_routing_skills_argument(parser)
+        )
+    else:
+        help_text = (
+            "Skills to install side by side: a list, or `all` for every skill "
+            "with a dataset. Left out, a repo with one skill runs that skill "
+            "and a repo with several stops -- who a skill competes against is "
+            "what its routing score means, so there is nothing sensible to "
+            "assume."
+        )
     parser.add_argument(
-        "--mode",
-        default="both",
-        choices=["routing", "behavior", "both"],
-        help="Which grader to run. Default: both.",
+        "--routing-skills",
+        default="",
+        metavar="A,B,C",
+        help=help_text,
     )
+
+
+def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags shared by the routing and behavioral commands."""
+    _add_skills_argument(parser)
     parser.add_argument(
         "--skill",
         default="",
@@ -502,6 +502,27 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["low", "medium", "high", "max"],
         help="Reasoning effort. Default: high.",
     )
+    parser.add_argument(
+        "--output",
+        default="",
+        help=(
+            "Write the JSON report here. Default: "
+            ".skillscope/runs/<command>-<timestamp>.json."
+        ),
+    )
+    parser.add_argument(
+        "--summary",
+        default="",
+        help="Write the markdown report here (defaults to $GITHUB_STEP_SUMMARY when set).",
+    )
+    parser.add_argument(
+        "--skip-preflight", action="store_true", help="Skip the API reachability check."
+    )
+
+
+def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_graded_arguments(parser)
+    _add_routing_skills_argument(parser, skip_allowed=False)
     parser.add_argument(
         "--jobs",
         type=int,
@@ -547,16 +568,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Per-case routing spend cap enforced by the CLI. 0 disables. Default: 0.75.",
     )
     parser.add_argument(
-        "--output",
-        default="",
-        help="Write the JSON report here. Default: .skillscope/runs/<mode>-<timestamp>.json.",
-    )
-    parser.add_argument(
-        "--summary",
-        default="",
-        help="Write the markdown report here (defaults to $GITHUB_STEP_SUMMARY when set).",
-    )
-    parser.add_argument(
         "--keep-logs", default="", help="Directory for raw per-case stream-json transcripts."
     )
     parser.add_argument(
@@ -568,9 +579,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "Default: 1 (every graded case has to be right). 0 reports the "
             "score without gating on it."
         ),
-    )
-    parser.add_argument(
-        "--skip-preflight", action="store_true", help="Skip the API reachability check."
     )
 
 
@@ -590,12 +598,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
-
-    run_parser = commands.add_parser(
-        "run", help="Run the evals.", description="Run routing and/or behavior evals."
-    )
-    _add_run_arguments(run_parser)
-    run_parser.set_defaults(handler=cmd_run)
 
     structural_parser = commands.add_parser(
         "structural",
@@ -659,6 +661,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     structural_parser.set_defaults(handler=cmd_structural)
 
+    routing_parser = commands.add_parser(
+        "routing",
+        help="Grade which skill fires, with several installed together.",
+        description=(
+            "Install the skills named by --routing-skills side by side and "
+            "grade the trigger decision for every evaluation those skills own. "
+            "A repo with one skill need not name it; a repo with several must, "
+            "because who is in the room is what the score means."
+        ),
+    )
+    _add_routing_arguments(routing_parser)
+    routing_parser.set_defaults(handler=cmd_routing)
+
+    behavioral_parser = commands.add_parser(
+        "behavioral",
+        help="Grade what a skill does once it has fired.",
+        description=(
+            "Install one skill, run the prompt to completion, and grade "
+            "expected_behavior / unexpected_behavior / logs_contain / "
+            "files_exist. Only evaluations that assert something beyond the "
+            "trigger decision run."
+        ),
+    )
+    _add_graded_arguments(behavioral_parser)
+    behavioral_parser.set_defaults(handler=cmd_behavioral)
+
     select_parser = commands.add_parser(
         "select",
         help="Emit the CI plan for a change, as JSON.",
@@ -710,7 +738,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         metavar="LABELS",
         help=(
-            "`runs-on` labels for a behavior leg, as a JSON array or a comma-"
+            "`runs-on` labels for a behavioral leg, as a JSON array or a comma-"
             f"separated list. Default: {','.join(config.DEFAULT_BEHAVIOR_RUNNER)}."
         ),
     )

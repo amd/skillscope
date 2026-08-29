@@ -44,7 +44,7 @@ labels and all.
 ``version`` is which build of the harness grades the leg, so a skill can pin
 the harness in its own dataset and have CI honor it (see
 ``datasets.pinned_version``). The top-level one covers everything that is not
-one skill's behavior run.
+one skill's behavioral run.
 
 ``extended`` echoes back whether the optional ``evals/extended_evals.json``
 datasets are in play, so the workflow decides that once and every job reads the
@@ -96,14 +96,14 @@ def owning_skill(path: str, skills: dict[str, Path], root: Path) -> str | None:
 
 
 def has_behavior_cases(skill: str, extended: bool = True) -> bool:
-    """Whether this skill asserts anything a behavior run could grade."""
+    """Whether this skill asserts anything a behavioral run could grade."""
     return any(
         case.has_behavior for case in datasets.load_dataset(skill, extended=extended)
     )
 
 
 def runs_on(plan: dict, os_name: str) -> list[str]:
-    """The ``runs-on`` labels for one leg of a skill's behavior matrix.
+    """The ``runs-on`` labels for one leg of a skill's behavioral matrix.
 
     Base labels from the workflow, then what the skill asked for, then the
     platform -- each added only once, so a pool registered with the platform in
@@ -195,7 +195,7 @@ def routing_needed(changed: set[str], extended: bool = True) -> bool:
 
 
 def select_from_changes(changed: set[str]) -> list[str]:
-    """Skills whose behavior tests a set of changed paths should re-run."""
+    """Skills whose behavioral tests should re-run for a set of changed paths."""
     available = datasets.skills_with_datasets()
     if changed & infra_paths():
         return available
@@ -222,7 +222,7 @@ def plan(
         "extended": extended,
         # Routing installs several skills in one session, so it runs at the
         # version this run is already using; a per-skill pin governs that
-        # skill's behavior leg.
+        # skill's behavioral leg.
         "version": datasets.pinned_version(),
         "default": [leg for leg in include if "environment" not in leg],
         "scoped": [leg for leg in include if "environment" in leg],
