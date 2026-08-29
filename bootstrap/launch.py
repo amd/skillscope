@@ -113,9 +113,17 @@ def main() -> int:
 
     stdin_path = _env("SKILLSCOPE_STDIN")
     stdin = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
-    # The harness echoes this into a CI plan, so every leg the plan schedules
-    # launches the build that planned it rather than re-resolving from scratch.
-    child_env = {**os.environ, "SKILLSCOPE_VERSION": version}
+    # `SKILLSCOPE_VERSION` because the harness echoes it into a CI plan, so
+    # every leg the plan schedules launches the build that planned it rather
+    # than re-resolving from scratch. `SKILLSCOPE_REPO` because the input may
+    # be relative -- `repo: fixture` -- and the child runs from the repo it
+    # names, where resolving that same relative path again lands a directory
+    # deeper.
+    child_env = {
+        **os.environ,
+        "SKILLSCOPE_VERSION": version,
+        "SKILLSCOPE_REPO": str(repo),
+    }
     try:
         proc = subprocess.Popen(
             cmd,
