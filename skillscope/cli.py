@@ -25,7 +25,7 @@ the alternative is a central routing prompt set plus a separate per-skill test
 file that re-asserts routing with a substring match on the transcript.
 
 Before either of them, and free: the structural checks, which grade the shape
-of a skill rather than an agent's behaviour -- every dataset, and every
+of a skill rather than an agent's behavior -- every dataset, and every
 reference the skill's markdown makes.
 
 Usage::

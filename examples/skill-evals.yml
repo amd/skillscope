@@ -63,6 +63,11 @@ jobs:
       doc_globs: "*.md,docs/**/*.md"
       external_references: true
       # excluded_urls: '^https://intranet\.example\.com/'
+      #
+      # The weekly run is here for link rot alone, so it skips the graded
+      # runs: `references` leaves the two free jobs and nothing that spends a
+      # token.
+      mode: ${{ github.event_name == 'schedule' && 'references' || 'both' }}
 
       # --- where behavior cases run ---
       #

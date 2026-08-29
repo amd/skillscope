@@ -8,7 +8,8 @@ cannot catch. A description that never fires makes the body irrelevant; a
 description that fires on its neighbour's work makes every skill around it
 worse.
 And a skill that routes perfectly can still do the job badly once it runs.
-skillscope grades all three, from one dataset per skill:
+skillscope grades all three, from one dataset per skill and the skill's own
+prose:
 
 * **structural** — every dataset, and every reference the skill's markdown
   makes. No agent, no tokens, instant, and so it runs on every change and
@@ -19,10 +20,10 @@ skillscope grades all three, from one dataset per skill:
 * **behavior** — installs one skill, runs the prompt to completion, and grades
   what the agent actually did.
 
-The prompt is written once and both modes read it. The alternative — a central
-routing prompt set plus a per-skill test file that re-asserts routing with a
-substring match on the transcript — is two things to maintain and one of them
-is a worse copy of the other.
+The prompt is written once and both graded modes read it. The alternative — a
+central routing prompt set plus a per-skill test file that re-asserts routing
+with a substring match on the transcript — is two things to maintain and one of
+them is a worse copy of the other.
 
 ## Quick start
 

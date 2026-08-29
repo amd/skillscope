@@ -122,7 +122,10 @@ on:
 
       # --- what to run this time -------------------------------------------
       mode:
-        description: "Which grader to run: both, routing, or behavior."
+        description: >-
+          Which grader to run: both, routing, behavior, or references -- the
+          last one skipping the graded runs entirely, for a schedule that is
+          only here to catch link rot.
         type: string
         default: both
       skills:
@@ -361,9 +364,9 @@ jobs:
           # `mode` narrows the pipeline after selection rather than before it,
           # so a dispatch cannot ask for a leg the change does not support.
           mode = os.environ.get("MODE", "both")
-          if mode == "behavior":
+          if mode in ("behavior", "references"):
               plan["routing"] = False
-          elif mode == "routing":
+          if mode in ("routing", "references"):
               plan["default"] = []
               plan["scoped"] = []
 
