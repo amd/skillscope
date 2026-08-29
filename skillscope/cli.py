@@ -24,10 +24,17 @@ The prompt is written once and both modes read it, which is the whole point:
 the alternative is a central routing prompt set plus a separate per-skill test
 file that re-asserts routing with a substring match on the transcript.
 
+Before either of them, and free: the structural checks, which grade the shape
+of a skill rather than an agent's behaviour -- every dataset, and every
+reference the skill's markdown makes.
+
 Usage::
 
     # structural checks only: no agent, no tokens, instant
     skillscope structural
+
+    # the same, plus fetching every external URL the skills link to
+    skillscope structural --external
 
     # everything a skill owner needs before opening a pull request
     skillscope run --skill serving-llms-on-epyc
@@ -57,7 +64,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, routing
+from . import behavior, config, datasets, references, routing
 from . import select as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -106,14 +113,25 @@ def _write_report(summary: dict, report: str, args: argparse.Namespace, label: s
     return output
 
 
-def _structural_or_exit() -> None:
-    """Fail before any tokens are spent if a dataset is malformed."""
-    errors = datasets.structural_errors()
+def _report_failures(errors: list[str]) -> None:
+    print("Structural checks failed:", file=sys.stderr)
+    for err in errors:
+        print(f"  - {err}", file=sys.stderr)
+
+
+def _structural_or_exit() -> list[references.Reference]:
+    """Fail before any tokens are spent if the skills are not in shape.
+
+    Datasets and internal references, which are the two halves that cost
+    nothing to check. External URLs are left out on purpose: they fail for
+    reasons that have nothing to do with the run being gated.
+    """
+    found = references.collect()
+    errors = datasets.structural_errors() + references.internal_errors(found)
     if errors:
-        print("Structural checks failed:", file=sys.stderr)
-        for err in errors:
-            print(f"  - {err}", file=sys.stderr)
+        _report_failures(errors)
         raise SystemExit(1)
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -122,8 +140,8 @@ def _structural_or_exit() -> None:
 
 
 def cmd_structural(args: argparse.Namespace) -> int:
-    """Structural checks over every dataset. No agent, no tokens."""
-    _structural_or_exit()
+    """Structural checks over every dataset and every reference in a skill."""
+    found = _structural_or_exit()
     skills = datasets.skills_with_datasets()
     # Extended datasets are checked regardless of --extended, so count them
     # here too rather than reporting fewer cases than were checked.
@@ -133,6 +151,27 @@ def cmd_structural(args: argparse.Namespace) -> int:
         f"[evals] OK: {len(cases)} case(s) across {len(skills)} skill(s) "
         f"plus {len(datasets.load_shared_negatives())} shared negative(s)."
     )
+    local = sum(1 for reference in found if reference.is_local)
+    external = references.external_urls(found)
+    print(
+        f"[evals] OK: {local} internal reference(s) across "
+        f"{len(references.markdown_files())} markdown file(s)."
+    )
+
+    if args.external:
+        errors = references.external_errors(
+            found, exclude=cfg.excluded_urls, jobs=args.jobs
+        )
+        if errors:
+            _report_failures(errors)
+            return 1
+        print(f"[evals] OK: {len(external)} external URL(s) answered.")
+    elif external:
+        print(
+            f"[evals] {len(external)} external URL(s) not fetched. "
+            "`--external` checks them over the network."
+        )
+
     print(f"[evals] repo: {cfg.root}  skills: {', '.join(cfg.skill_globs)}")
     return 0
 
@@ -338,6 +377,18 @@ def _add_skills_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_docs_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--docs",
+        default="",
+        metavar="GLOB[,GLOB]",
+        help=(
+            "Markdown outside the skills to check references in as well, such "
+            "as a repo's README or docs tree. Default: the skills alone."
+        ),
+    )
+
+
 def _add_routing_skills_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--routing-skills",
@@ -478,9 +529,45 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.set_defaults(handler=cmd_run)
 
     structural_parser = commands.add_parser(
-        "structural", help="Check every dataset structurally and exit."
+        "structural",
+        help="Check every dataset and every reference structurally, and exit.",
+        description=(
+            "Datasets, and the references the skills' markdown makes. Relative "
+            "paths and heading anchors are always checked; external URLs are "
+            "fetched only with --external."
+        ),
     )
     _add_skills_argument(structural_parser)
+    _add_docs_argument(structural_parser)
+    structural_parser.add_argument(
+        "--external",
+        action="store_true",
+        help=(
+            "Also fetch every external URL. Off by default: it needs the "
+            "network and fails for reasons unrelated to the change, so it "
+            "belongs somewhere it cannot block a merge."
+        ),
+    )
+    structural_parser.add_argument(
+        "--exclude-url",
+        dest="excluded_urls",
+        default="",
+        metavar="REGEX[,REGEX]",
+        help=(
+            "URLs --external leaves alone, as regexes. For hosts that are "
+            "auth-gated or that answer a runner's IP with a 403. Keep them "
+            "narrow, so real link rot keeps being caught."
+        ),
+    )
+    structural_parser.add_argument(
+        "--jobs",
+        type=int,
+        default=references.DEFAULT_JOBS,
+        help=(
+            "URLs to fetch concurrently under --external. Default: "
+            f"{references.DEFAULT_JOBS}."
+        ),
+    )
     structural_parser.set_defaults(handler=cmd_structural)
 
     select_parser = commands.add_parser(
@@ -617,6 +704,8 @@ def _configure(args: argparse.Namespace) -> None:
             "skills",
             "routing_skills",
             "infra_paths",
+            "docs",
+            "excluded_urls",
             "behavior_runner",
             "behavior_os",
             "scoped_runner",

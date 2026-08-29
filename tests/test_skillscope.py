@@ -22,10 +22,11 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from skillscope import agent, behavior, config, datasets, routing
+from skillscope import agent, behavior, cli, config, datasets, references, routing
 from skillscope import select as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY, VERSION_KEY
 
@@ -936,6 +937,266 @@ class TestWholeRepoStructure(unittest.TestCase):
         cases, errors = parse(template, skill="alpha")
         self.assertEqual(errors, [])
         self.assertEqual(datasets.tier0_errors("alpha", cases), [])
+
+
+def targets(text: str) -> list[str]:
+    """Every reference the extractor finds in one markdown document."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.md"
+        path.write_text(text, encoding="utf-8")
+        return [reference.target for reference in references.collect([path])]
+
+
+class TestReferenceExtraction(unittest.TestCase):
+    """What counts as a reference, and what is only a picture of one."""
+
+    def test_every_way_markdown_spells_a_link(self) -> None:
+        found = targets(
+            "[inline](./a.md) and ![image](img/b.png)\n"
+            '[titled](./c.md "why")\n'
+            "[spaced](<./d e.md>)\n"
+            "<https://example.com/auto>\n"
+            'Raw <a href="./f.md">html</a> and <img src="g.png">\n'
+            "Bare https://example.com/bare in a sentence.\n"
+            "[style][ref]\n"
+            "\n"
+            "[ref]: ./h.md\n"
+        )
+        self.assertEqual(
+            sorted(found),
+            sorted(
+                [
+                    "./a.md",
+                    "img/b.png",
+                    "./c.md",
+                    "./d e.md",
+                    "https://example.com/auto",
+                    "./f.md",
+                    "g.png",
+                    "https://example.com/bare",
+                    "./h.md",
+                ]
+            ),
+        )
+
+    def test_code_and_comments_are_illustrations_not_promises(self) -> None:
+        # A link in a code sample is showing you what a link looks like; a
+        # commented-out one was deliberately taken out of the document.
+        found = targets(
+            "```markdown\n[fenced](./fenced.md)\n```\n"
+            "~~~\n[tilde](./tilde.md)\n~~~\n"
+            "Inline `[code](./code.md)` span.\n"
+            "<!-- [comment](./comment.md) -->\n"
+            "<!--\n[multi](./multi.md)\n-->\n"
+            "[real](./real.md)\n"
+        )
+        self.assertEqual(found, ["./real.md"])
+
+    def test_a_reference_remembers_where_it_was_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.md"
+            path.write_text("first\n\n[link](./a.md)\n", encoding="utf-8")
+            reference = references.collect([path])[0]
+        self.assertEqual((reference.source, reference.line), (path, 3))
+
+
+class TestAnchors(unittest.TestCase):
+    """Heading slugs, by the rules a repository host renders them with."""
+
+    def test_headings_become_the_anchors_they_render_as(self) -> None:
+        found = references.anchors(
+            "# Title Here\n"
+            "## Punctuation: it's dropped!\n"
+            "### `code` in a heading\n"
+            "#### [linked](https://example.com) heading\n"
+            '<a id="hand-written"></a>\n'
+        )
+        self.assertEqual(
+            found,
+            {
+                "title-here",
+                "punctuation-its-dropped",
+                "code-in-a-heading",
+                "linked-heading",
+                "hand-written",
+            },
+        )
+
+    def test_a_repeated_heading_is_suffixed(self) -> None:
+        self.assertEqual(references.anchors("## Dup\n## Dup\n## Dup\n"), {"dup", "dup-1", "dup-2"})
+
+    def test_a_heading_inside_a_fence_is_a_comment_not_a_heading(self) -> None:
+        self.assertEqual(references.anchors("```\n# Shell Comment\n```\n"), set())
+
+
+class TestInternalReferences(unittest.TestCase):
+    """Relative paths and anchors, resolved against the repo under test."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill("demo", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+
+    def write(self, relative: str, text: str) -> Path:
+        path = self.folder / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def errors(self) -> list[str]:
+        return references.internal_errors(references.collect())
+
+    def test_a_link_to_a_file_that_exists_is_fine(self) -> None:
+        self.write("reference.md", "# Reference\n")
+        self.write("scripts/detect.py", "print('hi')\n")
+        self.write("SKILL.md", "[ref](./reference.md) [script](scripts/detect.py) [dir](scripts)\n")
+        self.assertEqual(self.errors(), [])
+
+    def test_a_link_to_a_file_that_does_not_exist_is_reported(self) -> None:
+        self.write("SKILL.md", "\n[gone](./reference.md)\n")
+        errors = self.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("SKILL.md:2", errors[0])
+        self.assertIn("`./reference.md`", errors[0])
+
+    def test_an_anchor_is_checked_against_the_file_it_points_into(self) -> None:
+        self.write("reference.md", "# Reference\n\n## Known Section\n")
+        self.write(
+            "SKILL.md",
+            "# Demo\n\n## Local Section\n\n"
+            "[here](#local-section) [there](./reference.md#known-section)\n"
+            "[nowhere](#missing) [neither](./reference.md#missing)\n",
+        )
+        errors = self.errors()
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(all("#missing" in error for error in errors))
+
+    def test_a_fragment_on_something_that_is_not_markdown_is_left_alone(self) -> None:
+        # `#L20` is rendered by the host out of the file's line numbers, and
+        # nothing in the file declares it.
+        self.write("scripts/detect.py", "print('hi')\n")
+        self.write("SKILL.md", "[line](scripts/detect.py#L1)\n")
+        self.assertEqual(self.errors(), [])
+
+    def test_root_relative_links_resolve_from_the_repo_root(self) -> None:
+        self.write("SKILL.md", "[ok](/skills/demo/SKILL.md) [no](/skills/demo/gone.md)\n")
+        errors = self.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("/skills/demo/gone.md", errors[0])
+
+    def test_percent_encoding_is_decoded_before_the_file_is_looked_for(self) -> None:
+        self.write("a file.md", "# Spaced\n")
+        self.write("SKILL.md", "[spaced](./a%20file.md)\n")
+        self.assertEqual(self.errors(), [])
+
+    def test_addresses_and_urls_are_not_paths(self) -> None:
+        self.write(
+            "SKILL.md",
+            "[mail](mailto:someone@example.com) [call](tel:+1234) "
+            "[web](https://example.com/nope)\n",
+        )
+        self.assertEqual(self.errors(), [])
+
+    def test_only_skill_markdown_is_read_until_docs_says_otherwise(self) -> None:
+        (self.repo.root / "README.md").write_text("[gone](./nowhere.md)\n", encoding="utf-8")
+        self.assertEqual(self.errors(), [])
+        self.repo.reactivate(docs="*.md")
+        errors = self.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("README.md:1", errors[0])
+
+    def test_a_broken_reference_stops_a_run_before_it_spends_anything(self) -> None:
+        self.write("SKILL.md", "[gone](./reference.md)\n")
+        with self.assertRaises(SystemExit):
+            cli._structural_or_exit()
+
+
+class TestExternalReferences(unittest.TestCase):
+    """Fetching URLs: which ones, how the answer is judged, and what is said."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill("demo", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+
+    def markdown(self, text: str) -> list:
+        (self.folder / "SKILL.md").write_text(text, encoding="utf-8")
+        return references.collect()
+
+    def test_only_external_urls_are_fetched_and_each_one_only_once(self) -> None:
+        found = self.markdown(
+            "[a](https://example.com/page#one) [b](https://example.com/page#two)\n"
+            "[c](./local.md) [d](mailto:someone@example.com)\n"
+        )
+        asked: list[str] = []
+        references.external_errors(found, probe=lambda url: asked.append(url) or "")
+        self.assertEqual(asked, ["https://example.com/page"])
+
+    def test_an_unreachable_url_says_where_it_was_written(self) -> None:
+        found = self.markdown("line one\n[dead](https://example.com/gone)\n")
+        errors = references.external_errors(found, probe=lambda url: "HTTP 404")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("https://example.com/gone", errors[0])
+        self.assertIn("HTTP 404", errors[0])
+        self.assertIn("SKILL.md:2", errors[0])
+
+    def test_an_excluded_url_is_never_asked_about(self) -> None:
+        found = self.markdown(
+            "[gated](https://intranet.example.com/x) [open](https://example.com/y)\n"
+        )
+        asked: list[str] = []
+        errors = references.external_errors(
+            found,
+            exclude=[r"^https://intranet\.example\.com/"],
+            probe=lambda url: asked.append(url) or "HTTP 403",
+        )
+        self.assertEqual(asked, ["https://example.com/y"])
+        self.assertEqual(len(errors), 1, errors)
+
+
+class TestExternalProbe(unittest.TestCase):
+    """When an answer from a server counts as "the reference is fine"."""
+
+    URL = "https://example.com/thing"
+
+    def opener(self, **outcomes):
+        """A stand-in for urlopen answering per HTTP method."""
+
+        def open_url(request, timeout=None):
+            outcome = outcomes[request.get_method()]
+            if isinstance(outcome, Exception):
+                raise outcome
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = outcome
+            return response
+
+        return open_url
+
+    def probe(self, **outcomes) -> str:
+        with mock.patch("urllib.request.urlopen", self.opener(**outcomes)):
+            return references._probe(self.URL, timeout=1.0, retries=0)
+
+    def http_error(self, code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(self.URL, code, "nope", None, None)
+
+    def test_a_plain_success(self) -> None:
+        self.assertEqual(self.probe(HEAD=200), "")
+
+    def test_rate_limiting_means_the_host_is_there(self) -> None:
+        self.assertEqual(self.probe(HEAD=self.http_error(429)), "")
+
+    def test_a_refused_head_is_asked_again_as_a_get(self) -> None:
+        # Plenty of servers answer HEAD with 403 or 405 and the same URL with
+        # 200 on GET. That is a server preference, not link rot.
+        self.assertEqual(self.probe(HEAD=self.http_error(405), GET=200), "")
+
+    def test_a_url_nobody_serves(self) -> None:
+        detail = self.probe(HEAD=self.http_error(404), GET=self.http_error(404))
+        self.assertEqual(detail, "HTTP 404")
+
+    def test_a_host_that_does_not_resolve(self) -> None:
+        detail = self.probe(HEAD=urllib.error.URLError("Name or service not known"))
+        self.assertIn("Name or service not known", detail)
 
 
 class TestRoutingClassification(unittest.TestCase):
