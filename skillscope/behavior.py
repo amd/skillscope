@@ -2,13 +2,13 @@
 #
 # See LICENSE for license information.
 
-"""Behavior mode: once the skill has fired, does it do the job?
+"""Behavioral evals: once the skill has fired, does it do the job?
 
 One skill is installed, one prompt runs to completion, and what the agent
 actually did is graded against the case's ``expected_behavior`` /
 ``unexpected_behavior`` / ``logs_contain`` / ``files_exist``. Only evaluations
 that assert something beyond the routing decision run here; the trigger
-decision itself belongs to routing mode, which installs several skills at once.
+decision itself belongs to ``routing``, which installs several skills at once.
 
 The CLI lives in ``skillscope/cli.py``; this module is the engine.
 """
@@ -31,7 +31,7 @@ from .datasets import Case
 
 @dataclass
 class BehaviorOutcome:
-    """One behavior-mode case: what was asserted and what happened."""
+    """One behavioral case: what was asserted and what happened."""
 
     id: str
     skill: str
@@ -150,7 +150,7 @@ def run_case(
 
 
 def run(skills: list[str], cases: list[Case], model: str, effort: str) -> list[BehaviorOutcome]:
-    """Run every behavior case, grouped by skill so session setup happens once."""
+    """Run every behavioral case, grouped by skill so session setup happens once."""
     outcomes: list[BehaviorOutcome] = []
     for skill in skills:
         skill_cases = [c for c in cases if c.skill == skill and c.has_behavior]
@@ -162,10 +162,10 @@ def run(skills: list[str], cases: list[Case], model: str, effort: str) -> list[B
         cache_dir: Path | None = None
         if hooks is not None and hasattr(hooks, "setup_session"):
             cache_dir = Path(tempfile.mkdtemp(prefix=f"evalcache-{skill}-"))
-            print(f"[behavior] {skill}: running evals/hooks.py setup_session()", flush=True)
+            print(f"[behavioral] {skill}: running evals/hooks.py setup_session()", flush=True)
             ctx.update(hooks.setup_session(cache_dir) or {})
         try:
-            print(f"[behavior] {skill}: {len(skill_cases)} case(s)", flush=True)
+            print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
             for case in skill_cases:
                 outcomes.append(run_case(case, ctx, hooks, model, effort))
         finally:
@@ -202,7 +202,7 @@ def render_markdown(summary: dict) -> str:
     totals = summary["totals"]
     meta = summary["meta"]
     lines = [
-        "## Skill behavior",
+        "## Skill behavioral",
         "",
         f"**{totals['passed']}/{totals['cases']} cases passed** "
         f"({totals['checks_passed']}/{totals['checks']} individual expectations) "
@@ -220,7 +220,7 @@ def render_markdown(summary: dict) -> str:
     failures = [c for c in summary["cases"] if not c["passed"]]
     lines += ["", "### Unmet expectations", ""]
     if not failures:
-        lines.append("None. Every behavior case met every expectation.")
+        lines.append("None. Every behavioral case met every expectation.")
     else:
         lines += ["| Case | Kind | Expectation | Detail |", "| --- | --- | --- | --- |"]
         for case in failures:

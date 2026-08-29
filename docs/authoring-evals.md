@@ -125,12 +125,12 @@ A dataset may name the build of skillscope that grades it:
 ```
 
 Anything git can resolve — a tag, a branch, a commit. It governs **this skill's
-behavior run**, and it exists so the version that runs your prompts is bumped
+behavioral run**, and it exists so the version that runs your prompts is bumped
 in the same file, and the same review, as the prompts themselves.
 
 It does not govern routing, which installs several skills in one session and so
 cannot honor several pins at once; that runs at the `version` the workflow asks
-for. Leave the key out and your behavior run uses that version too, which is
+for. Leave the key out and your behavioral run uses that version too, which is
 the right answer for most skills.
 
 ## When JSON is not enough
@@ -139,7 +139,7 @@ Two optional files sit beside the dataset.
 
 ### `evals/machine.yml`
 
-Only for a skill whose behavior cases cannot run on the everyday runners on
+Only for a skill whose behavioral cases cannot run on the everyday runners on
 every platform. Both keys are optional:
 
 ```yaml
@@ -197,10 +197,10 @@ holds.
 ```bash
 skillscope structural                               # structure only: no agent, no tokens, instant
 skillscope structural --external                    # the same, plus fetching every URL
-skillscope run --mode behavior --skill <your-skill> # your skill, end to end
-skillscope run --mode routing --routing-skills <your-skill>,<a-neighbour>
-skillscope run --mode routing                       # in a repo with one skill, that skill is the room
-skillscope run --only <case-id> --keep-logs logs    # one case, keeping the transcript
+skillscope behavioral --skill <your-skill>          # your skill, end to end
+skillscope routing --routing-skills <your-skill>,<a-neighbour>
+skillscope routing                                  # in a repo with one skill, that skill is the room
+skillscope routing --only <case-id> --keep-logs logs # one case, keeping the transcript
 ```
 
 `structural` covers your skill's folder and its prose as well as its dataset.
@@ -213,7 +213,7 @@ which needs the network and so is asked for rather than assumed.
 Everything but `structural` needs the `claude` CLI authenticated, plus whatever
 your own cases need.
 
-A run exits non-zero on a failed behavior expectation and, because the routing
+A run exits non-zero on a failed behavioral expectation and, because the routing
 bar defaults to every graded case being right, on a prompt that reaches the
 wrong skill. `--min-accuracy 0` reports the routing score without holding it to
 that, which is worth having while you are still learning what your prompts

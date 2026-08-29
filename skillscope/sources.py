@@ -4,7 +4,7 @@
 
 """Where a skill's evals get the source tree of the repo that owns the skill.
 
-Some behavior cases need more than the skill folder: a fixture, a scoring
+Some behavioral cases need more than the skill folder: a fixture, a scoring
 script, or the product itself, installed. Those live in the repo the skill is
 authored in, and getting hold of that repo is this module's job rather than the
 hook's.

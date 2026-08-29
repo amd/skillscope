@@ -4,7 +4,7 @@ name: selftest
 #
 # Two halves. The unit suite guards the parts that decide whether a paid run is
 # trustworthy -- routing verdicts, activation detection, dataset rejection --
-# and runs on every platform a behavior leg can be scheduled on, because that
+# and runs on every platform a behavioral leg can be scheduled on, because that
 # is where the path handling breaks. The smoke test drives the real launcher
 # against a throwaway repo built in the job, which is the only way to find out
 # that action.yml, the version resolver, and the CLI still agree on their

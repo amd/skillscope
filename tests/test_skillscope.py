@@ -503,14 +503,14 @@ class TestASingleSkillIsItsOwnRoom(unittest.TestCase):
         self.repo.activate()  # registers the cleanup that restores the config
         cli._configure(
             cli.build_parser().parse_args(
-                ["--repo", str(self.repo.root), "run", "--mode", "routing"]
+                ["--repo", str(self.repo.root), "routing"]
             )
         )
         self.assertEqual(config.active().routing_skills, ("only-skill",))
 
 
 class TestARoutingRunWithNobodyInTheRoom(unittest.TestCase):
-    """What `run` does when the routing set comes out empty."""
+    """What `routing` does when the routing set comes out empty."""
 
     def setUp(self) -> None:
         self.repo = Repo(self)
@@ -519,27 +519,46 @@ class TestARoutingRunWithNobodyInTheRoom(unittest.TestCase):
         self.repo.activate()
 
     def args(self, *argv) -> argparse.Namespace:
-        return cli.build_parser().parse_args(["run", *argv])
+        return cli.build_parser().parse_args(["routing", *argv])
 
     def test_a_repo_with_a_choice_to_make_is_told_what_its_options_are(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            cli._empty_room(self.args("--mode", "routing"))
+            cli._empty_room(self.args())
         message = str(caught.exception)
-        for expected in ("all", "none", "one, two"):
+        for expected in ("all", "one, two"):
             self.assertIn(expected, message)
-
-    def test_none_skips_the_routing_run_rather_than_failing_it(self) -> None:
-        # `--mode both` still has a behavior run to get on with, and the repo
-        # said it did not want the other half.
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            cli._empty_room(self.args("--routing-skills", "none"))
-        self.assertIn("none", out.getvalue())
 
     def test_asking_for_routing_and_emptying_the_room_is_a_contradiction(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            cli._empty_room(self.args("--mode", "routing", "--routing-skills", "none"))
-        self.assertIn("--mode routing", str(caught.exception))
+            cli._empty_room(self.args("--routing-skills", "none"))
+        self.assertIn("--routing-skills none", str(caught.exception))
+
+
+class TestCommands(unittest.TestCase):
+    """The three graders are commands, not modes of run."""
+
+    def test_structural_routing_and_behavioral_are_commands(self) -> None:
+        parser = cli.build_parser()
+        for command in ("structural", "routing", "behavioral"):
+            with self.subTest(command):
+                self.assertEqual(parser.parse_args([command]).command, command)
+
+    def test_run_is_not_a_command(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(["run"])
+
+    def test_neither_grader_has_a_mode_flag(self) -> None:
+        for command in ("routing", "behavioral"):
+            with self.subTest(command):
+                self.assertFalse(hasattr(cli.build_parser().parse_args([command]), "mode"))
+
+    def test_behavioral_does_not_take_routing_flags(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(["behavioral", "--routing-skills", "all"])
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(["behavioral", "--min-accuracy", "0"])
 
 
 class TestHarnessVersionPin(unittest.TestCase):
@@ -852,7 +871,7 @@ class TestDatasetRejections(unittest.TestCase):
         self.assertTrue(any("non-empty array" in e for e in errors), errors)
 
     def test_a_non_triggering_evaluation_takes_a_prompt_and_nothing_else(self) -> None:
-        # No skill is ever loaded for these, so there is no behavior phase for
+        # No skill is ever loaded for these, so there is no behavioral phase for
         # an assertion to be graded in or a workspace to be staged into.
         for key, value in (
             ("expected_behavior", ["x"]),
@@ -867,7 +886,7 @@ class TestDatasetRejections(unittest.TestCase):
                     any(f"`{key}`" in e and TRIGGER_KEY in e for e in errors), errors
                 )
 
-    def test_a_non_triggering_evaluation_never_reaches_behavior_mode(self) -> None:
+    def test_a_non_triggering_evaluation_never_reaches_behavioral(self) -> None:
         cases, errors = parse(triggers_nothing(id="a", prompt="p", note="why"))
         self.assertEqual(errors, [])
         self.assertFalse(cases[0].has_behavior)
@@ -1496,7 +1515,7 @@ class TestRoutingGate(unittest.TestCase):
         return cli.routing_gate(self.totals(passed, graded, **extra), bar)
 
     def test_the_default_bar_is_every_graded_case(self) -> None:
-        self.assertEqual(cli.build_parser().parse_args(["run"]).min_accuracy, 1.0)
+        self.assertEqual(cli.build_parser().parse_args(["routing"]).min_accuracy, 1.0)
 
     def test_a_clean_sweep_passes(self) -> None:
         self.assertIsNone(self.gate(12, 12))

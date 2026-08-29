@@ -8,7 +8,7 @@ on:
   pull_request:
     paths:
       # A skill's description and prompts are the inputs to a routing decision,
-      # and its body is the input to a behavior run. Nothing else here matters,
+      # and its body is the input to a behavioral run. Nothing else here matters,
       # so nothing else pays for a run.
       - "skills/**"
       - "**/*.md"
@@ -82,7 +82,7 @@ jobs:
       # token.
       mode: ${{ github.event_name == 'schedule' && 'references' || 'both' }}
 
-      # --- where behavior cases run ---
+      # --- where behavioral cases run ---
       #
       # GitHub-hosted Linux is the default. A skill that needs particular
       # hardware asks for the label in its own evals/machine.yml; those legs
