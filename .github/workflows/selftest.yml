@@ -58,6 +58,21 @@ jobs:
           description: Does demonstrable things, for a test that needs a skill.
           ---
           EOF
+          cat > fixture/skills/demo-skill/skill-card.md <<'EOF'
+          # Skill Card
+
+          ## Description
+
+          Does demonstrable things.
+
+          ## Owner
+
+          The skillscope selftest.
+
+          ## License
+
+          MIT
+          EOF
           cat > fixture/skills/demo-skill/evals/evals.json <<'EOF'
           {
             "evaluations": [
@@ -74,11 +89,25 @@ jobs:
       # pull request tests the launcher and the payload it is about to change.
       # No `version`: the fixture pins nothing, which exercises the bottom rung
       # of the resolution ladder.
-      - name: Validate the fixture
+      - name: Check the fixture structurally
         uses: ./
         with:
-          command: validate
+          command: structural
+          # The card and its sections are a repo's own policy, so the fixture
+          # asks for them the way a repo with a governance card would.
+          args: --skill-files skill-card.md --skill-sections Description,Owner,License
           repo: fixture
+          source: .
+
+      # This repo has no skills, so what is left is its own prose -- which is
+      # exactly the half a harness for checking references should not be
+      # allowed to get wrong about itself. Offline, so nothing here depends on
+      # the network being polite today.
+      - name: Check this repo's own references
+        uses: ./
+        with:
+          command: structural
+          args: --docs '*.md,docs/**/*.md'
           source: .
 
       - name: Select runs for a change

@@ -100,14 +100,14 @@ hunting.
 
 The full field reference is
 [`skillscope/schema/evals.schema.json`](../skillscope/schema/evals.schema.json),
-enforced by `skillscope validate`.
+enforced by `skillscope structural`.
 
 ## A second dataset, for prompts consumers should not pay for
 
 A skill may ship `evals/extended_evals.json` beside the required one, in the
 same format. It carries no coverage bar and whether it runs is the caller's
 decision: `--extended` (the default) includes it, `--no-extended` grades
-`evals.json` alone. Either way it is structurally validated.
+`evals.json` alone. Either way it is structurally checked.
 
 This is where a product repo keeps the prompts it wants graded in its own CI
 without every consumer of its skills paying for them.
@@ -194,13 +194,21 @@ holds.
 ## Running them
 
 ```bash
-skillscope validate                                 # structure only: no agent, no tokens, instant
+skillscope structural                               # structure only: no agent, no tokens, instant
+skillscope structural --external                    # the same, plus fetching every URL
 skillscope run --mode behavior --skill <your-skill> # your skill, end to end
 skillscope run --mode routing --routing-skills <your-skill>,<a-neighbour>
 skillscope run --only <case-id> --keep-logs logs    # one case, keeping the transcript
 ```
 
-Everything but `validate` needs the `claude` CLI authenticated, plus whatever
+`structural` covers your skill's folder and its prose as well as its dataset.
+Your `SKILL.md` has to declare a `name` matching the folder and a
+`description`, both within the format's limits; every relative path and heading
+anchor in your markdown has to resolve, because a link the agent follows to
+nothing is a step it will improvise around. `--external` fetches the URLs too,
+which needs the network and so is asked for rather than assumed.
+
+Everything but `structural` needs the `claude` CLI authenticated, plus whatever
 your own cases need.
 
 A run exits non-zero on a failed behavior expectation and, because the routing

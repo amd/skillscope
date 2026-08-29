@@ -22,10 +22,20 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from skillscope import agent, behavior, cli, config, datasets, routing
+from skillscope import (
+    agent,
+    behavior,
+    cli,
+    config,
+    datasets,
+    references,
+    routing,
+    structure,
+)
 from skillscope import select as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY, VERSION_KEY
 
@@ -124,7 +134,7 @@ class Repo:
             path.write_text(text, encoding="utf-8")
         # Skills added after activate() should be visible without re-activating:
         # the config resolves its globs on every read, and several tests grow
-        # the repo mid-test to see what validation makes of the result.
+        # the repo mid-test to see what the structural checks make of the result.
         return folder
 
     def activate(self, **settings) -> config.Config:
@@ -304,13 +314,13 @@ class TestMachineRejections(unittest.TestCase):
         # Saying nothing about platforms still means the repo's platforms.
         self.assertEqual(labelled["os"], ["Linux", "Windows"])
 
-    def test_validation_reports_a_broken_machine_file_rather_than_raising(self) -> None:
-        # `skillscope validate` has to survey every skill, so one bad file is a
-        # reported error, not an abandoned run.
+    def test_structural_checks_report_a_broken_machine_file_rather_than_raising(self) -> None:
+        # `skillscope structural` has to survey every skill, so one bad file is
+        # a reported error, not an abandoned run.
         (self.repo.root / "skills" / "demo-skill" / "evals" / "machine.yml").write_text(
             "labels: nope\n", encoding="utf-8"
         )
-        self.assertTrue(any("`labels`" in e for e in datasets.validate_all()))
+        self.assertTrue(any("`labels`" in e for e in datasets.structural_errors()))
 
 
 class TestConfig(unittest.TestCase):
@@ -856,8 +866,8 @@ class TestExtendedDataset(unittest.TestCase):
         self.assertTrue(any("`id`" in e for e in errors), errors)
 
 
-class TestWholeRepoValidation(unittest.TestCase):
-    """What `skillscope validate` guarantees about a repo, whichever repo it is."""
+class TestWholeRepoStructure(unittest.TestCase):
+    """What `skillscope structural` guarantees about a repo, whichever repo it is."""
 
     def setUp(self) -> None:
         self.repo = Repo(self)
@@ -871,17 +881,17 @@ class TestWholeRepoValidation(unittest.TestCase):
         self.repo.skill("beta", dataset=tier0_dataset("beta"))
         self.repo.activate(routing_skills="alpha,beta")
 
-    def test_a_healthy_repo_validates_clean(self) -> None:
-        self.assertEqual(datasets.validate_all(), [])
+    def test_a_healthy_repo_checks_out_clean(self) -> None:
+        self.assertEqual(datasets.structural_errors(), [])
 
-    def test_a_skill_without_a_dataset_fails_validation(self) -> None:
+    def test_a_skill_without_a_dataset_fails_the_structural_checks(self) -> None:
         self.repo.skill("undocumented")
-        self.assertTrue(any("undocumented" in e for e in datasets.validate_all()))
+        self.assertTrue(any("undocumented" in e for e in datasets.structural_errors()))
 
     def test_duplicate_ids_across_skills_are_caught(self) -> None:
         # Ids are repo-wide because routing pools every listed skill's cases.
         self.repo.skill("gamma", dataset=tier0_dataset("alpha"))
-        self.assertTrue(any("duplicate case id" in e for e in datasets.validate_all()))
+        self.assertTrue(any("duplicate case id" in e for e in datasets.structural_errors()))
 
     def test_a_workspace_pointing_nowhere_is_caught(self) -> None:
         dataset = tier0_dataset("delta")
@@ -895,7 +905,7 @@ class TestWholeRepoValidation(unittest.TestCase):
             }
         )
         self.repo.skill("delta", dataset=dataset)
-        self.assertTrue(any("`workspace`" in e for e in datasets.validate_all()))
+        self.assertTrue(any("`workspace`" in e for e in datasets.structural_errors()))
 
     def test_every_skill_with_a_dataset_is_a_declared_skill(self) -> None:
         self.assertEqual(
@@ -936,6 +946,413 @@ class TestWholeRepoValidation(unittest.TestCase):
         cases, errors = parse(template, skill="alpha")
         self.assertEqual(errors, [])
         self.assertEqual(datasets.tier0_errors("alpha", cases), [])
+
+
+class TestSkillStructure(unittest.TestCase):
+    """The skill folder itself: what the format requires, and what a repo adds."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+
+    def write(self, text: str, skill: str = "demo-skill") -> None:
+        (self.repo.root / "skills" / skill / "SKILL.md").write_text(
+            text, encoding="utf-8"
+        )
+
+    def declares(self, frontmatter: str, body: str = "\n# Demo\n") -> None:
+        self.write(f"---\n{frontmatter}\n---\n{body}")
+
+    def test_a_skill_in_shape_reports_nothing(self) -> None:
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_skill_md_without_frontmatter_is_never_loaded_by_an_agent(self) -> None:
+        self.write("# Demo\n\nNo frontmatter at all.\n")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("frontmatter", errors[0])
+
+    def test_frontmatter_that_is_not_yaml_is_reported_as_such(self) -> None:
+        self.declares("name: [demo-skill\ndescription: broken")
+        self.assertTrue(any("not valid YAML" in e for e in structure.errors()))
+
+    def test_frontmatter_that_is_not_a_mapping_is_reported(self) -> None:
+        self.declares("- demo-skill\n- a list, not a mapping")
+        self.assertTrue(any("must be a mapping" in e for e in structure.errors()))
+
+    def test_a_missing_name_or_description_is_reported_separately(self) -> None:
+        self.declares("summary: neither field is here")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(any("`name`" in e for e in errors))
+        self.assertTrue(any("`description`" in e for e in errors))
+
+    def test_a_name_that_disagrees_with_the_folder_is_reported(self) -> None:
+        # The folder name is the skill's identity in its dataset, in a routing
+        # verdict, and in the report, so a frontmatter name that differs makes
+        # every one of those about a skill that does not exist.
+        self.declares("name: other-skill\ndescription: Does things.")
+        self.assertTrue(any("`demo-skill`" in e for e in structure.errors()))
+
+    def test_a_name_that_is_not_lowercase_with_hyphens_is_reported(self) -> None:
+        self.repo.skill("Demo_Skill", dataset=tier0_dataset("odd"))
+        self.assertTrue(
+            any("lowercase-with-hyphens" in e for e in structure.errors())
+        )
+
+    def test_a_name_longer_than_the_format_allows_is_reported(self) -> None:
+        long_name = "a" * (structure.MAX_NAME_LENGTH + 1)
+        self.repo.skill(long_name, dataset=tier0_dataset("long"))
+        self.assertTrue(
+            any(f"{len(long_name)} characters" in e for e in structure.errors())
+        )
+
+    def test_a_name_claiming_a_reserved_word_is_reported(self) -> None:
+        self.repo.skill("claude-helper", dataset=tier0_dataset("helper"))
+        self.assertTrue(any("`claude`" in e for e in structure.errors()))
+
+    def test_a_description_longer_than_the_format_allows_is_reported(self) -> None:
+        self.declares(
+            f"name: demo-skill\ndescription: {'d' * (structure.MAX_DESCRIPTION_LENGTH + 1)}"
+        )
+        self.assertTrue(any("`description` is" in e for e in structure.errors()))
+
+    def test_a_body_past_the_limit_is_reference_material_in_the_wrong_file(self) -> None:
+        lines = "\n".join(f"line {i}" for i in range(structure.MAX_BODY_LINES + 1))
+        self.declares("name: demo-skill\ndescription: Does things.", f"\n{lines}\n")
+        self.assertTrue(any("sibling files" in e for e in structure.errors()))
+
+    def test_blank_lines_around_the_body_do_not_count_against_it(self) -> None:
+        lines = "\n".join(f"line {i}" for i in range(structure.MAX_BODY_LINES))
+        self.declares("name: demo-skill\ndescription: Does things.", f"\n\n{lines}\n\n\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_globbed_directory_with_no_skill_file_is_reported(self) -> None:
+        # It is not a skill, so nothing grades it, routes it, or reports on it.
+        # Silence there is the failure: either the file is missing or the glob
+        # is too wide, and both are worth one line.
+        (self.repo.root / "skills" / "notes").mkdir(parents=True)
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("skills/notes", errors[0])
+
+    def test_a_repo_that_requires_nothing_extra_requires_nothing_extra(self) -> None:
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_file_the_repo_requires_of_every_skill_has_to_be_there(self) -> None:
+        self.repo.reactivate(skill_files="skill-card.md")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("skill-card.md", errors[0])
+
+    def test_a_required_card_has_to_carry_the_sections_it_is_for(self) -> None:
+        self.repo.reactivate(
+            skill_files="skill-card.md", skill_sections="Description,Owner,License"
+        )
+        (self.folder / "skill-card.md").write_text(
+            "# Skill Card\n\n## Description\n\nWhat it does.\n\n## Owner\n\n", encoding="utf-8"
+        )
+        errors = structure.errors()
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(any("`## Owner` section is empty" in e for e in errors))
+        self.assertTrue(any("no `## License` section" in e for e in errors))
+
+    def test_a_complete_card_passes(self) -> None:
+        self.repo.reactivate(
+            skill_files="skill-card.md", skill_sections="Description,Owner,License"
+        )
+        (self.folder / "skill-card.md").write_text(
+            "# Skill Card\n\n## Description\n\nWhat it does.\n\n"
+            "## Owner\n\nA team.\n\n## License\n\nMIT\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_required_file_that_is_not_markdown_only_has_to_exist(self) -> None:
+        self.repo.reactivate(
+            skill_files="scripts/detect.py", skill_sections="Description"
+        )
+        path = self.folder / "scripts" / "detect.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("print('hi')\n", encoding="utf-8")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_malformed_skill_stops_a_run_before_it_spends_anything(self) -> None:
+        self.declares("name: demo-skill")
+        with self.assertRaises(SystemExit):
+            cli._structural_or_exit()
+
+
+def targets(text: str) -> list[str]:
+    """Every reference the extractor finds in one markdown document."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "doc.md"
+        path.write_text(text, encoding="utf-8")
+        return [reference.target for reference in references.collect([path])]
+
+
+class TestReferenceExtraction(unittest.TestCase):
+    """What counts as a reference, and what is only a picture of one."""
+
+    def test_every_way_markdown_spells_a_link(self) -> None:
+        found = targets(
+            "[inline](./a.md) and ![image](img/b.png)\n"
+            '[titled](./c.md "why")\n'
+            "[spaced](<./d e.md>)\n"
+            "<https://example.com/auto>\n"
+            'Raw <a href="./f.md">html</a> and <img src="g.png">\n'
+            "Bare https://example.com/bare in a sentence.\n"
+            "[style][ref]\n"
+            "\n"
+            "[ref]: ./h.md\n"
+        )
+        self.assertEqual(
+            sorted(found),
+            sorted(
+                [
+                    "./a.md",
+                    "img/b.png",
+                    "./c.md",
+                    "./d e.md",
+                    "https://example.com/auto",
+                    "./f.md",
+                    "g.png",
+                    "https://example.com/bare",
+                    "./h.md",
+                ]
+            ),
+        )
+
+    def test_code_and_comments_are_illustrations_not_promises(self) -> None:
+        # A link in a code sample is showing you what a link looks like; a
+        # commented-out one was deliberately taken out of the document.
+        found = targets(
+            "```markdown\n[fenced](./fenced.md)\n```\n"
+            "~~~\n[tilde](./tilde.md)\n~~~\n"
+            "Inline `[code](./code.md)` span.\n"
+            "<!-- [comment](./comment.md) -->\n"
+            "<!--\n[multi](./multi.md)\n-->\n"
+            "[real](./real.md)\n"
+        )
+        self.assertEqual(found, ["./real.md"])
+
+    def test_a_reference_remembers_where_it_was_written(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "doc.md"
+            path.write_text("first\n\n[link](./a.md)\n", encoding="utf-8")
+            reference = references.collect([path])[0]
+        self.assertEqual((reference.source, reference.line), (path, 3))
+
+
+class TestAnchors(unittest.TestCase):
+    """Heading slugs, by the rules a repository host renders them with."""
+
+    def test_headings_become_the_anchors_they_render_as(self) -> None:
+        found = references.anchors(
+            "# Title Here\n"
+            "## Punctuation: it's dropped!\n"
+            "### `code` in a heading\n"
+            "#### [linked](https://example.com) heading\n"
+            '<a id="hand-written"></a>\n'
+        )
+        self.assertEqual(
+            found,
+            {
+                "title-here",
+                "punctuation-its-dropped",
+                "code-in-a-heading",
+                "linked-heading",
+                "hand-written",
+            },
+        )
+
+    def test_a_repeated_heading_is_suffixed(self) -> None:
+        self.assertEqual(references.anchors("## Dup\n## Dup\n## Dup\n"), {"dup", "dup-1", "dup-2"})
+
+    def test_a_heading_inside_a_fence_is_a_comment_not_a_heading(self) -> None:
+        self.assertEqual(references.anchors("```\n# Shell Comment\n```\n"), set())
+
+
+class TestInternalReferences(unittest.TestCase):
+    """Relative paths and anchors, resolved against the repo under test."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill("demo", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+
+    def write(self, relative: str, text: str) -> Path:
+        path = self.folder / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def errors(self) -> list[str]:
+        return references.internal_errors(references.collect())
+
+    def test_a_link_to_a_file_that_exists_is_fine(self) -> None:
+        self.write("reference.md", "# Reference\n")
+        self.write("scripts/detect.py", "print('hi')\n")
+        self.write("SKILL.md", "[ref](./reference.md) [script](scripts/detect.py) [dir](scripts)\n")
+        self.assertEqual(self.errors(), [])
+
+    def test_a_link_to_a_file_that_does_not_exist_is_reported(self) -> None:
+        self.write("SKILL.md", "\n[gone](./reference.md)\n")
+        errors = self.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("SKILL.md:2", errors[0])
+        self.assertIn("`./reference.md`", errors[0])
+
+    def test_an_anchor_is_checked_against_the_file_it_points_into(self) -> None:
+        self.write("reference.md", "# Reference\n\n## Known Section\n")
+        self.write(
+            "SKILL.md",
+            "# Demo\n\n## Local Section\n\n"
+            "[here](#local-section) [there](./reference.md#known-section)\n"
+            "[nowhere](#missing) [neither](./reference.md#missing)\n",
+        )
+        errors = self.errors()
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(all("#missing" in error for error in errors))
+
+    def test_a_fragment_on_something_that_is_not_markdown_is_left_alone(self) -> None:
+        # `#L20` is rendered by the host out of the file's line numbers, and
+        # nothing in the file declares it.
+        self.write("scripts/detect.py", "print('hi')\n")
+        self.write("SKILL.md", "[line](scripts/detect.py#L1)\n")
+        self.assertEqual(self.errors(), [])
+
+    def test_root_relative_links_resolve_from_the_repo_root(self) -> None:
+        self.write("SKILL.md", "[ok](/skills/demo/SKILL.md) [no](/skills/demo/gone.md)\n")
+        errors = self.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("/skills/demo/gone.md", errors[0])
+
+    def test_percent_encoding_is_decoded_before_the_file_is_looked_for(self) -> None:
+        self.write("a file.md", "# Spaced\n")
+        self.write("SKILL.md", "[spaced](./a%20file.md)\n")
+        self.assertEqual(self.errors(), [])
+
+    def test_addresses_and_urls_are_not_paths(self) -> None:
+        self.write(
+            "SKILL.md",
+            "[mail](mailto:someone@example.com) [call](tel:+1234) "
+            "[web](https://example.com/nope)\n",
+        )
+        self.assertEqual(self.errors(), [])
+
+    def test_only_skill_markdown_is_read_until_docs_says_otherwise(self) -> None:
+        (self.repo.root / "README.md").write_text("[gone](./nowhere.md)\n", encoding="utf-8")
+        self.assertEqual(self.errors(), [])
+        self.repo.reactivate(docs="*.md")
+        errors = self.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("README.md:1", errors[0])
+
+    def test_a_broken_reference_stops_a_run_before_it_spends_anything(self) -> None:
+        self.write("SKILL.md", "[gone](./reference.md)\n")
+        with self.assertRaises(SystemExit):
+            cli._structural_or_exit()
+
+
+class TestExternalReferences(unittest.TestCase):
+    """Fetching URLs: which ones, how the answer is judged, and what is said."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill("demo", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+
+    def markdown(self, text: str) -> list:
+        (self.folder / "SKILL.md").write_text(text, encoding="utf-8")
+        return references.collect()
+
+    def test_only_external_urls_are_fetched_and_each_one_only_once(self) -> None:
+        found = self.markdown(
+            "[a](https://example.com/page#one) [b](https://example.com/page#two)\n"
+            "[c](./local.md) [d](mailto:someone@example.com)\n"
+        )
+        asked: list[str] = []
+        references.external_errors(found, probe=lambda url: asked.append(url) or "")
+        self.assertEqual(asked, ["https://example.com/page"])
+
+    def test_an_unreachable_url_says_where_it_was_written(self) -> None:
+        found = self.markdown("line one\n[dead](https://example.com/gone)\n")
+        errors = references.external_errors(found, probe=lambda url: "HTTP 404")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("https://example.com/gone", errors[0])
+        self.assertIn("HTTP 404", errors[0])
+        self.assertIn("SKILL.md:2", errors[0])
+
+    def test_an_excluded_url_is_never_asked_about(self) -> None:
+        found = self.markdown(
+            "[gated](https://intranet.example.com/x) [open](https://example.com/y)\n"
+        )
+        asked: list[str] = []
+        errors = references.external_errors(
+            found,
+            exclude=[r"^https://intranet\.example\.com/"],
+            probe=lambda url: asked.append(url) or "HTTP 403",
+        )
+        self.assertEqual(asked, ["https://example.com/y"])
+        self.assertEqual(len(errors), 1, errors)
+
+
+class TestExternalProbe(unittest.TestCase):
+    """When an answer from a server counts as "the reference is fine"."""
+
+    URL = "https://example.com/thing"
+
+    def opener(self, **outcomes):
+        """A stand-in for urlopen answering per HTTP method."""
+
+        def open_url(request, timeout=None):
+            outcome = outcomes[request.get_method()]
+            if isinstance(outcome, Exception):
+                raise outcome
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = outcome
+            return response
+
+        return open_url
+
+    def probe(self, **outcomes) -> str:
+        with mock.patch("urllib.request.urlopen", self.opener(**outcomes)):
+            return references._probe(self.URL, timeout=1.0, retries=0)
+
+    def http_error(self, code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(self.URL, code, "nope", None, None)
+
+    def test_a_plain_success(self) -> None:
+        self.assertEqual(self.probe(HEAD=200), "")
+
+    def test_rate_limiting_means_the_host_is_there(self) -> None:
+        self.assertEqual(self.probe(HEAD=self.http_error(429)), "")
+
+    def test_a_refused_head_is_asked_again_as_a_get(self) -> None:
+        # Plenty of servers answer HEAD with 403 or 405 and the same URL with
+        # 200 on GET. That is a server preference, not link rot.
+        self.assertEqual(self.probe(HEAD=self.http_error(405), GET=200), "")
+
+    def test_a_head_that_never_comes_back_is_asked_again_as_a_get(self) -> None:
+        # The failure that matters most: a host that black-holes HEAD would
+        # otherwise be reported as rotten on the strength of a method it
+        # simply does not serve.
+        self.assertEqual(self.probe(HEAD=TimeoutError("timed out"), GET=200), "")
+
+    def test_what_is_reported_is_what_a_reader_following_the_link_would_get(self) -> None:
+        detail = self.probe(HEAD=self.http_error(405), GET=self.http_error(410))
+        self.assertEqual(detail, "HTTP 410")
+
+    def test_a_url_nobody_serves(self) -> None:
+        detail = self.probe(HEAD=self.http_error(404), GET=self.http_error(404))
+        self.assertEqual(detail, "HTTP 404")
+
+    def test_a_host_that_does_not_resolve(self) -> None:
+        unresolvable = urllib.error.URLError("Name or service not known")
+        detail = self.probe(HEAD=unresolvable, GET=unresolvable)
+        self.assertIn("Name or service not known", detail)
 
 
 class TestRoutingClassification(unittest.TestCase):

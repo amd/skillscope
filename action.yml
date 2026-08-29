@@ -20,7 +20,7 @@ description: >-
 
 inputs:
   command:
-    description: 'The skillscope subcommand: validate, run, select, list-skills, template.'
+    description: 'The skillscope subcommand: structural, run, select, list-skills, template.'
     required: true
   args:
     description: "Further arguments for the subcommand, shell-quoted."
@@ -70,7 +70,7 @@ inputs:
   install-claude:
     description: >-
       Install Node and the claude CLI. Needed by `run`, pointless for
-      `validate` and `select`.
+      `structural` and `select`.
     required: false
     default: "false"
   node-version:

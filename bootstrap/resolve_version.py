@@ -50,9 +50,9 @@ REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
 def _read_json(path: Path) -> dict:
     """Parse `path`, treating anything unreadable as absent.
 
-    A malformed dataset is not this script's problem to report: the harness
-    validates it properly, with a message that says where and why. Failing
-    here would replace that with a stack trace from the launcher.
+    A malformed dataset is not this script's problem to report: the harness's
+    structural checks say where and why. Failing here would replace that with
+    a stack trace from the launcher.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

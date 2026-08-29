@@ -11,7 +11,11 @@ on:
       # and its body is the input to a behavior run. Nothing else here matters,
       # so nothing else pays for a run.
       - "skills/**"
+      - "**/*.md"
       - ".github/workflows/skill-evals.yml"
+  schedule:
+    # Mondays at noon UTC, for link rot in markdown nobody is editing.
+    - cron: "0 12 * * 1"
   workflow_dispatch:
     inputs:
       skills:
@@ -48,6 +52,33 @@ jobs:
       # This file holds the routing set and the runner topology, so a change to
       # it re-runs every skill rather than whatever the diff happened to touch.
       infra_paths: .github/workflows/skill-evals.yml
+
+      # --- which markdown is held to the reference checks ---
+      #
+      # The skills always are: a link that goes nowhere is a link the agent
+      # follows and then improvises around. Naming your own docs holds them to
+      # the same bar. `external_references` adds a job that fetches every URL;
+      # leave that one out of branch protection, since a rate limit or a
+      # blocked runner IP is not a reason to hold a merge.
+      doc_globs: "*.md,docs/**/*.md"
+      external_references: true
+      # excluded_urls: '^https://intranet\.example\.com/'
+
+      # --- what this repo requires of a skill on top of the format ---
+      #
+      # Every skill's SKILL.md is checked against the standardized format
+      # whatever you put here. These two are for a repo's own policy: files
+      # each skill has to ship, and the sections a governance card must fill
+      # in. Leave them out and only the format is enforced.
+      # skill_files: skill-card.md
+      # skill_sections: Description,Owner,License
+
+      # --- what this run does ---
+      #
+      # The weekly run is here for link rot alone, so it skips the graded
+      # runs: `references` leaves the two free jobs and nothing that spends a
+      # token.
+      mode: ${{ github.event_name == 'schedule' && 'references' || 'both' }}
 
       # --- where behavior cases run ---
       #
