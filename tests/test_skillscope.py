@@ -97,7 +97,11 @@ class Repo:
     def __init__(self, test: unittest.TestCase) -> None:
         tmp = tempfile.TemporaryDirectory()
         test.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        # Resolved, because the config does the same to whatever root it is
+        # given: a Windows runner's temp directory arrives in its 8.3 form
+        # (`RUNNER~1`), so an unresolved root here would compare unequal to the
+        # very path the harness derived from it.
+        self.root = Path(tmp.name).resolve()
         self.test = test
         self.settings: dict = {}
 
