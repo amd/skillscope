@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Reports and kept transcripts, written into the repo under test
+.skillscope/

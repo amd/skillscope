@@ -1,0 +1,122 @@
+name: selftest
+
+# The harness testing itself. No agent, no tokens, no network.
+#
+# Two halves. The unit suite guards the parts that decide whether a paid run is
+# trustworthy -- routing verdicts, activation detection, dataset rejection --
+# and runs on every platform a behavior leg can be scheduled on, because that
+# is where the path handling breaks. The smoke test drives the real launcher
+# against a throwaway repo built in the job, which is the only way to find out
+# that action.yml, the version resolver, and the CLI still agree on their
+# interface.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install .
+
+      - name: Run the suite
+        run: python -m unittest discover -s tests -t . --verbose
+
+  launcher:
+    name: Launcher against a throwaway repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build a repo to test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fixture/skills/demo-skill/evals
+          cat > fixture/skills/demo-skill/SKILL.md <<'EOF'
+          ---
+          name: demo-skill
+          description: Does demonstrable things, for a test that needs a skill.
+          ---
+          EOF
+          cat > fixture/skills/demo-skill/evals/evals.json <<'EOF'
+          {
+            "evaluations": [
+              {"id": "demo-a", "skill_should_trigger": true, "prompt": "do the demo thing"},
+              {"id": "demo-b", "skill_should_trigger": true, "prompt": "another way to ask"},
+              {"id": "demo-c", "skill_should_trigger": true, "prompt": "a third phrasing"},
+              {"id": "demo-d", "skill_should_trigger": false, "prompt": "something adjacent"},
+              {"id": "demo-e", "skill_should_trigger": false, "prompt": "something else entirely"}
+            ]
+          }
+          EOF
+
+      # `source: .` installs this checkout rather than a published ref, so a
+      # pull request tests the launcher and the payload it is about to change.
+      # No `version`: the fixture pins nothing, which exercises the bottom rung
+      # of the resolution ladder.
+      - name: Validate the fixture
+        uses: ./
+        with:
+          command: validate
+          repo: fixture
+          source: .
+
+      - name: Select runs for a change
+        id: select
+        uses: ./
+        with:
+          command: select
+          args: --all --routing-skills demo-skill
+          repo: fixture
+          source: .
+
+      - name: Select runs with no routing set
+        id: unrouted
+        uses: ./
+        with:
+          command: select
+          args: --all
+          repo: fixture
+          source: .
+
+      - name: Check the plan
+        shell: python
+        env:
+          PLAN: ${{ steps.select.outputs.stdout }}
+          UNROUTED: ${{ steps.unrouted.outputs.stdout }}
+        run: |
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN"])
+          assert plan["routing"] is True, plan
+          # The fixture skill asserts nothing beyond routing, so it earns no
+          # behavior leg. A plan that scheduled one would be scheduling a job
+          # with nothing to grade.
+          assert plan["default"] == [], plan
+          print(json.dumps(plan, indent=2))
+
+          # Naming no routing skills has to mean no routing job, not a job that
+          # installs whatever happened to be lying around.
+          unrouted = json.loads(os.environ["UNROUTED"])
+          assert unrouted["routing"] is False, unrouted

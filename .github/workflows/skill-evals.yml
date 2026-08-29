@@ -1,0 +1,662 @@
+name: skill-evals
+
+# The whole eval pipeline, as one reusable workflow.
+#
+#   discover -> routing
+#            -> behavior (matrix)
+#            -> behavior-scoped (matrix)
+#            -> results (aggregate)
+#
+# Call it from any repo that keeps skills in a tree and datasets beside them:
+#
+#   jobs:
+#     skill-evals:
+#       uses: amd/skillscope/.github/workflows/skill-evals.yml@bootstrap
+#       secrets: inherit
+#       with:
+#         skill_globs: skills/*
+#         routing_skills: my-skill,its-neighbour
+#
+# The caller's `with:` block is the whole configuration. There is no config file
+# in the repo under test: a repo that runs these evals already has a workflow
+# saying when to run them and with which credentials, and splitting the other
+# half of the same decision into a second file only adds a place for the two to
+# disagree.
+#
+# Every *decision* is delegated to the `skillscope` CLI, because a decision made
+# in YAML cannot be tested and cannot be run locally. What is left here is job
+# topology, which is the one thing that has to be YAML.
+#
+#   * routing installs the skills named in `routing_skills` side by side and
+#     grades which one fires. Nothing is installed by default: who a skill
+#     competes against is what the score means, so it is a decision a human
+#     makes rather than one this workflow guesses.
+#   * behavior installs one skill, runs the prompt to completion, and grades
+#     what the agent actually did.
+#
+# A skill that needs particular hardware says so in its own evals/machine.yml,
+# as runner labels; this workflow says what those legs cost -- the base labels,
+# the pull-request label that rations them, the environment that pays for them.
+# Nothing here names a skill: a hardcoded list of which skills need which runner
+# lives in the wrong place and drifts from reality the first time one is added.
+#
+# Credentials are passed by secret *name* rather than value, so this workflow
+# never sees a provider or a gateway and a caller keeps its own naming. Under
+# `secrets: inherit` the called workflow can read the caller's secrets by name,
+# including the ones scoped to an environment -- which is the only way the
+# gated-hardware job can work, since an environment's secrets are readable only
+# inside the job that declares it.
+
+on:
+  workflow_call:
+    inputs:
+      # --- what this repo looks like ---------------------------------------
+      skill_globs:
+        description: >-
+          Globs naming the directories that hold skills, comma-separated.
+        type: string
+        default: "skills/*"
+      routing_skills:
+        description: >-
+          Skills to install side by side for the routing run, comma-separated,
+          or `all` for every skill with a dataset. Blank means no routing run:
+          a repo with one skill has no routing question worth paying for.
+        type: string
+        default: ""
+      infra_paths:
+        description: >-
+          Files that change the harness rather than one skill, so touching one
+          re-runs every skill. The workflow calling this one belongs here.
+        type: string
+        default: ""
+      behavior_runner:
+        description: "JSON runs-on labels for a behavior leg."
+        type: string
+        default: '["ubuntu-latest"]'
+      behavior_os:
+        description: >-
+          Platforms to run a skill's behavior cases on when its evals/machine.yml
+          does not narrow them, comma-separated.
+        type: string
+        default: "Linux"
+      scoped_runner:
+        description: >-
+          JSON base runs-on labels for a leg whose skill asks for extra labels
+          in its evals/machine.yml; those labels are added to these. Blank
+          reuses behavior_runner, which is right only for a repo with one pool.
+        type: string
+        default: ""
+      scoped_gate:
+        description: >-
+          Pull-request label required before legs on the scoped pool run. For
+          hardware too scarce to spend on every pull request; blank runs them
+          like any other leg.
+        type: string
+        default: ""
+      scoped_environment:
+        description: >-
+          GitHub environment holding credentials for scoped legs. Given one,
+          they run as a separate job, because a job's credentials are fixed
+          before its matrix expands.
+        type: string
+        default: ""
+
+      # --- what to run this time -------------------------------------------
+      mode:
+        description: "Which grader to run: both, routing, or behavior."
+        type: string
+        default: both
+      skills:
+        description: >-
+          Comma-separated skill names to run behavior cases for. Blank means
+          every skill with a dataset (or, on a pull request, whatever changed).
+        type: string
+        default: ""
+      only:
+        description: "Comma-separated case ids to run (routing only)."
+        type: string
+        default: ""
+      min_accuracy:
+        description: "Fail the routing run below this accuracy (0-1). 0 reports without gating."
+        type: string
+        default: "0"
+      extended:
+        description: >-
+          Run each skill's optional evals/extended_evals.json alongside the
+          required dataset. Extended datasets are validated either way.
+        type: boolean
+        default: true
+      ignore_gates:
+        description: "Run legs on gated hardware without their pull-request label."
+        type: boolean
+        default: false
+      version:
+        description: >-
+          Harness version to run, overriding the pin in each skill's evals.json.
+          Blank runs the ref the caller referenced this workflow at.
+        type: string
+        default: ""
+      coordinator_runner:
+        description: >-
+          JSON runs-on for the jobs that only run git and the CLI (discovery and
+          the aggregate gate). No credentials, no agent.
+        type: string
+        default: '"ubuntu-latest"'
+      routing_runner:
+        description: "JSON runs-on for the routing job. Needs to reach the model API."
+        type: string
+        default: '"ubuntu-latest"'
+      routing_timeout_minutes:
+        description: "Cap on the routing job. Each case is killed as soon as its decision is visible."
+        type: number
+        default: 40
+      behavior_timeout_minutes:
+        description: "Cap on one behavior leg. These install models and can take a while."
+        type: number
+        default: 45
+      python_version:
+        type: string
+        default: "3.12"
+      node_version:
+        type: string
+        default: "20"
+      api_key_secret:
+        description: >-
+          Name of the secret holding the model API key for the routing job and
+          the default behavior runners. Blank means the runner is already
+          authenticated and no key is exported.
+        type: string
+        default: ANTHROPIC_API_KEY
+      api_base_url:
+        description: "ANTHROPIC_BASE_URL for those jobs. Blank uses the provider default."
+        type: string
+        default: ""
+      api_custom_headers:
+        description: >-
+          ANTHROPIC_CUSTOM_HEADERS for those jobs, one `Name: value` per line.
+          `$API_KEY` is replaced with the resolved secret, so a gateway that
+          wants the key in a header needs no second secret input.
+        type: string
+        default: ""
+      scoped_api_key_secret:
+        description: >-
+          Name of the secret holding the API key for behavior legs that run in
+          `scoped_environment`. Separate because that is the point of such a
+          pool: its own hardware, its own budgeted credentials.
+        type: string
+        default: ANTHROPIC_API_KEY
+      scoped_api_base_url:
+        type: string
+        default: ""
+      scoped_api_custom_headers:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Secret-free: structural validation and a git diff. Both are free and fast,
+  # so a malformed dataset fails here rather than halfway through a paid run.
+  discover:
+    name: Validate datasets and select runs
+    runs-on: ${{ fromJSON(inputs.coordinator_runner) }}
+    outputs:
+      routing: ${{ steps.plan.outputs.routing }}
+      # The runner flag, resolved once here so selection and every run job
+      # agree on whether extended datasets are in play.
+      extended: ${{ steps.plan.outputs.extended }}
+      default: ${{ steps.plan.outputs.default }}
+      default_any: ${{ steps.plan.outputs.default_any }}
+      scoped: ${{ steps.plan.outputs.scoped }}
+      scoped_any: ${{ steps.plan.outputs.scoped_any }}
+      skipped: ${{ steps.plan.outputs.skipped }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Need the merge base so `git diff` can see what the pull request changed.
+          fetch-depth: 0
+
+      # Repeated wherever a repo also gates on validation, because the two
+      # workflows can be scheduled in either order and an expensive run should
+      # never start against a broken dataset.
+      - name: Validate every eval dataset
+        uses: amd/skillscope@bootstrap
+        with:
+          command: validate
+          skills: ${{ inputs.skill_globs }}
+          version: ${{ inputs.version }}
+          python-version: ${{ inputs.python_version }}
+
+      # A pull request is graded on what it changed; anything else grades what
+      # it was asked for. Written in Python so the arguments are quoted rather
+      # than pasted -- a label like `don't merge` would otherwise arrive at the
+      # CLI in pieces.
+      - name: Work out how to select
+        id: how
+        shell: python
+        env:
+          EVENT: ${{ github.event_name }}
+          SKILLS: ${{ inputs.skills }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          EXTENDED: ${{ inputs.extended && '--extended' || '--no-extended' }}
+          IGNORE_GATES: ${{ inputs.ignore_gates && '--ignore-gates' || '' }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          ROUTING_SKILLS: ${{ inputs.routing_skills }}
+          INFRA_PATHS: ${{ inputs.infra_paths }}
+          BEHAVIOR_RUNNER: ${{ inputs.behavior_runner }}
+          BEHAVIOR_OS: ${{ inputs.behavior_os }}
+          SCOPED_RUNNER: ${{ inputs.scoped_runner }}
+          SCOPED_GATE: ${{ inputs.scoped_gate }}
+          SCOPED_ENVIRONMENT: ${{ inputs.scoped_environment }}
+        run: |
+          import os
+          import shlex
+          import subprocess
+
+          event = os.environ["EVENT"]
+          skills = os.environ.get("SKILLS", "").strip()
+          base, head = os.environ.get("BASE", ""), os.environ.get("HEAD", "")
+          extended = os.environ["EXTENDED"]
+
+          changed = ""
+          if event == "pull_request" and base:
+              changed = subprocess.run(
+                  ["git", "diff", "--name-only", base, head],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout
+              args = ["--changed", "--labels", os.environ.get("LABELS", ""), extended]
+              if os.environ.get("IGNORE_GATES"):
+                  args.append("--ignore-gates")
+          else:
+              # An explicit request is human intent, so gate labels are not
+              # required on top of it.
+              args = ["--names", skills] if skills else ["--all"]
+              args += ["--ignore-gates", extended]
+
+          # What this repo looks like. Planning is the only step that needs all
+          # of it, so this is the one place that spells it out; `--skills` goes
+          # to the action instead, because the launcher needs it too.
+          for flag, name in (
+              ("--routing-skills", "ROUTING_SKILLS"),
+              ("--infra-paths", "INFRA_PATHS"),
+              ("--behavior-runner", "BEHAVIOR_RUNNER"),
+              ("--behavior-os", "BEHAVIOR_OS"),
+              ("--scoped-runner", "SCOPED_RUNNER"),
+              ("--scoped-gate", "SCOPED_GATE"),
+              ("--scoped-environment", "SCOPED_ENVIRONMENT"),
+          ):
+              value = os.environ.get(name, "").strip()
+              if value:
+                  args += [flag, value]
+
+          with open("changed-files.txt", "w", encoding="utf-8") as handle:
+              handle.write(changed)
+          print("Changed files:\n" + (changed or "(none)"))
+
+          # Quoted rather than pasted: a JSON label array and a pull-request
+          # label like `don't merge` both have to survive the trip intact.
+          line = "args=" + " ".join(shlex.quote(a) for a in args)
+          print(line)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(line + "\n")
+
+      - name: Select what to run
+        id: select
+        uses: amd/skillscope@bootstrap
+        with:
+          command: select
+          args: ${{ steps.how.outputs.args }}
+          skills: ${{ inputs.skill_globs }}
+          stdin: changed-files.txt
+          version: ${{ inputs.version }}
+          python-version: ${{ inputs.python_version }}
+
+      - name: Emit the plan
+        id: plan
+        shell: python
+        env:
+          PLAN: ${{ steps.select.outputs.stdout }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN"])
+
+          # `mode` narrows the pipeline after selection rather than before it,
+          # so a dispatch cannot ask for a leg the change does not support.
+          mode = os.environ.get("MODE", "both")
+          if mode == "behavior":
+              plan["routing"] = False
+          elif mode == "routing":
+              plan["default"] = []
+              plan["scoped"] = []
+
+          lines = [
+              "routing=" + str(plan["routing"]).lower(),
+              # Emitted as the flag itself: every run job passes it through
+              # verbatim rather than re-deriving the same boolean.
+              "extended=" + ("--extended" if plan["extended"] else "--no-extended"),
+              "version=" + plan.get("version", ""),
+          ]
+          for key in ("default", "scoped", "skipped"):
+              lines.append(key + "=" + json.dumps(plan[key]))
+          for key in ("default", "scoped"):
+              lines.append(key + "_any=" + str(bool(plan[key])).lower())
+
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+
+  # A routing decision is made from skill descriptions alone, so this needs no
+  # GPU and no second platform.
+  routing:
+    name: Routing
+    needs: discover
+    if: needs.discover.outputs.routing == 'true'
+    runs-on: ${{ fromJSON(inputs.routing_runner) }}
+    timeout-minutes: ${{ inputs.routing_timeout_minutes }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Resolve model credentials
+        if: inputs.api_key_secret != ''
+        shell: python
+        env:
+          API_KEY: ${{ secrets[inputs.api_key_secret] }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
+          SECRET_NAME: ${{ inputs.api_key_secret }}
+        run: |
+          import os
+          import sys
+
+          key = os.environ.get("API_KEY", "").strip()
+          if not key:
+              name = os.environ["SECRET_NAME"]
+              sys.exit(
+                  f"error: the secret {name} resolved to an empty value. GitHub "
+                  "withholds secrets from pull requests opened from forks, so "
+                  "re-run this from a branch in the repository, or check that "
+                  f"{name} is set and that the caller passes `secrets: inherit`."
+              )
+
+          exported = {"ANTHROPIC_API_KEY": key}
+          base_url = os.environ.get("API_BASE_URL", "").strip()
+          if base_url:
+              exported["ANTHROPIC_BASE_URL"] = base_url
+          headers = os.environ.get("API_CUSTOM_HEADERS", "").strip()
+          if headers:
+              # A gateway that wants the key in a header should not need a
+              # second secret input to say so.
+              exported["ANTHROPIC_CUSTOM_HEADERS"] = headers.replace("$API_KEY", key)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              for name, value in exported.items():
+                  out.write(f"{name}<<__SKILLSCOPE_EOF__\n{value}\n__SKILLSCOPE_EOF__\n")
+          print("Exported: " + ", ".join(exported))
+
+      - name: Run the routing eval
+        uses: amd/skillscope@bootstrap
+        with:
+          command: run
+          # By default this reports rather than gates, so a low score shows up
+          # as statistics instead of a red run; pass min_accuracy to make it a
+          # hard bar. It still fails on infrastructure problems (no case
+          # produced a decision, or no skill activated anywhere).
+          #
+          # The interpolated values are quoted because the launcher splits this
+          # the way a shell would, and a comma-separated list a caller wrote
+          # with spaces in it would otherwise arrive as several arguments.
+          args: >-
+            --mode routing
+            --routing-skills '${{ inputs.routing_skills }}'
+            --min-accuracy '${{ inputs.min_accuracy }}'
+            ${{ needs.discover.outputs.extended }}
+            ${{ inputs.only && format('--only ''{0}''', inputs.only) || '' }}
+            --output routing-report.json
+            --keep-logs routing-logs
+          skills: ${{ inputs.skill_globs }}
+          version: ${{ inputs.version || needs.discover.outputs.version }}
+          python-version: ${{ inputs.python_version }}
+          setup-python: "false"
+          install-claude: "true"
+          node-version: ${{ inputs.node_version }}
+
+      - name: Upload routing report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: routing-report
+          path: |
+            routing-report.json
+            routing-logs/
+          if-no-files-found: warn
+
+  # Behavior legs that use the repo-wide credentials.
+  behavior:
+    name: Behavior (${{ matrix.skill }} on ${{ matrix.os }})
+    needs: discover
+    if: needs.discover.outputs.default_any == 'true'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: ${{ inputs.behavior_timeout_minutes }}
+    strategy:
+      # One skill / OS failing should not hide the others' results.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.default) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Resolve model credentials
+        if: inputs.api_key_secret != ''
+        shell: python
+        env:
+          API_KEY: ${{ secrets[inputs.api_key_secret] }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
+          SECRET_NAME: ${{ inputs.api_key_secret }}
+        run: |
+          import os
+          import sys
+
+          key = os.environ.get("API_KEY", "").strip()
+          if not key:
+              name = os.environ["SECRET_NAME"]
+              sys.exit(
+                  f"error: the secret {name} resolved to an empty value. GitHub "
+                  "withholds secrets from pull requests opened from forks, so "
+                  "re-run this from a branch in the repository, or check that "
+                  f"{name} is set and that the caller passes `secrets: inherit`."
+              )
+
+          exported = {"ANTHROPIC_API_KEY": key}
+          base_url = os.environ.get("API_BASE_URL", "").strip()
+          if base_url:
+              exported["ANTHROPIC_BASE_URL"] = base_url
+          headers = os.environ.get("API_CUSTOM_HEADERS", "").strip()
+          if headers:
+              exported["ANTHROPIC_CUSTOM_HEADERS"] = headers.replace("$API_KEY", key)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              for name, value in exported.items():
+                  out.write(f"{name}<<__SKILLSCOPE_EOF__\n{value}\n__SKILLSCOPE_EOF__\n")
+          print("Exported: " + ", ".join(exported))
+
+      - name: Run behavior cases for ${{ matrix.skill }}
+        uses: amd/skillscope@bootstrap
+        with:
+          command: run
+          args: --mode behavior --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+          skill: ${{ matrix.skill }}
+          skills: ${{ inputs.skill_globs }}
+          # The skill's own pin, resolved during selection.
+          version: ${{ inputs.version || matrix.version }}
+          python-version: ${{ inputs.python_version }}
+          setup-python: "false"
+          install-claude: "true"
+          node-version: ${{ inputs.node_version }}
+
+  # Behavior legs on hardware with its own environment. Those bring scoped
+  # secrets, which is why they cannot share the job above: a job's credentials
+  # are fixed before its matrix expands.
+  behavior-scoped:
+    name: Behavior (${{ matrix.skill }} on ${{ matrix.os }}, ${{ matrix.environment }})
+    needs: discover
+    if: needs.discover.outputs.scoped_any == 'true'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: ${{ inputs.behavior_timeout_minutes }}
+    environment:
+      name: ${{ matrix.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.scoped) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Resolve model credentials
+        if: inputs.scoped_api_key_secret != ''
+        shell: python
+        env:
+          API_KEY: ${{ secrets[inputs.scoped_api_key_secret] }}
+          API_BASE_URL: ${{ inputs.scoped_api_base_url }}
+          API_CUSTOM_HEADERS: ${{ inputs.scoped_api_custom_headers }}
+          SECRET_NAME: ${{ inputs.scoped_api_key_secret }}
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          import os
+          import sys
+
+          key = os.environ.get("API_KEY", "").strip()
+          if not key:
+              name = os.environ["SECRET_NAME"]
+              environment = os.environ.get("ENVIRONMENT", "")
+              sys.exit(
+                  f"error: the secret {name} resolved to an empty value. Check "
+                  f"that it is set on the '{environment}' environment, and note "
+                  "that GitHub withholds secrets from pull requests opened from "
+                  "forks."
+              )
+
+          exported = {"ANTHROPIC_API_KEY": key}
+          base_url = os.environ.get("API_BASE_URL", "").strip()
+          if base_url:
+              exported["ANTHROPIC_BASE_URL"] = base_url
+          headers = os.environ.get("API_CUSTOM_HEADERS", "").strip()
+          if headers:
+              exported["ANTHROPIC_CUSTOM_HEADERS"] = headers.replace("$API_KEY", key)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              for name, value in exported.items():
+                  out.write(f"{name}<<__SKILLSCOPE_EOF__\n{value}\n__SKILLSCOPE_EOF__\n")
+          print("Exported: " + ", ".join(exported))
+
+      - name: Run behavior cases for ${{ matrix.skill }}
+        uses: amd/skillscope@bootstrap
+        with:
+          command: run
+          args: --mode behavior --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+          skill: ${{ matrix.skill }}
+          skills: ${{ inputs.skill_globs }}
+          version: ${{ inputs.version || matrix.version }}
+          python-version: ${{ inputs.python_version }}
+          setup-python: "false"
+          install-claude: "true"
+          node-version: ${{ inputs.node_version }}
+
+  # Single aggregate result, so a caller can gate on one check:
+  #
+  #   * nothing testable changed -> pass (neutral).
+  #   * testable change          -> pass iff every leg that ran passed.
+  #
+  # A leg held back by a missing gate label is warned about, not failed: a pull
+  # request should not be blocked by a test it deliberately did not request.
+  results:
+    name: results
+    needs: [discover, routing, behavior, behavior-scoped]
+    if: always()
+    runs-on: ${{ fromJSON(inputs.coordinator_runner) }}
+    steps:
+      - name: Verify eval results
+        shell: bash
+        env:
+          DISCOVER: ${{ needs.discover.result }}
+          ROUTING: ${{ needs.routing.result }}
+          BEHAVIOR: ${{ needs.behavior.result }}
+          SCOPED: ${{ needs.behavior-scoped.result }}
+          ROUTING_WANTED: ${{ needs.discover.outputs.routing }}
+          BEHAVIOR_WANTED: ${{ needs.discover.outputs.default_any }}
+          SCOPED_WANTED: ${{ needs.discover.outputs.scoped_any }}
+          SKIPPED: ${{ needs.discover.outputs.skipped }}
+          VERSION: ${{ needs.discover.outputs.version }}
+        run: |
+          echo "harness:         ${VERSION:-(the launcher's own ref)}"
+          echo "discover:        $DISCOVER"
+          echo "routing:         $ROUTING (requested: $ROUTING_WANTED)"
+          echo "behavior:        $BEHAVIOR (requested: $BEHAVIOR_WANTED)"
+          echo "behavior-scoped: $SCOPED (requested: $SCOPED_WANTED)"
+          echo "held back:       $SKIPPED"
+
+          # If discovery itself failed, surface that rather than guessing. It
+          # also covers dataset validation, so a malformed evals.json lands
+          # here as a clear failure.
+          if [ "$DISCOVER" != "success" ]; then
+            echo "The discover job did not succeed ($DISCOVER)." >&2
+            exit 1
+          fi
+
+          # Say loudly when a change went out without running on real hardware.
+          if [ -n "$SKIPPED" ] && [ "$SKIPPED" != "[]" ]; then
+            echo "::warning::These skills' behavior cases were held back for a" \
+                 "missing gate label and did not run: $SKIPPED"
+          fi
+
+          failed=0
+          if [ "$ROUTING_WANTED" = "true" ] && [ "$ROUTING" != "success" ]; then
+            echo "Routing did not pass ($ROUTING)." >&2
+            failed=1
+          fi
+          if [ "$BEHAVIOR_WANTED" = "true" ] && [ "$BEHAVIOR" != "success" ]; then
+            echo "Behavior cases did not pass ($BEHAVIOR)." >&2
+            failed=1
+          fi
+          if [ "$SCOPED_WANTED" = "true" ] && [ "$SCOPED" != "success" ]; then
+            echo "Scoped-hardware behavior cases did not pass ($SCOPED)." >&2
+            failed=1
+          fi
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
+          if [ "$ROUTING_WANTED" != "true" ] && [ "$BEHAVIOR_WANTED" != "true" ] \
+             && [ "$SCOPED_WANTED" != "true" ]; then
+            echo "No evals affected by this change."
+          else
+            echo "All affected evals passed."
+          fi
+          exit 0

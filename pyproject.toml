@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skillscope"
+version = "0.1.0"
+description = "Routing and behavior test harness for agent skills."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Advanced Micro Devices, Inc." }]
+
+# The runner itself is standard library only, so a run needs no wheels beyond
+# this package. PyYAML is the one exception: it reads the optional
+# evals/machine.yml, which only CI planning touches.
+dependencies = ["pyyaml>=6.0"]
+
+[project.scripts]
+skillscope = "skillscope.cli:main"
+
+[tool.setuptools]
+packages = ["skillscope"]
+
+[tool.setuptools.package-data]
+skillscope = ["data/*.json", "schema/*.json"]

@@ -1,0 +1,139 @@
+name: skillscope
+description: >-
+  Run one skillscope command against the calling repository, at the harness
+  version that repository pins.
+
+# The launcher, and nothing else.
+#
+# Reference it as `amd/skillscope@bootstrap` and leave it there: `bootstrap` is
+# a contract, not a release. All it does is set up Python and uv, work out
+# which build of the harness should grade this repo (an input, then
+# $SKILLSCOPE_VERSION, then the skill's evals.json, then its own ref), and exec
+# that build. Nothing here imports skillscope, so the launcher cannot break on
+# a payload version it predates -- which is what makes pinning it forever safe.
+#
+# Everything about the repo being tested is passed in: `version` and `skills`
+# here, and the rest through `args`, composed by the workflow that calls this.
+# A skill may pin its own harness build with `skillscope_version` in its
+# evals.json, which is a one-line reviewable diff next to the prompts it
+# affects.
+
+inputs:
+  command:
+    description: 'The skillscope subcommand: validate, run, select, list-skills, template.'
+    required: true
+  args:
+    description: "Further arguments for the subcommand, shell-quoted."
+    required: false
+    default: ""
+  version:
+    description: >-
+      Harness version to run. Wins over every other source. Leave empty to use
+      the skill's own pin, else this action's ref.
+    required: false
+    default: ""
+  skill:
+    description: >-
+      The skill being graded, so its evals.json `skillscope_version` is honored.
+      `skillscope select` emits this per matrix leg.
+    required: false
+    default: ""
+  skills:
+    description: >-
+      Globs naming the directories that hold skills, comma-separated. The
+      launcher needs these to find a skill's version pin before it has fetched
+      anything, and passes them on to the harness. Default: skills/*.
+    required: false
+    default: ""
+  repo:
+    description: "Root of the repo to test. Default: the workspace."
+    required: false
+    default: "."
+  source:
+    description: >-
+      Where to install the harness from: owner/repo, or a local path holding a
+      pyproject.toml. Defaults to this action's own repository.
+    required: false
+    default: ""
+  stdin:
+    description: "A file to feed the command on stdin (`select --changed` reads one)."
+    required: false
+    default: ""
+  python-version:
+    description: "Python for the harness. Default: 3.12."
+    required: false
+    default: "3.12"
+  setup-python:
+    description: "Set up Python. Turn off on a runner where it is already pinned."
+    required: false
+    default: "true"
+  install-claude:
+    description: >-
+      Install Node and the claude CLI. Needed by `run`, pointless for
+      `validate` and `select`.
+    required: false
+    default: "false"
+  node-version:
+    description: "Node for the claude CLI. Default: 20."
+    required: false
+    default: "20"
+
+outputs:
+  version:
+    description: "The harness version that ran."
+    value: ${{ steps.skillscope.outputs.version }}
+  stdout:
+    description: >-
+      The last line of the command's output. For `select` that is the plan
+      JSON; other commands report through the step summary.
+    value: ${{ steps.skillscope.outputs.stdout }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: inputs.setup-python == 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v7
+
+    - name: Set up Node
+      if: inputs.install-claude == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install the claude CLI
+      if: inputs.install-claude == 'true'
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code
+
+    # One step, in Python, because the same launcher runs on Linux, Windows,
+    # and macOS runners and a shell script would need three of itself.
+    - name: Run skillscope
+      id: skillscope
+      shell: python
+      env:
+        SKILLSCOPE_COMMAND: ${{ inputs.command }}
+        SKILLSCOPE_ARGS: ${{ inputs.args }}
+        SKILLSCOPE_REPO: ${{ inputs.repo }}
+        SKILLSCOPE_SKILLS: ${{ inputs.skills }}
+        SKILLSCOPE_SOURCE: ${{ inputs.source || github.action_repository }}
+        SKILLSCOPE_REQUESTED: ${{ inputs.version }}
+        SKILLSCOPE_SKILL: ${{ inputs.skill }}
+        # Last resort: a repo that pins nothing runs whatever this launcher's
+        # own ref points at, so it works with no configuration at all.
+        SKILLSCOPE_DEFAULT: ${{ github.action_ref || 'main' }}
+        SKILLSCOPE_STDIN: ${{ inputs.stdin }}
+        SKILLSCOPE_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        import os
+        import runpy
+        import sys
+
+        launcher = os.path.join(os.environ["SKILLSCOPE_ACTION_PATH"], "bootstrap", "launch.py")
+        sys.argv = [launcher]
+        runpy.run_path(launcher, run_name="__main__")
