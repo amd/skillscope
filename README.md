@@ -42,14 +42,18 @@ uvx --from git+https://github.com/amd/skillscope skillscope run \
 uvx --from git+https://github.com/amd/skillscope skillscope run \
   --mode routing --routing-skills my-skill,its-neighbour
 
+# a repo with one skill: the room is that skill, so nothing names it
+uvx --from git+https://github.com/amd/skillscope skillscope run --mode routing
+
 # what CI should run for a change
 git diff --name-only main HEAD | uvx --from git+https://github.com/amd/skillscope skillscope select --changed
 ```
 
 Run from the root of the repo you want tested. A repo that keeps its skills in
-`skills/*` and has a `SKILL.md` in each passes no flags at all, except to say
-which skills a routing run should install together — that one has no sensible
-default, and [why](#who-a-skill-competes-against-is-listed-not-inferred).
+`skills/*` and has a `SKILL.md` in each passes no flags at all. A second skill
+is what makes one necessary: which skills a routing run should install together
+has no sensible default once there is a choice, and
+[why](#who-a-skill-competes-against-is-listed-not-inferred).
 
 Writing the datasets themselves: [docs/authoring-evals.md](docs/authoring-evals.md).
 
@@ -126,7 +130,7 @@ flag if you are running the CLI by hand:
 | Input | Flag | Default | What it decides |
 | --- | --- | --- | --- |
 | `skill_globs` | `--skills` | `skills/*` | Globs naming the directories that hold skills. A skill is a directory with a `SKILL.md`, and its directory name is its identity. |
-| `routing_skills` | `--routing-skills` | none | The skills a routing run installs side by side. `all` means every skill with a dataset; blank means no routing run. |
+| `routing_skills` | `--routing-skills` | the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means a repo with one skill runs that skill while a repo with several has to choose. |
 | `infra_paths` | `--infra-paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
 | `doc_globs` | `--docs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
 | `excluded_urls` | `--exclude-url` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
@@ -145,15 +149,24 @@ change, and a file whose only reader is the workflow next to it.
 
 ### Who a skill competes against is listed, not inferred
 
-`routing_skills` is the one input with no useful default, because the answer is
-what the score *means*. Install every skill on disk and a work-in-progress
-directory drops everyone's number; install only the skill under review and it
-wins every prompt by walkover. Neither is a guess a test should make on your
-behalf. A skill you leave off the list still gets its dataset checked and its
-behavior cases run — it just does not move anybody's routing score.
+Wherever there is a choice, `routing_skills` is the one input with no useful
+default, because the answer is what the score *means*. Install every skill on
+disk and a work-in-progress directory drops everyone's number; install only the
+skill under review and it wins every prompt by walkover. Neither is a guess a
+test should make on your behalf. A skill you leave off the list still gets its
+dataset checked and its behavior cases run — it just does not move anybody's
+routing score.
 
 Listing them also makes the change visible: a skill joining or leaving the room
 moves every other skill's number, and that deserves a diff a reviewer can see.
+
+A repo with one skill has no such choice, so it does not have to make one:
+leave `routing_skills` blank and its only skill is the room. The score is the
+half of the question that can be answered alone — does the skill fire on its
+own prompts, and does it stay quiet on its near misses and the shared
+negatives — and it stops meaning that the moment a second skill shows up, at
+which point the flag becomes required again rather than quietly picking a room
+for you. To turn routing off instead, say so: `routing_skills: none`.
 
 ### A skill that never loads fails here, not in a paid run
 

@@ -40,11 +40,13 @@ jobs:
       # --- who is in the room for a routing run ---
       #
       # List the skills whose descriptions could plausibly be confused for one
-      # another, and leave it blank if there is only one skill here: a routing
-      # score with nothing to compete against measures nothing. Every listed
-      # skill is installed in one workspace and every listed skill's prompts are
-      # graded against that workspace, so adding a skill here also adds its
-      # prompts as negatives for the others.
+      # another. Every listed skill is installed in one workspace and every
+      # listed skill's prompts are graded against that workspace, so adding a
+      # skill here also adds its prompts as negatives for the others.
+      #
+      # Blank leaves it to the repo: with one skill that skill is the room, and
+      # with several it is no routing run, because who a skill competes against
+      # is what its score means. `none` turns routing off outright.
       routing_skills: my-skill,its-neighbour
 
       # --- what a change to CI itself means ---

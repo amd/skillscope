@@ -119,8 +119,8 @@ jobs:
           repo: fixture
           source: .
 
-      - name: Select runs with no routing set
-        id: unrouted
+      - name: Select runs without naming the routing set
+        id: inferred
         uses: ./
         with:
           command: select
@@ -128,10 +128,20 @@ jobs:
           repo: fixture
           source: .
 
+      - name: Select runs with routing turned off
+        id: unrouted
+        uses: ./
+        with:
+          command: select
+          args: --all --routing-skills none
+          repo: fixture
+          source: .
+
       - name: Check the plan
         shell: python
         env:
           PLAN: ${{ steps.select.outputs.stdout }}
+          INFERRED: ${{ steps.inferred.outputs.stdout }}
           UNROUTED: ${{ steps.unrouted.outputs.stdout }}
         run: |
           import json
@@ -145,7 +155,12 @@ jobs:
           assert plan["default"] == [], plan
           print(json.dumps(plan, indent=2))
 
-          # Naming no routing skills has to mean no routing job, not a job that
-          # installs whatever happened to be lying around.
+          # The fixture has one skill, so there is no room to choose between
+          # and naming it would be the caller repeating back the only answer.
+          inferred = json.loads(os.environ["INFERRED"])
+          assert inferred["routing"] is True, inferred
+
+          # `none` is how a repo says it does not want the run at all, and it
+          # has to hold even where a room could have been worked out.
           unrouted = json.loads(os.environ["UNROUTED"])
           assert unrouted["routing"] is False, unrouted
