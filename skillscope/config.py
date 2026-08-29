@@ -58,10 +58,13 @@ DEFAULT_SKILL_GLOBS = ("skills/*",)
 DEFAULT_BEHAVIOR_RUNNER = ("ubuntu-latest",)
 DEFAULT_BEHAVIOR_OS = ("Linux",)
 
-# `--routing-skills all`: every skill in the repo that ships a dataset. Spelled
-# out rather than implied by an empty list, because "no routing at all" is a
-# real answer a repo is allowed to give and the two must not look the same.
+# The two answers `--routing-skills` takes instead of a list of names: every
+# skill in the repo that ships a dataset, and no routing run at all. Both are
+# words rather than shapes of an empty flag, because saying nothing means "work
+# it out" -- a repo with one skill has only one room its skill can be in -- and
+# "no routing at all" is a real answer that has to stay sayable.
 ALL_SKILLS = "all"
+NO_SKILLS = "none"
 
 
 @dataclass(frozen=True)
@@ -73,10 +76,11 @@ class Config:
     # Globs naming the directories that hold skills.
     skill_globs: tuple[str, ...] = DEFAULT_SKILL_GLOBS
 
-    # The skills a routing run installs side by side, in the order given. Empty
-    # means no routing run: a repo with one skill has no routing question to
-    # ask, and paying for the answer anyway is how a test gets a reputation for
-    # being noise.
+    # The skills a routing run installs side by side, in the order given, and
+    # already resolved: `all` has become the list, a repo whose only skill was
+    # never named has become that skill, and `none` -- or a repo with several
+    # skills that said nothing about which of them compete -- has become empty,
+    # which is no routing run.
     routing_skills: tuple[str, ...] = ()
 
     # Paths that change the harness rather than one skill, so touching one
@@ -246,10 +250,19 @@ def _items(value: object, flag: str) -> tuple[str, ...]:
     return tuple(resolved)
 
 
+def _is_sentinel(value: object, word: str) -> bool:
+    items = _items(value, "--routing-skills")
+    return len(items) == 1 and items[0].lower() == word
+
+
 def wants_all_skills(value: object) -> bool:
     """Whether a ``--routing-skills`` value is the ``all`` shorthand."""
-    items = _items(value, "--routing-skills")
-    return len(items) == 1 and items[0].lower() == ALL_SKILLS
+    return _is_sentinel(value, ALL_SKILLS)
+
+
+def wants_no_skills(value: object) -> bool:
+    """Whether a ``--routing-skills`` value is the ``none`` shorthand."""
+    return _is_sentinel(value, NO_SKILLS)
 
 
 def build(
@@ -268,15 +281,17 @@ def build(
     scoped_gate: str = "",
     scoped_environment: str = "",
     version: str | None = None,
-    all_skills: list[str] | None = None,
+    dataset_skills: list[str] | None = None,
 ) -> Config:
     """A Config from loose values: what the CLI hands over after parsing.
 
     One place converts strings into the shapes the rest of the harness reads,
     so a flag, a workflow input, and a test fixture cannot disagree about what
-    ``"a,b"`` means. `all_skills` resolves ``--routing-skills all``, which the
-    caller supplies because "every skill with a dataset" is a question about
-    datasets, and this module only knows about directories.
+    ``"a,b"`` means. `dataset_skills` is every skill in the repo that ships a
+    dataset, which resolves both of the routing answers this module cannot
+    reach on its own: ``all``, and the room a repo with a single skill never
+    had to spell out. The caller supplies it because having a dataset is a
+    question about datasets, and this module only knows about directories.
     """
     root = (root or find_root()).resolve()
 
@@ -287,7 +302,15 @@ def build(
     )
     routing = _items(routing_skills, "--routing-skills")
     if wants_all_skills(routing):
-        routing = tuple(all_skills if all_skills is not None else ())
+        routing = tuple(dataset_skills if dataset_skills is not None else ())
+    elif wants_no_skills(routing):
+        routing = ()
+    elif not routing and dataset_skills is not None and len(dataset_skills) == 1:
+        # One skill with a dataset is the whole room. Naming it would be the
+        # caller repeating back the only answer there is, and the score still
+        # measures something: whether that skill fires on its own prompts and
+        # stays quiet on its near misses and the shared negatives.
+        routing = tuple(dataset_skills)
 
     return Config(
         root=root,

@@ -39,10 +39,11 @@ a *different* skill belongs in that skill's dataset: routing installs those
 skills in one workspace, so it is the same assertion either way, and filing it
 under the neighbour keeps `false` meaning "nothing fires".
 
-Your dataset's prompts are graded in a routing run only when your skill is one
-the workflow lists in `routing_skills`. A prompt expecting a skill that is not
-in the room could only ever lose, and a near miss says nothing about skills
-that were never installed.
+Your dataset's prompts are graded in a routing run only when your skill is in
+the room — one the workflow lists in `routing_skills`, or the only skill the
+repo has, which needs no listing. A prompt expecting a skill that is not in the
+room could only ever lose, and a near miss says nothing about skills that were
+never installed.
 
 **When a prompt is all you provide, the evaluation grades routing only** — did
 your skill fire, and did nothing else? That is cheap, needs no hardware, and is
@@ -198,6 +199,7 @@ skillscope structural                               # structure only: no agent, 
 skillscope structural --external                    # the same, plus fetching every URL
 skillscope run --mode behavior --skill <your-skill> # your skill, end to end
 skillscope run --mode routing --routing-skills <your-skill>,<a-neighbour>
+skillscope run --mode routing                       # in a repo with one skill, that skill is the room
 skillscope run --only <case-id> --keep-logs logs    # one case, keeping the transcript
 ```
 

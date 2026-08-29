@@ -29,9 +29,10 @@ name: skill-evals
 # topology, which is the one thing that has to be YAML.
 #
 #   * routing installs the skills named in `routing_skills` side by side and
-#     grades which one fires. Nothing is installed by default: who a skill
-#     competes against is what the score means, so it is a decision a human
-#     makes rather than one this workflow guesses.
+#     grades which one fires. Who a skill competes against is what the score
+#     means, so wherever there is a choice it is a decision a human makes
+#     rather than one this workflow guesses; a repo with a single skill has no
+#     choice to make and need not name it.
 #   * behavior installs one skill, runs the prompt to completion, and grades
 #     what the agent actually did.
 #
@@ -65,8 +66,10 @@ on:
       routing_skills:
         description: >-
           Skills to install side by side for the routing run, comma-separated,
-          or `all` for every skill with a dataset. Blank means no routing run:
-          a repo with one skill has no routing question worth paying for.
+          `all` for every skill with a dataset, or `none` to skip routing.
+          Blank leaves it to the repo: one skill with a dataset is the room on
+          its own, and several with nothing said about which compete is no
+          routing run.
         type: string
         default: ""
       infra_paths:

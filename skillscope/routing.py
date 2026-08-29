@@ -16,10 +16,13 @@ catches the four failure modes a description can cause:
   * false trigger   -- no skill was expected and one activated (over-triggering).
 
 Which skills are in the room is the workflow's decision, passed in as
-``--routing-skills``. It has to be a decision someone makes deliberately,
-because that set is what the number means: a skill tested alone will happily
-answer prompts that belong to its neighbour. Cases are pooled across those
-skills' datasets, so a positive case for skill Y is automatically a negative
+``--routing-skills``. Wherever there is a choice it has to be a decision
+someone makes deliberately, because that set is what the number means: a skill
+tested alongside two neighbours is answering a harder question than one tested
+alongside none. A repo with a single skill has no choice to make and so makes
+none; it still gets the over- and under-triggering half of the answer, graded
+against its own near misses and the shared negatives. Cases are pooled across
+the room's datasets, so a positive case for skill Y is automatically a negative
 for skill X and the confusion matrix fills itself in.
 
 Cost control: each run is killed the moment the routing decision is observable

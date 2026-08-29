@@ -18,6 +18,9 @@ temp directory rather than reading whatever happens to be checked out here.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -94,7 +97,11 @@ class Repo:
     def __init__(self, test: unittest.TestCase) -> None:
         tmp = tempfile.TemporaryDirectory()
         test.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        # Resolved, because the config does the same to whatever root it is
+        # given: a Windows runner's temp directory arrives in its 8.3 form
+        # (`RUNNER~1`), so an unresolved root here would compare unequal to the
+        # very path the harness derived from it.
+        self.root = Path(tmp.name).resolve()
         self.test = test
         self.settings: dict = {}
 
@@ -409,8 +416,8 @@ class TestRoutingSet(unittest.TestCase):
         cfg = self.repo.activate(routing_skills="one")
         self.assertEqual(list(cfg.routing_set), ["one"])
 
-    def test_listing_nothing_means_no_routing_run(self) -> None:
-        cfg = self.repo.activate()
+    def test_listing_nothing_where_there_is_a_choice_means_no_routing_run(self) -> None:
+        cfg = self.repo.activate(dataset_skills=["one", "two"])
         self.assertEqual(cfg.routing_set, {})
         plan = select_module.plan(["one"], routing=True, labels=set())
         self.assertFalse(plan["routing"])
@@ -420,9 +427,19 @@ class TestRoutingSet(unittest.TestCase):
         cfg = config.build(
             self.repo.root,
             routing_skills="all",
-            all_skills=["one", "two"],
+            dataset_skills=["one", "two"],
         )
         self.assertEqual(cfg.routing_skills, ("one", "two"))
+
+    def test_none_says_no_routing_run_outright(self) -> None:
+        # The one way to turn routing off, and it survives a repo having only
+        # one skill -- which is otherwise enough to infer a room.
+        for available in (["one"], ["one", "two"]):
+            with self.subTest(available=available):
+                cfg = config.build(
+                    self.repo.root, routing_skills="none", dataset_skills=available
+                )
+                self.assertEqual(cfg.routing_skills, ())
 
     def test_a_skill_that_does_not_exist_is_refused(self) -> None:
         cfg = self.repo.activate(routing_skills="one,ghost")
@@ -433,6 +450,96 @@ class TestRoutingSet(unittest.TestCase):
     def test_the_listed_order_is_kept(self) -> None:
         cfg = self.repo.activate(routing_skills="two,one")
         self.assertEqual(list(cfg.routing_set), ["two", "one"])
+
+
+class TestASingleSkillIsItsOwnRoom(unittest.TestCase):
+    """One skill with a dataset is not a choice, so nothing has to be made."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("only-skill", dataset=tier0_dataset("only"))
+
+    def resolve(self, **settings) -> config.Config:
+        """Configure in two passes, the way the CLI does.
+
+        Which skills ship a dataset is a question about the repo, so it can
+        only be answered once the repo is readable.
+        """
+        self.repo.activate(**settings)
+        return self.repo.reactivate(dataset_skills=datasets.skills_with_datasets())
+
+    def test_the_only_skill_with_a_dataset_is_the_room(self) -> None:
+        self.assertEqual(list(self.resolve().routing_set), ["only-skill"])
+
+    def test_it_is_the_room_for_planning_too(self) -> None:
+        # Otherwise the flag would be redundant on the runner and still
+        # required for CI to schedule the job that runs it.
+        self.resolve(infra_paths=".github/workflows/evals.yml")
+        self.assertTrue(select_module.routing_needed({"skills/only-skill/SKILL.md"}))
+        self.assertTrue(
+            select_module.plan(["only-skill"], routing=True, labels=set())["routing"]
+        )
+
+    def test_a_second_skill_makes_it_a_choice_again(self) -> None:
+        self.repo.skill("neighbour", dataset=tier0_dataset("neighbour"))
+        self.assertEqual(self.resolve().routing_set, {})
+
+    def test_a_skill_without_a_dataset_is_not_a_candidate(self) -> None:
+        # It has no prompts, so it could not be graded in the room it would
+        # otherwise make ambiguous.
+        self.repo.skill("undocumented")
+        self.assertEqual(list(self.resolve().routing_set), ["only-skill"])
+
+    def test_saying_none_still_turns_routing_off(self) -> None:
+        cfg = self.resolve(routing_skills="none")
+        self.assertEqual(cfg.routing_set, {})
+        self.assertFalse(
+            select_module.plan(["only-skill"], routing=True, labels=set())["routing"]
+        )
+
+    def test_the_cli_resolves_the_room_before_the_command_runs(self) -> None:
+        # Through the flags, because the two-pass configure in the CLI is what
+        # turns "said nothing" into the one skill there is.
+        self.repo.activate()  # registers the cleanup that restores the config
+        cli._configure(
+            cli.build_parser().parse_args(
+                ["--repo", str(self.repo.root), "run", "--mode", "routing"]
+            )
+        )
+        self.assertEqual(config.active().routing_skills, ("only-skill",))
+
+
+class TestARoutingRunWithNobodyInTheRoom(unittest.TestCase):
+    """What `run` does when the routing set comes out empty."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("one", dataset=tier0_dataset("one"))
+        self.repo.skill("two", dataset=tier0_dataset("two"))
+        self.repo.activate()
+
+    def args(self, *argv) -> argparse.Namespace:
+        return cli.build_parser().parse_args(["run", *argv])
+
+    def test_a_repo_with_a_choice_to_make_is_told_what_its_options_are(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            cli._empty_room(self.args("--mode", "routing"))
+        message = str(caught.exception)
+        for expected in ("all", "none", "one, two"):
+            self.assertIn(expected, message)
+
+    def test_none_skips_the_routing_run_rather_than_failing_it(self) -> None:
+        # `--mode both` still has a behavior run to get on with, and the repo
+        # said it did not want the other half.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._empty_room(self.args("--routing-skills", "none"))
+        self.assertIn("none", out.getvalue())
+
+    def test_asking_for_routing_and_emptying_the_room_is_a_contradiction(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            cli._empty_room(self.args("--mode", "routing", "--routing-skills", "none"))
+        self.assertIn("--mode routing", str(caught.exception))
 
 
 class TestHarnessVersionPin(unittest.TestCase):
