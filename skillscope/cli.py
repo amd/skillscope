@@ -10,7 +10,8 @@ reads those datasets and grades them in two modes:
   * ``routing``  -- installs the skills named by ``--routing-skills`` side by
     side and checks that the right one fires (and that nothing fires when
     nothing should). Cheap, no hardware, and it pools those skills' prompts so
-    each one's positives are the others' negatives.
+    each one's positives are the others' negatives. A repo with a single skill
+    need not name it: there is only one room its skill can be in.
   * ``behavior`` -- installs one skill, runs the prompt to completion, and
     grades ``expected_behavior`` / ``unexpected_behavior`` / ``logs_contain``
     / ``files_exist``. Only runs evaluations that assert something beyond the
@@ -46,6 +47,9 @@ Usage::
 
     # a routing run that reports its score instead of gating on it
     skillscope run --mode routing --routing-skills all --min-accuracy 0
+
+    # a repo with one skill: the room is that skill, so nothing names it
+    skillscope run --mode routing
 
     # one case, keeping the raw transcript
     skillscope run --only qwen-on-mi300x --keep-logs eval-logs
@@ -260,6 +264,41 @@ def cmd_select(args: argparse.Namespace) -> int:
     return 0
 
 
+def _empty_room(args: argparse.Namespace) -> None:
+    """A routing run was asked for with nobody in the room. Skip it, or refuse.
+
+    Two ways to get here. ``--routing-skills none`` is a repo saying it has no
+    routing question worth paying for, which is an answer: under the default
+    ``--mode both`` the behavior run goes ahead without it, and only asking for
+    the routing run outright is a contradiction worth stopping on.
+
+    Otherwise the repo has several skills with datasets and said nothing about
+    which of them compete, and that is not a guess this harness makes: install
+    every skill on disk and a work-in-progress drops everyone's number, install
+    the one under review alone and it wins by walkover. A repo with a single
+    skill is the exception, and never reaches this function -- there is only
+    one room its skill can be in.
+    """
+    if config.wants_no_skills(args.routing_skills):
+        if args.mode == "routing":
+            raise SystemExit(
+                "error: --mode routing asks for a routing run and "
+                "`--routing-skills none` empties the room. Name the skills that "
+                "go in it, or drop --mode routing."
+            )
+        print("[routing] `--routing-skills none`: no routing run, as asked.")
+        return
+
+    available = ", ".join(datasets.skills_with_datasets()) or "(none)"
+    raise SystemExit(
+        "error: routing mode needs the skills that go in the room: "
+        "`--routing-skills a,b`, `all` for every skill with a dataset, or "
+        "`none` to skip routing entirely. Only a repo with one skill gets a "
+        "default, because who a skill competes against is what its routing "
+        f"score means. Skills with a dataset here: {available}."
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     _structural_or_exit()
 
@@ -274,14 +313,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     failed = False
     started = time.time()
 
-    if args.mode in ("routing", "both"):
-        routing_set = config.active().routing_set
-        if not routing_set:
-            raise SystemExit(
-                "error: routing mode needs the skills that go in the room: "
-                "`--routing-skills a,b`, or `--routing-skills all` for every "
-                "skill with a dataset. There is no default, because who a "
-                "skill competes against is what its routing score means."
+    wants_routing = args.mode in ("routing", "both")
+    routing_set = config.active().routing_set if wants_routing else {}
+    if wants_routing and not routing_set:
+        _empty_room(args)
+
+    if routing_set:
+        if not args.routing_skills.strip():
+            only = next(iter(routing_set))
+            print(
+                f"[routing] --routing-skills was not given, and {only} is the "
+                "only skill here with a dataset, so it is the room."
             )
 
         # Pool the routing set's cases: skill Y's positives are skill X's
@@ -417,10 +459,11 @@ def _add_routing_skills_argument(parser: argparse.ArgumentParser) -> None:
         default="",
         metavar="A,B,C",
         help=(
-            "Skills to install side by side for the routing run, or `all` for "
-            "every skill with a dataset. Empty means no routing run at all: "
-            "who a skill competes against is what its routing score means, so "
-            "there is nothing sensible to assume."
+            "Skills to install side by side for the routing run: a list, `all` "
+            "for every skill with a dataset, or `none` to skip routing. Left "
+            "out, a repo with one skill runs that skill and a repo with "
+            "several stops -- who a skill competes against is what its routing "
+            "score means, so there is nothing sensible to assume."
         ),
     )
 
@@ -738,10 +781,11 @@ def build_parser() -> argparse.ArgumentParser:
 def _configure(args: argparse.Namespace) -> None:
     """Make the flags this subcommand was given the active config.
 
-    Built twice when ``--routing-skills all`` is asked for, because "every
-    skill with a dataset" is itself a question answered through the config:
-    the first pass is what makes the repo readable, the second records the
-    answer.
+    Built twice for a subcommand that takes ``--routing-skills``, because two
+    of the answers that flag accepts -- ``all``, and the single skill a repo
+    with one of them never had to name -- are questions about which skills
+    ship a dataset, and that is itself answered through the config. The first
+    pass is what makes the repo readable, the second records the answer.
     """
     root = Path(args.repo).expanduser() if args.repo else None
     settings = {
@@ -764,9 +808,9 @@ def _configure(args: argparse.Namespace) -> None:
     settings["version"] = getattr(args, "version", None)
 
     config.use(config.build(root, **settings))
-    if config.wants_all_skills(settings["routing_skills"]):
+    if settings["routing_skills"] is not None:
         config.use(
-            config.build(root, **settings, all_skills=datasets.skills_with_datasets())
+            config.build(root, **settings, dataset_skills=datasets.skills_with_datasets())
         )
 
 

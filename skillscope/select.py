@@ -160,8 +160,9 @@ def matrix_entries(
 def routing_needed(changed: set[str], extended: bool = True) -> bool:
     """Whether the change can move a routing decision.
 
-    Nothing to move if the workflow listed no routing skills, which is a repo
-    saying it has no routing question worth paying for.
+    Nothing to move if the routing set came out empty, which is a repo with
+    several skills that never said which of them compete, or one that said
+    ``none``.
 
     Otherwise, a skill's description and its prompts are the only inputs, so a
     pull request that only edits a reference file or a helper script under a
