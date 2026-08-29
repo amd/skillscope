@@ -39,10 +39,13 @@ Usage::
     # everything a skill owner needs before opening a pull request
     skillscope run --skill serving-llms-on-epyc
 
-    # what CI runs
+    # what CI runs: a routing miss fails the run, like a behavior miss does
     skillscope run --mode routing --routing-skills local-ai-use,tracelens \
-        --min-accuracy 0.9 --no-extended
+        --no-extended
     skillscope run --mode behavior --skill local-ai-use --no-extended
+
+    # a routing run that reports its score instead of gating on it
+    skillscope run --mode routing --routing-skills all --min-accuracy 0
 
     # one case, keeping the raw transcript
     skillscope run --only qwen-on-mi300x --keep-logs eval-logs
@@ -132,6 +135,35 @@ def _structural_or_exit() -> list[references.Reference]:
         _report_failures(errors)
         raise SystemExit(1)
     return found
+
+
+def routing_gate(totals: dict, min_accuracy: float) -> str | None:
+    """Why this routing run should fail, or ``None`` if it should not.
+
+    The first two answers are infrastructure, not score, and hold whatever the
+    bar is: a run where nothing was graded, or where no skill ever activated,
+    has not measured routing at all.
+    """
+    if totals["graded"] == 0:
+        return "every case errored; treating the run as a failure."
+    if totals["activations"] == 0 and totals["activations_expected"]:
+        return (
+            "no skill activated in any case -- the skills were not installed, "
+            "or activation detection is broken. Failing rather than reporting "
+            "a 0% routing rate as if it were real."
+        )
+    if min_accuracy <= 0:
+        return None
+    # Compared against the exact ratio rather than the reported accuracy,
+    # which is rounded for the report: at the default bar of 1, a single miss
+    # in a large enough set rounds to 1.000 and would let itself through.
+    if totals["passed"] / totals["graded"] < min_accuracy:
+        return (
+            f"{totals['passed']}/{totals['graded']} correct "
+            f"(accuracy {totals['accuracy']}) is below the --min-accuracy bar "
+            f"of {min_accuracy}."
+        )
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -305,24 +337,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         _write_report(summary, routing.render_markdown(summary), args, "routing")
 
-        totals = summary["totals"]
-        if totals["graded"] == 0:
-            print("[routing] every case errored; treating the run as a failure.", file=sys.stderr)
-            failed = True
-        elif totals["activations"] == 0 and totals["activations_expected"]:
-            print(
-                "[routing] no skill activated in any case -- the skills were not "
-                "installed, or activation detection is broken. Failing rather than "
-                "reporting a 0% routing rate as if it were real.",
-                file=sys.stderr,
-            )
-            failed = True
-        elif args.min_accuracy > 0 and (totals["accuracy"] or 0) < args.min_accuracy:
-            print(
-                f"[routing] accuracy {totals['accuracy']} is below the "
-                f"--min-accuracy bar of {args.min_accuracy}.",
-                file=sys.stderr,
-            )
+        reason = routing_gate(summary["totals"], args.min_accuracy)
+        if reason:
+            print(f"[routing] {reason}", file=sys.stderr)
             failed = True
 
     if args.mode in ("behavior", "both"):
@@ -497,8 +514,12 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--min-accuracy",
         type=float,
-        default=0.0,
-        help="Exit non-zero when routing accuracy falls below this (0-1). Default: 0 (report only).",
+        default=1.0,
+        help=(
+            "Exit non-zero when routing accuracy falls below this (0-1). "
+            "Default: 1 (every graded case has to be right). 0 reports the "
+            "score without gating on it."
+        ),
     )
     parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip the API reachability check."

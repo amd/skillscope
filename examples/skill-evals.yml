@@ -88,7 +88,8 @@ jobs:
       # `skillscope_version` in its evals.json, next to the prompts it affects.
       version: main
       skills: ${{ inputs.skills }}
-      # Reports the routing score without gating on it. Raise it once you know
-      # what your prompts actually score.
-      min_accuracy: "0"
+      # Any wrong routing decision fails the run. Drop it to "0" to report the
+      # score without gating while you find out what your prompts score, or to
+      # something in between to hold a bar short of perfect.
+      min_accuracy: "1"
       api_key_secret: ANTHROPIC_API_KEY

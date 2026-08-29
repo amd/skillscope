@@ -84,6 +84,23 @@ To run a single command instead of the pipeline, use the action directly:
     command: structural
 ```
 
+### A wrong routing decision fails the run
+
+`min_accuracy` (`--min-accuracy`) defaults to `1`: every graded routing case
+has to land on the right skill, the same way every behavior expectation has to
+hold. A routing miss is a defect and not a statistic — a description that fires
+on its neighbour's prompt makes that neighbour worse — so it turns the run red
+rather than sitting in a summary nobody reads.
+
+Loosening it is a one-line diff a reviewer can see. `min_accuracy: "0"` reports
+the score without gating on it, which is where a repo that has never measured
+its prompts should start; anything in between holds a bar short of perfect. The
+bar is over the cases that were *graded*: a case whose own run errored counts
+towards neither side of it, because a timeout says nothing about routing. No
+value turns off the infrastructure checks — a run where nothing was graded, or
+where no skill activated anywhere, fails at any bar, since those numbers are an
+artifact rather than a result.
+
 ### Pin `@bootstrap` and leave it there
 
 `bootstrap` is a contract, not a release. The action behind it only resolves a

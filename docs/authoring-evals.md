@@ -210,6 +210,12 @@ assumed.
 Everything but `structural` needs the `claude` CLI authenticated, plus whatever
 your own cases need.
 
+A run exits non-zero on a failed behavior expectation and, because the routing
+bar defaults to every graded case being right, on a prompt that reaches the
+wrong skill. `--min-accuracy 0` reports the routing score without holding it to
+that, which is worth having while you are still learning what your prompts
+score.
+
 Two failure modes are worth knowing before you read a report. A routing case
 that ends without the agent either activating a skill or answering is reported
 as an **error**, not a missed trigger: grading it would invent a result out of
