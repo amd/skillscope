@@ -159,9 +159,15 @@ schedule at the workflow to catch rot in markdown nobody is editing.
 
 A 2xx answer is reachable, and so is a 429 — that is a host saying "you again",
 which is a fact about the run rather than the link. `HEAD` is asked first and
-retried as a `GET` when a server refuses it. Links inside fenced code blocks,
-inline code spans, and HTML comments are left alone: those are illustrations of
-links rather than promises.
+asked again as a `GET` whenever it does not come back with one, since plenty of
+hosts refuse the method or simply ignore it. Hosts are fetched from in
+parallel, one request at a time each: a checker that opens twenty connections
+to the same documentation site gets itself throttled, and a throttled request
+is indistinguishable from link rot.
+
+Links inside fenced code blocks, inline code spans, and HTML comments are left
+alone — those are illustrations of links rather than promises. All of it is
+standard library, so none of this adds a dependency to a graded run.
 
 ### A skill says what hardware it needs; the repo says what that costs
 

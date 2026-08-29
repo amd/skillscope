@@ -1190,12 +1190,23 @@ class TestExternalProbe(unittest.TestCase):
         # 200 on GET. That is a server preference, not link rot.
         self.assertEqual(self.probe(HEAD=self.http_error(405), GET=200), "")
 
+    def test_a_head_that_never_comes_back_is_asked_again_as_a_get(self) -> None:
+        # The failure that matters most: a host that black-holes HEAD would
+        # otherwise be reported as rotten on the strength of a method it
+        # simply does not serve.
+        self.assertEqual(self.probe(HEAD=TimeoutError("timed out"), GET=200), "")
+
+    def test_what_is_reported_is_what_a_reader_following_the_link_would_get(self) -> None:
+        detail = self.probe(HEAD=self.http_error(405), GET=self.http_error(410))
+        self.assertEqual(detail, "HTTP 410")
+
     def test_a_url_nobody_serves(self) -> None:
         detail = self.probe(HEAD=self.http_error(404), GET=self.http_error(404))
         self.assertEqual(detail, "HTTP 404")
 
     def test_a_host_that_does_not_resolve(self) -> None:
-        detail = self.probe(HEAD=urllib.error.URLError("Name or service not known"))
+        unresolvable = urllib.error.URLError("Name or service not known")
+        detail = self.probe(HEAD=unresolvable, GET=unresolvable)
         self.assertIn("Name or service not known", detail)
 
 

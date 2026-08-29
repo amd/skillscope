@@ -564,8 +564,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=references.DEFAULT_JOBS,
         help=(
-            "URLs to fetch concurrently under --external. Default: "
-            f"{references.DEFAULT_JOBS}."
+            "Hosts to fetch from concurrently under --external. One request "
+            "at a time goes to any one host, whatever this is set to. "
+            f"Default: {references.DEFAULT_JOBS}."
         ),
     )
     structural_parser.set_defaults(handler=cmd_structural)

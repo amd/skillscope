@@ -55,18 +55,17 @@ MARKDOWN_SUFFIXES = (".md", ".markdown")
 # rate-limiting us, which says nothing about the reference.
 ACCEPTED_STATUS = frozenset(range(200, 207)) | {429}
 
-# Some servers refuse HEAD outright. That is a server preference, not a broken
-# reference, so the same URL is asked for with GET before it is believed.
-_HEAD_REFUSED = frozenset({400, 403, 404, 405, 406, 501})
-
 # Worth asking again: a transient server-side or transport failure. A 4xx is
 # an answer, and asking a second time will get the same one.
 _RETRYABLE_STATUS = frozenset({408, 425, 500, 502, 503, 504})
 
-DEFAULT_TIMEOUT_S = 20.0
-DEFAULT_RETRIES = 2
+DEFAULT_TIMEOUT_S = 15.0
+# One retry rather than several: a URL is already asked for twice per attempt
+# (see `_attempt`), and a host that has ignored four requests is not going to
+# answer the fifth inside a CI job's patience.
+DEFAULT_RETRIES = 1
 RETRY_WAIT_S = 2.0
-DEFAULT_JOBS = 8
+DEFAULT_JOBS = 16
 
 # Plain urllib announces itself as a Python script, which a fair number of
 # hosts answer with a 403. The reference is fine; the greeting was the problem.
@@ -372,12 +371,23 @@ def external_errors(
         return []
 
     check = probe or (lambda url: _probe(url, timeout=timeout, retries=retries))
-    urls = sorted(grouped)
-    with ThreadPoolExecutor(max_workers=max(1, min(jobs, len(urls)))) as pool:
-        details = list(pool.map(check, urls))
+    # Hosts in parallel, but one request at a time within a host. A checker
+    # that opens twenty connections to the same documentation site gets itself
+    # throttled, and a throttled request is indistinguishable from link rot --
+    # so the impolite version of this check is also the one that lies.
+    hosts: dict[str, list[str]] = {}
+    for url in sorted(grouped):
+        hosts.setdefault(urllib.parse.urlsplit(url).netloc.lower(), []).append(url)
+
+    def check_host(urls: list[str]) -> list[tuple[str, str]]:
+        return [(url, check(url)) for url in urls]
+
+    workers = max(1, min(jobs, len(hosts)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        checked = [pair for batch in pool.map(check_host, hosts.values()) for pair in batch]
 
     errors: list[str] = []
-    for url, detail in zip(urls, details):
+    for url, detail in sorted(checked):
         if not detail:
             continue
         seen = ", ".join(
@@ -405,25 +415,38 @@ def _probe(url: str, *, timeout: float, retries: int) -> str:
 
 
 def _attempt(url: str, timeout: float) -> tuple[str, bool]:
-    """One round trip: ``(why it failed or "", whether asking again may help)``."""
+    """One look at a URL: ``(why it failed or "", whether to ask again)``.
+
+    HEAD first because it is cheap, then GET, because a fair number of hosts
+    answer HEAD with a refusal -- or with nothing at all until the clock runs
+    out -- and the same URL with 200 on GET. Only a URL that neither method
+    got an answer out of is reported, and what is reported is what GET said,
+    which is the answer a reader following the link would have got.
+    """
+    detail, retryable = "", False
     for method in ("HEAD", "GET"):
-        request = urllib.request.Request(url, method=method, headers=_HEADERS)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                status = getattr(response, "status", None) or response.getcode()
-                if status in ACCEPTED_STATUS:
-                    return "", False
-                return f"HTTP {status}", status in _RETRYABLE_STATUS
-        except urllib.error.HTTPError as exc:
-            if exc.code in ACCEPTED_STATUS:
+        detail, retryable = _request(url, method, timeout)
+        if not detail:
+            return "", False
+    return detail, retryable
+
+
+def _request(url: str, method: str, timeout: float) -> tuple[str, bool]:
+    """One round trip."""
+    request = urllib.request.Request(url, method=method, headers=_HEADERS)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = getattr(response, "status", None) or response.getcode()
+            if status in ACCEPTED_STATUS:
                 return "", False
-            if method == "HEAD" and exc.code in _HEAD_REFUSED:
-                continue
-            return f"HTTP {exc.code}", exc.code in _RETRYABLE_STATUS
-        except urllib.error.URLError as exc:
-            return f"{exc.reason}", True
-        except ValueError as exc:  # a URL urllib will not even attempt
-            return f"{exc}", False
-        except OSError as exc:  # timeouts, resets, TLS failures
-            return f"{exc}", True
-    return "", False
+            return f"HTTP {status}", status in _RETRYABLE_STATUS
+    except urllib.error.HTTPError as exc:
+        if exc.code in ACCEPTED_STATUS:
+            return "", False
+        return f"HTTP {exc.code}", exc.code in _RETRYABLE_STATUS
+    except urllib.error.URLError as exc:
+        return f"{exc.reason}", True
+    except ValueError as exc:  # a URL urllib will not even attempt
+        return f"{exc}", False
+    except OSError as exc:  # timeouts, resets, TLS failures
+        return f"{exc}", True
