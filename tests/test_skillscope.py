@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from skillscope import agent, behavior, config, datasets, routing
+from skillscope import agent, behavior, cli, config, datasets, routing
 from skillscope import select as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY, VERSION_KEY
 
@@ -953,6 +953,66 @@ class TestRoutingClassification(unittest.TestCase):
 
     def test_only_correct_and_true_negative_pass(self) -> None:
         self.assertEqual(routing.PASSING_VERDICTS, {"correct_trigger", "true_negative"})
+
+
+class TestRoutingGate(unittest.TestCase):
+    """What turns a routing run red. By default: any wrong decision."""
+
+    def totals(self, passed: int, graded: int, **extra) -> dict:
+        return {
+            "passed": passed,
+            "graded": graded,
+            "accuracy": round(passed / graded, 3) if graded else None,
+            "activations": graded,
+            "activations_expected": graded,
+            **extra,
+        }
+
+    def gate(self, passed: int, graded: int, bar: float = 1.0, **extra) -> str | None:
+        return cli.routing_gate(self.totals(passed, graded, **extra), bar)
+
+    def test_the_default_bar_is_every_graded_case(self) -> None:
+        self.assertEqual(cli.build_parser().parse_args(["run"]).min_accuracy, 1.0)
+
+    def test_a_clean_sweep_passes(self) -> None:
+        self.assertIsNone(self.gate(12, 12))
+
+    def test_one_wrong_decision_fails(self) -> None:
+        reason = self.gate(11, 12)
+        self.assertIn("11/12", reason)
+        self.assertIn("--min-accuracy", reason)
+
+    def test_an_accuracy_that_rounds_up_does_not_slip_through(self) -> None:
+        # The reported figure is rounded to three places, so one miss in a big
+        # enough set prints as a clean 1.0. The bar is held against the ratio.
+        totals = self.totals(3999, 4000)
+        self.assertEqual(totals["accuracy"], 1.0)
+        self.assertIsNotNone(cli.routing_gate(totals, 1.0))
+
+    def test_zero_reports_the_score_without_gating(self) -> None:
+        self.assertIsNone(self.gate(1, 12, bar=0))
+
+    def test_a_bar_short_of_perfect_is_kept_to_the_letter(self) -> None:
+        self.assertIsNone(self.gate(9, 10, bar=0.9))
+        self.assertIsNotNone(self.gate(8, 10, bar=0.9))
+
+    def test_a_case_that_errored_is_outside_the_bar(self) -> None:
+        # Errors are excluded from accuracy -- a timeout is not a routing
+        # verdict -- so a perfect score over what was graded still passes.
+        self.assertIsNone(self.gate(11, 11, cases=12, errors=1))
+
+    def test_nothing_graded_fails_however_low_the_bar(self) -> None:
+        totals = {
+            "passed": 0,
+            "graded": 0,
+            "accuracy": None,
+            "activations": 0,
+            "activations_expected": 0,
+        }
+        self.assertIsNotNone(cli.routing_gate(totals, 0.0))
+
+    def test_a_run_where_no_skill_activated_fails_however_low_the_bar(self) -> None:
+        self.assertIsNotNone(self.gate(0, 12, bar=0, activations=0))
 
 
 class TestActivationDetection(unittest.TestCase):
