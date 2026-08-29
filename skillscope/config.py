@@ -93,6 +93,14 @@ class Config:
     # link rot keeps getting caught, and a known liar stops crying wolf.
     excluded_urls: tuple[str, ...] = ()
 
+    # What this repo asks of every skill beyond the format itself: files each
+    # one ships beside its SKILL.md, and the `##` headings those of them that
+    # are markdown must have something under. A governance card naming an owner
+    # and a license is the usual reason. Empty by default, because this is a
+    # repo's policy rather than a skill's format.
+    skill_files: tuple[str, ...] = ()
+    skill_sections: tuple[str, ...] = ()
+
     # `runs-on` labels for a behavior leg, and the platforms a skill runs on
     # when it does not say. A skill that asks for extra labels in its
     # evals/machine.yml gets `scoped_runner` as its base instead, because the
@@ -252,6 +260,8 @@ def build(
     infra_paths: object = None,
     docs: object = None,
     excluded_urls: object = None,
+    skill_files: object = None,
+    skill_sections: object = None,
     behavior_runner: object = None,
     behavior_os: object = None,
     scoped_runner: object = None,
@@ -286,6 +296,8 @@ def build(
         infra_paths=frozenset(_items(infra_paths, "--infra-paths")),
         doc_globs=_items(docs, "--docs"),
         excluded_urls=_items(excluded_urls, "--exclude-url"),
+        skill_files=_items(skill_files, "--skill-files"),
+        skill_sections=_items(skill_sections, "--skill-sections"),
         behavior_runner=_items(behavior_runner, "--behavior-runner")
         or DEFAULT_BEHAVIOR_RUNNER,
         behavior_os=_items(behavior_os, "--behavior-os") or DEFAULT_BEHAVIOR_OS,

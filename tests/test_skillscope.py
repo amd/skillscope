@@ -26,7 +26,16 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from skillscope import agent, behavior, cli, config, datasets, references, routing
+from skillscope import (
+    agent,
+    behavior,
+    cli,
+    config,
+    datasets,
+    references,
+    routing,
+    structure,
+)
 from skillscope import select as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY, VERSION_KEY
 
@@ -937,6 +946,142 @@ class TestWholeRepoStructure(unittest.TestCase):
         cases, errors = parse(template, skill="alpha")
         self.assertEqual(errors, [])
         self.assertEqual(datasets.tier0_errors("alpha", cases), [])
+
+
+class TestSkillStructure(unittest.TestCase):
+    """The skill folder itself: what the format requires, and what a repo adds."""
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+
+    def write(self, text: str, skill: str = "demo-skill") -> None:
+        (self.repo.root / "skills" / skill / "SKILL.md").write_text(
+            text, encoding="utf-8"
+        )
+
+    def declares(self, frontmatter: str, body: str = "\n# Demo\n") -> None:
+        self.write(f"---\n{frontmatter}\n---\n{body}")
+
+    def test_a_skill_in_shape_reports_nothing(self) -> None:
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_skill_md_without_frontmatter_is_never_loaded_by_an_agent(self) -> None:
+        self.write("# Demo\n\nNo frontmatter at all.\n")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("frontmatter", errors[0])
+
+    def test_frontmatter_that_is_not_yaml_is_reported_as_such(self) -> None:
+        self.declares("name: [demo-skill\ndescription: broken")
+        self.assertTrue(any("not valid YAML" in e for e in structure.errors()))
+
+    def test_frontmatter_that_is_not_a_mapping_is_reported(self) -> None:
+        self.declares("- demo-skill\n- a list, not a mapping")
+        self.assertTrue(any("must be a mapping" in e for e in structure.errors()))
+
+    def test_a_missing_name_or_description_is_reported_separately(self) -> None:
+        self.declares("summary: neither field is here")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(any("`name`" in e for e in errors))
+        self.assertTrue(any("`description`" in e for e in errors))
+
+    def test_a_name_that_disagrees_with_the_folder_is_reported(self) -> None:
+        # The folder name is the skill's identity in its dataset, in a routing
+        # verdict, and in the report, so a frontmatter name that differs makes
+        # every one of those about a skill that does not exist.
+        self.declares("name: other-skill\ndescription: Does things.")
+        self.assertTrue(any("`demo-skill`" in e for e in structure.errors()))
+
+    def test_a_name_that_is_not_lowercase_with_hyphens_is_reported(self) -> None:
+        self.repo.skill("Demo_Skill", dataset=tier0_dataset("odd"))
+        self.assertTrue(
+            any("lowercase-with-hyphens" in e for e in structure.errors())
+        )
+
+    def test_a_name_longer_than_the_format_allows_is_reported(self) -> None:
+        long_name = "a" * (structure.MAX_NAME_LENGTH + 1)
+        self.repo.skill(long_name, dataset=tier0_dataset("long"))
+        self.assertTrue(
+            any(f"{len(long_name)} characters" in e for e in structure.errors())
+        )
+
+    def test_a_name_claiming_a_reserved_word_is_reported(self) -> None:
+        self.repo.skill("claude-helper", dataset=tier0_dataset("helper"))
+        self.assertTrue(any("`claude`" in e for e in structure.errors()))
+
+    def test_a_description_longer_than_the_format_allows_is_reported(self) -> None:
+        self.declares(
+            f"name: demo-skill\ndescription: {'d' * (structure.MAX_DESCRIPTION_LENGTH + 1)}"
+        )
+        self.assertTrue(any("`description` is" in e for e in structure.errors()))
+
+    def test_a_body_past_the_limit_is_reference_material_in_the_wrong_file(self) -> None:
+        lines = "\n".join(f"line {i}" for i in range(structure.MAX_BODY_LINES + 1))
+        self.declares("name: demo-skill\ndescription: Does things.", f"\n{lines}\n")
+        self.assertTrue(any("sibling files" in e for e in structure.errors()))
+
+    def test_blank_lines_around_the_body_do_not_count_against_it(self) -> None:
+        lines = "\n".join(f"line {i}" for i in range(structure.MAX_BODY_LINES))
+        self.declares("name: demo-skill\ndescription: Does things.", f"\n\n{lines}\n\n\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_globbed_directory_with_no_skill_file_is_reported(self) -> None:
+        # It is not a skill, so nothing grades it, routes it, or reports on it.
+        # Silence there is the failure: either the file is missing or the glob
+        # is too wide, and both are worth one line.
+        (self.repo.root / "skills" / "notes").mkdir(parents=True)
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("skills/notes", errors[0])
+
+    def test_a_repo_that_requires_nothing_extra_requires_nothing_extra(self) -> None:
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_file_the_repo_requires_of_every_skill_has_to_be_there(self) -> None:
+        self.repo.reactivate(skill_files="skill-card.md")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("skill-card.md", errors[0])
+
+    def test_a_required_card_has_to_carry_the_sections_it_is_for(self) -> None:
+        self.repo.reactivate(
+            skill_files="skill-card.md", skill_sections="Description,Owner,License"
+        )
+        (self.folder / "skill-card.md").write_text(
+            "# Skill Card\n\n## Description\n\nWhat it does.\n\n## Owner\n\n", encoding="utf-8"
+        )
+        errors = structure.errors()
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(any("`## Owner` section is empty" in e for e in errors))
+        self.assertTrue(any("no `## License` section" in e for e in errors))
+
+    def test_a_complete_card_passes(self) -> None:
+        self.repo.reactivate(
+            skill_files="skill-card.md", skill_sections="Description,Owner,License"
+        )
+        (self.folder / "skill-card.md").write_text(
+            "# Skill Card\n\n## Description\n\nWhat it does.\n\n"
+            "## Owner\n\nA team.\n\n## License\n\nMIT\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_required_file_that_is_not_markdown_only_has_to_exist(self) -> None:
+        self.repo.reactivate(
+            skill_files="scripts/detect.py", skill_sections="Description"
+        )
+        path = self.folder / "scripts" / "detect.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("print('hi')\n", encoding="utf-8")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_malformed_skill_stops_a_run_before_it_spends_anything(self) -> None:
+        self.declares("name: demo-skill")
+        with self.assertRaises(SystemExit):
+            cli._structural_or_exit()
 
 
 def targets(text: str) -> list[str]:

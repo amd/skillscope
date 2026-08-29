@@ -36,8 +36,9 @@ name: skill-evals
 #     what the agent actually did.
 #
 # Before either of them, the discover job runs the structural checks: every
-# dataset, and every reference the skills' markdown makes. They are free, so
-# they run on every change and nothing expensive starts until they pass.
+# skill folder, every dataset, and every reference the skills' markdown makes.
+# They are free, so they run on every change and nothing expensive starts until
+# they pass.
 #
 # A skill that needs particular hardware says so in its own evals/machine.yml,
 # as runner labels; this workflow says what those legs cost -- the base labels,
@@ -86,6 +87,20 @@ on:
           Regexes matching URLs the external reference check leaves alone,
           comma-separated or as a JSON array. For hosts that are auth-gated or
           that answer a runner's IP with a 403.
+        type: string
+        default: ""
+      skill_files:
+        description: >-
+          Files every skill must ship beside its SKILL.md, comma-separated and
+          relative to the skill folder. For whatever this repo requires on top
+          of the format, such as a governance card.
+        type: string
+        default: ""
+      skill_sections:
+        description: >-
+          `##` headings each markdown file in skill_files must have something
+          under, comma-separated. A card is usually asked for as
+          `Description,Owner,License`.
         type: string
         default: ""
       behavior_runner:
@@ -256,11 +271,14 @@ jobs:
       # the two workflows can be scheduled in either order and an expensive run
       # should never start against a broken dataset. External URLs are left to
       # the job below; everything here is offline and deterministic.
-      - name: Check every dataset and reference structurally
+      - name: Check every skill's structure
         uses: amd/skillscope@bootstrap
         with:
           command: structural
-          args: ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
+          args: >-
+            ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
+            ${{ inputs.skill_files && format('--skill-files ''{0}''', inputs.skill_files) || '' }}
+            ${{ inputs.skill_sections && format('--skill-sections ''{0}''', inputs.skill_sections) || '' }}
           skills: ${{ inputs.skill_globs }}
           version: ${{ inputs.version }}
           python-version: ${{ inputs.python_version }}
@@ -685,8 +703,9 @@ jobs:
           echo "held back:       $SKIPPED"
 
           # If discovery itself failed, surface that rather than guessing. It
-          # also covers the structural checks, so a malformed evals.json or a
-          # reference pointing nowhere lands here as a clear failure.
+          # also covers the structural checks, so a malformed SKILL.md, a
+          # malformed evals.json, or a reference pointing nowhere lands here as
+          # a clear failure.
           if [ "$DISCOVER" != "success" ]; then
             echo "The discover job did not succeed ($DISCOVER)." >&2
             exit 1

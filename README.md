@@ -11,9 +11,9 @@ And a skill that routes perfectly can still do the job badly once it runs.
 skillscope grades all three, from one dataset per skill and the skill's own
 prose:
 
-* **structural** — every dataset, and every reference the skill's markdown
-  makes. No agent, no tokens, instant, and so it runs on every change and
-  gates the two below.
+* **structural** — every skill folder, every dataset, and every reference the
+  skill's markdown makes. No agent, no tokens, instant, and so it runs on every
+  change and gates the two below.
 * **routing** — installs several skills side by side and asks which one wins a
   prompt. You cannot test this alone: a skill tested by itself will happily
   answer prompts that belong to its neighbour.
@@ -130,6 +130,8 @@ flag if you are running the CLI by hand:
 | `infra_paths` | `--infra-paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
 | `doc_globs` | `--docs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
 | `excluded_urls` | `--exclude-url` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
+| `skill_files` | `--skill-files` | none | Files every skill must ship beside its `SKILL.md`, such as a governance card. What the format itself requires is checked either way. |
+| `skill_sections` | `--skill-sections` | none | `##` headings each of those markdown files must have something under, such as `Description,Owner,License`. |
 | `behavior_runner` | `--behavior-runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavior leg. |
 | `behavior_os` | `--behavior-os` | `Linux` | Platforms a skill runs on when its `machine.yml` does not narrow them. |
 | `scoped_runner` | `--scoped-runner` | reuses `behavior_runner` | Base labels for a leg whose skill asks for hardware labels. |
@@ -152,6 +154,42 @@ behavior cases run — it just does not move anybody's routing score.
 
 Listing them also makes the change visible: a skill joining or leaving the room
 moves every other skill's number, and that deserves a diff a reviewer can see.
+
+### A skill that never loads fails here, not in a paid run
+
+The standardized Agent Skills format is small — a folder, a `SKILL.md`, and a
+frontmatter block naming the skill and saying when to use it — and every part
+of it fails quietly. A `name` that disagrees with the folder makes the dataset,
+the routing verdict, and the report about a skill that does not exist. A
+missing `description` leaves an agent nothing to match a prompt against. A
+frontmatter block that is not valid YAML stops the file loading at all, and
+what you see is an agent that simply never uses the skill. So every `SKILL.md`
+is read first:
+
+| What | Bar |
+| --- | --- |
+| frontmatter | opens the file, is valid YAML, and is a mapping |
+| `name` | non-empty, at most 64 characters, lowercase-with-hyphens, free of `anthropic` and `claude`, and equal to the folder name |
+| `description` | non-empty, at most 1024 characters |
+| body | at most 500 lines — past that it is reference material, and an agent reads it in full every time the skill loads |
+
+A directory your `skill_globs` match that holds no `SKILL.md` is reported too.
+It is not a skill, so nothing grades it, routes it, or reports on it; either
+the file is missing or the glob is too wide, and both are worth one line.
+
+Whatever else your repo asks of a skill is policy rather than format, so it is
+configuration. `skill_files` names the files every skill ships beside its
+`SKILL.md`, and `skill_sections` names the `##` headings each of those markdown
+files has to have something under:
+
+```yaml
+skill_files: skill-card.md
+skill_sections: Description,Owner,License
+```
+
+No manifest is read. Which skills a repo publishes, and where it lists them, is
+that repo's business — a harness with an opinion about it would be a second
+place to update every time a skill ships.
 
 ### A reference that goes nowhere is a defect, not a typo
 
@@ -212,7 +250,7 @@ environment gets one matrix, labels and all.
 
 | Command | Does |
 | --- | --- |
-| `skillscope structural` | Every dataset, and every reference the skills' markdown makes. No agent, no tokens. `--docs`, `--external`, `--exclude-url`. |
+| `skillscope structural` | Every skill folder, every dataset, and every reference the skills' markdown makes. No agent, no tokens. `--docs`, `--skill-files`, `--skill-sections`, `--external`, `--exclude-url`. |
 | `skillscope run` | Routing and/or behavior. `--mode`, `--skill`, `--routing-skills`, `--only`, `--min-accuracy`, `--keep-logs`. |
 | `skillscope select` | The CI plan for a change, as JSON: which skills, which runners, which harness version. |
 | `skillscope list-skills` | The skills that have a dataset, as JSON. |
@@ -234,8 +272,9 @@ is not fastidiousness: the harness is supposed to work against any repo, so a
 test that reads whichever tree it happens to be running in tests that tree
 instead of the harness.
 
-The runner is standard library only, apart from PyYAML for the optional
-`machine.yml`, so a graded run installs nothing beyond this package.
+The runner is standard library only, apart from PyYAML, which reads a skill's
+frontmatter and the optional `machine.yml`, so a graded run installs nothing
+beyond this package.
 
 `tools/` holds hand tools that are no part of the graded pipeline:
 `claude_eval.py` (what did this one prompt cost?), `compare_skill.py` (the same

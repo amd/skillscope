@@ -63,6 +63,17 @@ jobs:
       doc_globs: "*.md,docs/**/*.md"
       external_references: true
       # excluded_urls: '^https://intranet\.example\.com/'
+
+      # --- what this repo requires of a skill on top of the format ---
+      #
+      # Every skill's SKILL.md is checked against the standardized format
+      # whatever you put here. These two are for a repo's own policy: files
+      # each skill has to ship, and the sections a governance card must fill
+      # in. Leave them out and only the format is enforced.
+      # skill_files: skill-card.md
+      # skill_sections: Description,Owner,License
+
+      # --- what this run does ---
       #
       # The weekly run is here for link rot alone, so it skips the graded
       # runs: `references` leaves the two free jobs and nothing that spends a

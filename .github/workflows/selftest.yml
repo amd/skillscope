@@ -58,6 +58,21 @@ jobs:
           description: Does demonstrable things, for a test that needs a skill.
           ---
           EOF
+          cat > fixture/skills/demo-skill/skill-card.md <<'EOF'
+          # Skill Card
+
+          ## Description
+
+          Does demonstrable things.
+
+          ## Owner
+
+          The skillscope selftest.
+
+          ## License
+
+          MIT
+          EOF
           cat > fixture/skills/demo-skill/evals/evals.json <<'EOF'
           {
             "evaluations": [
@@ -78,6 +93,9 @@ jobs:
         uses: ./
         with:
           command: structural
+          # The card and its sections are a repo's own policy, so the fixture
+          # asks for them the way a repo with a governance card would.
+          args: --skill-files skill-card.md --skill-sections Description,Owner,License
           repo: fixture
           source: .
 

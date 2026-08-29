@@ -25,8 +25,8 @@ the alternative is a central routing prompt set plus a separate per-skill test
 file that re-asserts routing with a substring match on the transcript.
 
 Before either of them, and free: the structural checks, which grade the shape
-of a skill rather than an agent's behavior -- every dataset, and every
-reference the skill's markdown makes.
+of a skill rather than an agent's behavior -- every skill folder, every
+dataset, and every reference the skill's markdown makes.
 
 Usage::
 
@@ -67,7 +67,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, references, routing
+from . import behavior, config, datasets, references, routing, structure
 from . import select as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -125,12 +125,16 @@ def _report_failures(errors: list[str]) -> None:
 def _structural_or_exit() -> list[references.Reference]:
     """Fail before any tokens are spent if the skills are not in shape.
 
-    Datasets and internal references, which are the two halves that cost
-    nothing to check. External URLs are left out on purpose: they fail for
-    reasons that have nothing to do with the run being gated.
+    The skill folders, the datasets, and the internal references: everything
+    that costs nothing to check. External URLs are left out on purpose: they
+    fail for reasons that have nothing to do with the run being gated.
     """
     found = references.collect()
-    errors = datasets.structural_errors() + references.internal_errors(found)
+    errors = (
+        structure.errors()
+        + datasets.structural_errors()
+        + references.internal_errors(found)
+    )
     if errors:
         _report_failures(errors)
         raise SystemExit(1)
@@ -172,13 +176,14 @@ def routing_gate(totals: dict, min_accuracy: float) -> str | None:
 
 
 def cmd_structural(args: argparse.Namespace) -> int:
-    """Structural checks over every dataset and every reference in a skill."""
+    """Structural checks over every skill folder, dataset, and reference."""
     found = _structural_or_exit()
     skills = datasets.skills_with_datasets()
     # Extended datasets are checked regardless of --extended, so count them
     # here too rather than reporting fewer cases than were checked.
     cases = datasets.load_all_cases(extended=True)
     cfg = config.active()
+    print(f"[evals] OK: {len(cfg.skills)} skill folder(s) in shape.")
     print(
         f"[evals] OK: {len(cases)} case(s) across {len(skills)} skill(s) "
         f"plus {len(datasets.load_shared_negatives())} shared negative(s)."
@@ -551,15 +556,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     structural_parser = commands.add_parser(
         "structural",
-        help="Check every dataset and every reference structurally, and exit.",
+        help="Check every skill's structure, and exit.",
         description=(
-            "Datasets, and the references the skills' markdown makes. Relative "
-            "paths and heading anchors are always checked; external URLs are "
-            "fetched only with --external."
+            "The skill folders, their datasets, and the references their "
+            "markdown makes. Relative paths and heading anchors are always "
+            "checked; external URLs are fetched only with --external."
         ),
     )
     _add_skills_argument(structural_parser)
     _add_docs_argument(structural_parser)
+    structural_parser.add_argument(
+        "--skill-files",
+        default="",
+        metavar="PATH[,PATH]",
+        help=(
+            "Files every skill must ship beside its SKILL.md, relative to the "
+            "skill folder. For whatever this repo requires of a skill on top "
+            "of the format, such as a governance card. Default: none."
+        ),
+    )
+    structural_parser.add_argument(
+        "--skill-sections",
+        default="",
+        metavar="TITLE[,TITLE]",
+        help=(
+            "`##` headings each markdown file named by --skill-files must have "
+            "something under, such as Description,Owner,License. Default: none."
+        ),
+    )
     structural_parser.add_argument(
         "--external",
         action="store_true",
@@ -728,6 +752,8 @@ def _configure(args: argparse.Namespace) -> None:
             "infra_paths",
             "docs",
             "excluded_urls",
+            "skill_files",
+            "skill_sections",
             "behavior_runner",
             "behavior_os",
             "scoped_runner",

@@ -201,11 +201,12 @@ skillscope run --mode routing --routing-skills <your-skill>,<a-neighbour>
 skillscope run --only <case-id> --keep-logs logs    # one case, keeping the transcript
 ```
 
-`structural` covers your skill's prose as well as its dataset: every relative
-path and heading anchor in its markdown has to resolve, because a link the
-agent follows to nothing is a step it will improvise around. `--external`
-fetches the URLs too, which needs the network and so is asked for rather than
-assumed.
+`structural` covers your skill's folder and its prose as well as its dataset.
+Your `SKILL.md` has to declare a `name` matching the folder and a
+`description`, both within the format's limits; every relative path and heading
+anchor in your markdown has to resolve, because a link the agent follows to
+nothing is a step it will improvise around. `--external` fetches the URLs too,
+which needs the network and so is asked for rather than assumed.
 
 Everything but `structural` needs the `claude` CLI authenticated, plus whatever
 your own cases need.
