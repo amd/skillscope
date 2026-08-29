@@ -21,7 +21,7 @@ runners, self-hosted and not.
 
 Configuration arrives as environment variables, set from the action's inputs:
 
-    SKILLSCOPE_COMMAND   the subcommand, e.g. "validate"
+    SKILLSCOPE_COMMAND   the subcommand, e.g. "structural"
     SKILLSCOPE_ARGS      further arguments, shell-quoted
     SKILLSCOPE_REPO      root of the repo under test (default ".")
     SKILLSCOPE_SKILLS    globs naming the directories that hold skills

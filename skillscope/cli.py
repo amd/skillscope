@@ -27,7 +27,7 @@ file that re-asserts routing with a substring match on the transcript.
 Usage::
 
     # structural checks only: no agent, no tokens, instant
-    skillscope validate
+    skillscope structural
 
     # everything a skill owner needs before opening a pull request
     skillscope run --skill serving-llms-on-epyc
@@ -106,11 +106,11 @@ def _write_report(summary: dict, report: str, args: argparse.Namespace, label: s
     return output
 
 
-def _validate_or_exit() -> None:
+def _structural_or_exit() -> None:
     """Fail before any tokens are spent if a dataset is malformed."""
-    errors = datasets.validate_all()
+    errors = datasets.structural_errors()
     if errors:
-        print("Dataset validation failed:", file=sys.stderr)
+        print("Structural checks failed:", file=sys.stderr)
         for err in errors:
             print(f"  - {err}", file=sys.stderr)
         raise SystemExit(1)
@@ -121,11 +121,11 @@ def _validate_or_exit() -> None:
 # --------------------------------------------------------------------------
 
 
-def cmd_validate(args: argparse.Namespace) -> int:
+def cmd_structural(args: argparse.Namespace) -> int:
     """Structural checks over every dataset. No agent, no tokens."""
-    _validate_or_exit()
+    _structural_or_exit()
     skills = datasets.skills_with_datasets()
-    # Extended datasets are validated regardless of --extended, so count them
+    # Extended datasets are checked regardless of --extended, so count them
     # here too rather than reporting fewer cases than were checked.
     cases = datasets.load_all_cases(extended=True)
     cfg = config.active()
@@ -185,7 +185,7 @@ def cmd_select(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    _validate_or_exit()
+    _structural_or_exit()
 
     args.model = enforce_model_policy(args.model) or args.model
     skills = _selected_skills(args.skill)
@@ -477,11 +477,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_arguments(run_parser)
     run_parser.set_defaults(handler=cmd_run)
 
-    validate_parser = commands.add_parser(
-        "validate", help="Check every dataset structurally and exit."
+    structural_parser = commands.add_parser(
+        "structural", help="Check every dataset structurally and exit."
     )
-    _add_skills_argument(validate_parser)
-    validate_parser.set_defaults(handler=cmd_validate)
+    _add_skills_argument(structural_parser)
+    structural_parser.set_defaults(handler=cmd_structural)
 
     select_parser = commands.add_parser(
         "select",

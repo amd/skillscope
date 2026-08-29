@@ -25,7 +25,7 @@ is a worse copy of the other.
 
 ```bash
 # structure only: no agent, no tokens, instant
-uvx --from git+https://github.com/amd/skillscope skillscope validate
+uvx --from git+https://github.com/amd/skillscope skillscope structural
 
 # behavior for one skill (needs an authenticated `claude` CLI)
 uvx --from git+https://github.com/amd/skillscope skillscope run \
@@ -60,9 +60,9 @@ jobs:
       api_key_secret: MY_MODEL_API_KEY
 ```
 
-That is the whole pipeline: validate, select what the change affects, run
-routing once, run a behavior leg per affected skill on the hardware that skill
-asks for, and report one aggregate result. See
+That is the whole pipeline: check the structure, select what the change
+affects, run routing once, run a behavior leg per affected skill on the
+hardware that skill asks for, and report one aggregate result. See
 [examples/skill-evals.yml](examples/skill-evals.yml) for a fully configured
 caller and
 [.github/workflows/skill-evals.yml](.github/workflows/skill-evals.yml) for every
@@ -74,7 +74,7 @@ To run a single command instead of the pipeline, use the action directly:
 ```yaml
 - uses: amd/skillscope@bootstrap
   with:
-    command: validate
+    command: structural
 ```
 
 ### Pin `@bootstrap` and leave it there
@@ -121,7 +121,7 @@ change, and a file whose only reader is the workflow next to it.
 what the score *means*. Install every skill on disk and a work-in-progress
 directory drops everyone's number; install only the skill under review and it
 wins every prompt by walkover. Neither is a guess a test should make on your
-behalf. A skill you leave off the list still gets its dataset validated and its
+behalf. A skill you leave off the list still gets its dataset checked and its
 behavior cases run — it just does not move anybody's routing score.
 
 Listing them also makes the change visible: a skill joining or leaving the room
@@ -152,7 +152,7 @@ environment gets one matrix, labels and all.
 
 | Command | Does |
 | --- | --- |
-| `skillscope validate` | Every structural check over every dataset. No agent, no tokens. |
+| `skillscope structural` | Every structural check over every dataset. No agent, no tokens. |
 | `skillscope run` | Routing and/or behavior. `--mode`, `--skill`, `--routing-skills`, `--only`, `--min-accuracy`, `--keep-logs`. |
 | `skillscope select` | The CI plan for a change, as JSON: which skills, which runners, which harness version. |
 | `skillscope list-skills` | The skills that have a dataset, as JSON. |

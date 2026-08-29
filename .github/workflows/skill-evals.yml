@@ -123,7 +123,7 @@ on:
       extended:
         description: >-
           Run each skill's optional evals/extended_evals.json alongside the
-          required dataset. Extended datasets are validated either way.
+          required dataset. Extended datasets are checked structurally either way.
         type: boolean
         default: true
       ignore_gates:
@@ -196,10 +196,10 @@ permissions:
   contents: read
 
 jobs:
-  # Secret-free: structural validation and a git diff. Both are free and fast,
+  # Secret-free: the structural checks and a git diff. Both are free and fast,
   # so a malformed dataset fails here rather than halfway through a paid run.
   discover:
-    name: Validate datasets and select runs
+    name: Check dataset structure and select runs
     runs-on: ${{ fromJSON(inputs.coordinator_runner) }}
     outputs:
       routing: ${{ steps.plan.outputs.routing }}
@@ -219,13 +219,13 @@ jobs:
           # Need the merge base so `git diff` can see what the pull request changed.
           fetch-depth: 0
 
-      # Repeated wherever a repo also gates on validation, because the two
-      # workflows can be scheduled in either order and an expensive run should
-      # never start against a broken dataset.
-      - name: Validate every eval dataset
+      # Repeated wherever a repo also gates on the structural checks, because
+      # the two workflows can be scheduled in either order and an expensive run
+      # should never start against a broken dataset.
+      - name: Check every eval dataset structurally
         uses: amd/skillscope@bootstrap
         with:
-          command: validate
+          command: structural
           skills: ${{ inputs.skill_globs }}
           version: ${{ inputs.version }}
           python-version: ${{ inputs.python_version }}
@@ -623,7 +623,7 @@ jobs:
           echo "held back:       $SKIPPED"
 
           # If discovery itself failed, surface that rather than guessing. It
-          # also covers dataset validation, so a malformed evals.json lands
+          # also covers the structural checks, so a malformed evals.json lands
           # here as a clear failure.
           if [ "$DISCOVER" != "success" ]; then
             echo "The discover job did not succeed ($DISCOVER)." >&2

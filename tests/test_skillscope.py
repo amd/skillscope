@@ -124,7 +124,7 @@ class Repo:
             path.write_text(text, encoding="utf-8")
         # Skills added after activate() should be visible without re-activating:
         # the config resolves its globs on every read, and several tests grow
-        # the repo mid-test to see what validation makes of the result.
+        # the repo mid-test to see what the structural checks make of the result.
         return folder
 
     def activate(self, **settings) -> config.Config:
@@ -304,13 +304,13 @@ class TestMachineRejections(unittest.TestCase):
         # Saying nothing about platforms still means the repo's platforms.
         self.assertEqual(labelled["os"], ["Linux", "Windows"])
 
-    def test_validation_reports_a_broken_machine_file_rather_than_raising(self) -> None:
-        # `skillscope validate` has to survey every skill, so one bad file is a
-        # reported error, not an abandoned run.
+    def test_structural_checks_report_a_broken_machine_file_rather_than_raising(self) -> None:
+        # `skillscope structural` has to survey every skill, so one bad file is
+        # a reported error, not an abandoned run.
         (self.repo.root / "skills" / "demo-skill" / "evals" / "machine.yml").write_text(
             "labels: nope\n", encoding="utf-8"
         )
-        self.assertTrue(any("`labels`" in e for e in datasets.validate_all()))
+        self.assertTrue(any("`labels`" in e for e in datasets.structural_errors()))
 
 
 class TestConfig(unittest.TestCase):
@@ -856,8 +856,8 @@ class TestExtendedDataset(unittest.TestCase):
         self.assertTrue(any("`id`" in e for e in errors), errors)
 
 
-class TestWholeRepoValidation(unittest.TestCase):
-    """What `skillscope validate` guarantees about a repo, whichever repo it is."""
+class TestWholeRepoStructure(unittest.TestCase):
+    """What `skillscope structural` guarantees about a repo, whichever repo it is."""
 
     def setUp(self) -> None:
         self.repo = Repo(self)
@@ -871,17 +871,17 @@ class TestWholeRepoValidation(unittest.TestCase):
         self.repo.skill("beta", dataset=tier0_dataset("beta"))
         self.repo.activate(routing_skills="alpha,beta")
 
-    def test_a_healthy_repo_validates_clean(self) -> None:
-        self.assertEqual(datasets.validate_all(), [])
+    def test_a_healthy_repo_checks_out_clean(self) -> None:
+        self.assertEqual(datasets.structural_errors(), [])
 
-    def test_a_skill_without_a_dataset_fails_validation(self) -> None:
+    def test_a_skill_without_a_dataset_fails_the_structural_checks(self) -> None:
         self.repo.skill("undocumented")
-        self.assertTrue(any("undocumented" in e for e in datasets.validate_all()))
+        self.assertTrue(any("undocumented" in e for e in datasets.structural_errors()))
 
     def test_duplicate_ids_across_skills_are_caught(self) -> None:
         # Ids are repo-wide because routing pools every listed skill's cases.
         self.repo.skill("gamma", dataset=tier0_dataset("alpha"))
-        self.assertTrue(any("duplicate case id" in e for e in datasets.validate_all()))
+        self.assertTrue(any("duplicate case id" in e for e in datasets.structural_errors()))
 
     def test_a_workspace_pointing_nowhere_is_caught(self) -> None:
         dataset = tier0_dataset("delta")
@@ -895,7 +895,7 @@ class TestWholeRepoValidation(unittest.TestCase):
             }
         )
         self.repo.skill("delta", dataset=dataset)
-        self.assertTrue(any("`workspace`" in e for e in datasets.validate_all()))
+        self.assertTrue(any("`workspace`" in e for e in datasets.structural_errors()))
 
     def test_every_skill_with_a_dataset_is_a_declared_skill(self) -> None:
         self.assertEqual(

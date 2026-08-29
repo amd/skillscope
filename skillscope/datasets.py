@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Per-skill eval datasets: discovery, parsing, and structural validation.
+"""Per-skill eval datasets: discovery, parsing, and structural checks.
 
 Every skill owns one dataset at ``<skill>/evals/evals.json``, holding an
 ``evaluations`` array. Each evaluation is a user prompt, a yes/no answer to
@@ -94,7 +94,7 @@ TEMPLATE = PACKAGE_DIR / "data" / "TEMPLATE.json"
 
 # Tier 0, the bar every skill clears before it can ship. Cheap to meet (five
 # prompts, no hardware, no assertions) and enforced structurally so a thin
-# dataset fails validation without spending a single token.
+# dataset fails the structural checks without spending a single token.
 MIN_POSITIVE_CASES = 3
 MIN_NEGATIVE_CASES = 2
 
@@ -217,7 +217,7 @@ def machine_path(skill: str) -> Path:
 def declared_skills() -> list[str]:
     """Every skill the repo under test declares, in or out of a routing run.
 
-    This is the set that must be validated, and the set behavior runs are
+    This is the set the structural checks cover, and the set behavior runs are
     planned over. Which of them compete in a routing run is a separate, and
     much smaller, question: see ``config.Config.routing_set``.
     """
@@ -492,9 +492,9 @@ def load_shared_negatives(errors: list[str] | None = None) -> list[Case]:
 def load_all_cases(errors: list[str] | None = None, *, extended: bool = False) -> list[Case]:
     """Every case in the repo: each skill's dataset plus the shared pool.
 
-    What validation surveys. A routing run grades a subset of it -- the
-    listed skills' prompts, see ``routing_cases`` -- but every prompt in the
-    repo has to be well-formed whether or not it is in the room.
+    What the structural checks survey. A routing run grades a subset of it
+    -- the listed skills' prompts, see ``routing_cases`` -- but every prompt
+    in the repo has to be well-formed whether or not it is in the room.
     """
     cases: list[Case] = []
     for skill in skills_with_datasets():
@@ -519,7 +519,7 @@ def filter_cases(cases: list[Case], only: str) -> list[Case]:
     return selected
 
 
-def validate_all() -> list[str]:
+def structural_errors() -> list[str]:
     """Every structural problem across every dataset, as human-readable strings.
 
     Run by CI before any tokens are spent, so a malformed dataset fails in

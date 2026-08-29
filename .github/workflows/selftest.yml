@@ -74,10 +74,10 @@ jobs:
       # pull request tests the launcher and the payload it is about to change.
       # No `version`: the fixture pins nothing, which exercises the bottom rung
       # of the resolution ladder.
-      - name: Validate the fixture
+      - name: Check the fixture structurally
         uses: ./
         with:
-          command: validate
+          command: structural
           repo: fixture
           source: .
 

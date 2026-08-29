@@ -100,14 +100,14 @@ hunting.
 
 The full field reference is
 [`skillscope/schema/evals.schema.json`](../skillscope/schema/evals.schema.json),
-enforced by `skillscope validate`.
+enforced by `skillscope structural`.
 
 ## A second dataset, for prompts consumers should not pay for
 
 A skill may ship `evals/extended_evals.json` beside the required one, in the
 same format. It carries no coverage bar and whether it runs is the caller's
 decision: `--extended` (the default) includes it, `--no-extended` grades
-`evals.json` alone. Either way it is structurally validated.
+`evals.json` alone. Either way it is structurally checked.
 
 This is where a product repo keeps the prompts it wants graded in its own CI
 without every consumer of its skills paying for them.
@@ -194,13 +194,13 @@ holds.
 ## Running them
 
 ```bash
-skillscope validate                                 # structure only: no agent, no tokens, instant
+skillscope structural                               # structure only: no agent, no tokens, instant
 skillscope run --mode behavior --skill <your-skill> # your skill, end to end
 skillscope run --mode routing --routing-skills <your-skill>,<a-neighbour>
 skillscope run --only <case-id> --keep-logs logs    # one case, keeping the transcript
 ```
 
-Everything but `validate` needs the `claude` CLI authenticated, plus whatever
+Everything but `structural` needs the `claude` CLI authenticated, plus whatever
 your own cases need.
 
 Two failure modes are worth knowing before you read a report. A routing case
