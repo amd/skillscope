@@ -99,7 +99,7 @@ _BARE_URL = re.compile(r"https?://[^\s<>\"'`\\)\]}]+")
 # Trailing punctuation belongs to the sentence, not to the URL.
 _URL_TAIL = ".,;:!?'\""
 
-_HEADING = re.compile(r"^\s{0,3}(?P<hashes>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.*?)\s*#*\s*$")
 _HEADING_LINK = re.compile(r"\[(?P<label>[^\]]*)\]\([^)]*\)")
 _EXPLICIT_ANCHOR = re.compile(
     r"<[^>]*?\b(?:id|name)\s*=\s*[\"'](?P<anchor>[^\"']+)[\"']", re.IGNORECASE
@@ -214,7 +214,7 @@ def _targets(line: str) -> list[str]:
 
 def collect(files: list[Path] | None = None) -> list[Reference]:
     """Every reference in `files`, deduplicated per file, line, and target."""
-    references: list[Reference] = []
+    found: list[Reference] = []
     seen: set[tuple[Path, int, str]] = set()
     for path in markdown_files() if files is None else files:
         try:
@@ -229,8 +229,8 @@ def collect(files: list[Path] | None = None) -> list[Reference]:
                 key = (path, number, target)
                 if key not in seen:
                     seen.add(key)
-                    references.append(Reference(path, number, target))
-    return references
+                    found.append(Reference(path, number, target))
+    return found
 
 
 def anchors(text: str) -> set[str]:
@@ -286,13 +286,13 @@ def _where(path: Path, line: int) -> str:
     return f"{shown}:{line}"
 
 
-def internal_errors(references: list[Reference]) -> list[str]:
+def internal_errors(found: list[Reference]) -> list[str]:
     """Local references that resolve to nothing, as human-readable strings."""
     root = config.active().root
     errors: list[str] = []
     cache: dict[Path, set[str] | None] = {}
 
-    for reference in references:
+    for reference in found:
         if not reference.is_local:
             continue
         parts = reference.parts
@@ -344,7 +344,7 @@ def _shown(path: Path, root: Path) -> str:
 
 
 def external_errors(
-    references: list[Reference],
+    found: list[Reference],
     *,
     exclude: tuple[str, ...] | list[str] = (),
     jobs: int = DEFAULT_JOBS,
@@ -360,7 +360,7 @@ def external_errors(
     """
     patterns = [re.compile(pattern) for pattern in exclude]
     grouped: dict[str, list[Reference]] = {}
-    for reference in references:
+    for reference in found:
         if not reference.is_external:
             continue
         url = reference.url
@@ -387,9 +387,9 @@ def external_errors(
     return errors
 
 
-def external_urls(references: list[Reference]) -> list[str]:
+def external_urls(found: list[Reference]) -> list[str]:
     """The distinct URLs an external run would fetch. For reporting counts."""
-    return sorted({reference.url for reference in references if reference.is_external})
+    return sorted({reference.url for reference in found if reference.is_external})
 
 
 def _probe(url: str, *, timeout: float, retries: int) -> str:

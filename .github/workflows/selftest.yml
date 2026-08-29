@@ -81,6 +81,17 @@ jobs:
           repo: fixture
           source: .
 
+      # This repo has no skills, so what is left is its own prose -- which is
+      # exactly the half a harness for checking references should not be
+      # allowed to get wrong about itself. Offline, so nothing here depends on
+      # the network being polite today.
+      - name: Check this repo's own references
+        uses: ./
+        with:
+          command: structural
+          args: --docs '*.md,docs/**/*.md'
+          source: .
+
       - name: Select runs for a change
         id: select
         uses: ./

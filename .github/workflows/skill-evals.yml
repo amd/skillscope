@@ -6,6 +6,7 @@ name: skill-evals
 #            -> behavior (matrix)
 #            -> behavior-scoped (matrix)
 #            -> results (aggregate)
+#   external-references (on its own, and outside the aggregate)
 #
 # Call it from any repo that keeps skills in a tree and datasets beside them:
 #
@@ -33,6 +34,10 @@ name: skill-evals
 #     makes rather than one this workflow guesses.
 #   * behavior installs one skill, runs the prompt to completion, and grades
 #     what the agent actually did.
+#
+# Before either of them, the discover job runs the structural checks: every
+# dataset, and every reference the skills' markdown makes. They are free, so
+# they run on every change and nothing expensive starts until they pass.
 #
 # A skill that needs particular hardware says so in its own evals/machine.yml,
 # as runner labels; this workflow says what those legs cost -- the base labels,
@@ -67,6 +72,20 @@ on:
         description: >-
           Files that change the harness rather than one skill, so touching one
           re-runs every skill. The workflow calling this one belongs here.
+        type: string
+        default: ""
+      doc_globs:
+        description: >-
+          Markdown outside the skills whose references should be checked too,
+          comma-separated. A repo's README and docs tree go here; the skills
+          themselves are always checked.
+        type: string
+        default: ""
+      excluded_urls:
+        description: >-
+          Regexes matching URLs the external reference check leaves alone,
+          comma-separated or as a JSON array. For hosts that are auth-gated or
+          that answer a runner's IP with a 403.
         type: string
         default: ""
       behavior_runner:
@@ -128,6 +147,14 @@ on:
         default: true
       ignore_gates:
         description: "Run legs on gated hardware without their pull-request label."
+        type: boolean
+        default: false
+      external_references:
+        description: >-
+          Also fetch every external URL the markdown links to, in a job of its
+          own that the aggregate result ignores. Leave it out of branch
+          protection: a rate limit or a blocked runner IP is not a reason to
+          hold a merge.
         type: boolean
         default: false
       version:
@@ -221,11 +248,13 @@ jobs:
 
       # Repeated wherever a repo also gates on the structural checks, because
       # the two workflows can be scheduled in either order and an expensive run
-      # should never start against a broken dataset.
-      - name: Check every eval dataset structurally
+      # should never start against a broken dataset. External URLs are left to
+      # the job below; everything here is offline and deterministic.
+      - name: Check every dataset and reference structurally
         uses: amd/skillscope@bootstrap
         with:
           command: structural
+          args: ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
           skills: ${{ inputs.skill_globs }}
           version: ${{ inputs.version }}
           python-version: ${{ inputs.python_version }}
@@ -353,6 +382,32 @@ jobs:
           print("\n".join(lines))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("\n".join(lines) + "\n")
+
+  # The one check here that reaches the network, and so the one that can fail
+  # without anything being wrong with the change: a rate limit, a host that
+  # blocks runner IPs, DNS having a bad minute. It runs on its own, is absent
+  # from the aggregate result below, and is meant to stay out of branch
+  # protection -- visible when a link rots, powerless to hold a merge. Point a
+  # schedule at this workflow to catch rot in markdown nobody is editing.
+  external-references:
+    name: External references
+    if: inputs.external_references
+    runs-on: ${{ fromJSON(inputs.coordinator_runner) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch every external reference
+        uses: amd/skillscope@bootstrap
+        with:
+          command: structural
+          args: >-
+            --external
+            ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
+            ${{ inputs.excluded_urls && format('--exclude-url ''{0}''', inputs.excluded_urls) || '' }}
+          skills: ${{ inputs.skill_globs }}
+          version: ${{ inputs.version }}
+          python-version: ${{ inputs.python_version }}
 
   # A routing decision is made from skill descriptions alone, so this needs no
   # GPU and no second platform.
@@ -623,8 +678,8 @@ jobs:
           echo "held back:       $SKIPPED"
 
           # If discovery itself failed, surface that rather than guessing. It
-          # also covers the structural checks, so a malformed evals.json lands
-          # here as a clear failure.
+          # also covers the structural checks, so a malformed evals.json or a
+          # reference pointing nowhere lands here as a clear failure.
           if [ "$DISCOVER" != "success" ]; then
             echo "The discover job did not succeed ($DISCOVER)." >&2
             exit 1

@@ -1,15 +1,18 @@
 # skillscope
 
-Routing and behavior tests for agent skills, in whatever repo the skills live
-in.
+Structural, routing, and behavior tests for agent skills, in whatever repo the
+skills live in.
 
 A skill is a description plus a body, and each half fails in a way the other
 cannot catch. A description that never fires makes the body irrelevant; a
 description that fires on its neighbour's work makes every skill around it
 worse.
 And a skill that routes perfectly can still do the job badly once it runs.
-skillscope grades both, from one dataset per skill:
+skillscope grades all three, from one dataset per skill:
 
+* **structural** — every dataset, and every reference the skill's markdown
+  makes. No agent, no tokens, instant, and so it runs on every change and
+  gates the two below.
 * **routing** — installs several skills side by side and asks which one wins a
   prompt. You cannot test this alone: a skill tested by itself will happily
   answer prompts that belong to its neighbour.
@@ -26,6 +29,9 @@ is a worse copy of the other.
 ```bash
 # structure only: no agent, no tokens, instant
 uvx --from git+https://github.com/amd/skillscope skillscope structural
+
+# the same, plus fetching every external URL the skills link to
+uvx --from git+https://github.com/amd/skillscope skillscope structural --external
 
 # behavior for one skill (needs an authenticated `claude` CLI)
 uvx --from git+https://github.com/amd/skillscope skillscope run \
@@ -104,6 +110,8 @@ flag if you are running the CLI by hand:
 | `skill_globs` | `--skills` | `skills/*` | Globs naming the directories that hold skills. A skill is a directory with a `SKILL.md`, and its directory name is its identity. |
 | `routing_skills` | `--routing-skills` | none | The skills a routing run installs side by side. `all` means every skill with a dataset; blank means no routing run. |
 | `infra_paths` | `--infra-paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
+| `doc_globs` | `--docs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
+| `excluded_urls` | `--exclude-url` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
 | `behavior_runner` | `--behavior-runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavior leg. |
 | `behavior_os` | `--behavior-os` | `Linux` | Platforms a skill runs on when its `machine.yml` does not narrow them. |
 | `scoped_runner` | `--scoped-runner` | reuses `behavior_runner` | Base labels for a leg whose skill asks for hardware labels. |
@@ -126,6 +134,34 @@ behavior cases run — it just does not move anybody's routing score.
 
 Listing them also makes the change visible: a skill joining or leaving the room
 moves every other skill's number, and that deserves a diff a reviewer can see.
+
+### A reference that goes nowhere is a defect, not a typo
+
+A skill is prose an agent reads and then acts on. A link to a reference file
+that was renamed, or an anchor into a section that was retitled, is not
+cosmetic: the agent follows it, finds nothing, and improvises. So the
+structural check reads every markdown file under every skill — plus whatever
+`doc_globs` names — and resolves what it finds.
+
+| Check | What it reads | When |
+| --- | --- | --- |
+| internal | relative paths, root-relative paths, and heading anchors, against the files on disk | always, and a paid run waits on it |
+| external | every `http(s)` URL, fetched | only with `--external`, or the `external_references` job |
+
+The split is by failure mode, not by effort. The internal half is
+deterministic and offline, so it can gate a merge and a token spend without
+ever being wrong for a reason of its own. The external half fetches other
+people's servers, which fail for reasons that have nothing to do with the
+change under review: a rate limit, a runner IP a host blocks, DNS having a bad
+minute. It runs as its own job that the aggregate result ignores, so link rot
+is visible without a bad minute somewhere else holding up a merge. Point a
+schedule at the workflow to catch rot in markdown nobody is editing.
+
+A 2xx answer is reachable, and so is a 429 — that is a host saying "you again",
+which is a fact about the run rather than the link. `HEAD` is asked first and
+retried as a `GET` when a server refuses it. Links inside fenced code blocks,
+inline code spans, and HTML comments are left alone: those are illustrations of
+links rather than promises.
 
 ### A skill says what hardware it needs; the repo says what that costs
 
@@ -152,7 +188,7 @@ environment gets one matrix, labels and all.
 
 | Command | Does |
 | --- | --- |
-| `skillscope structural` | Every structural check over every dataset. No agent, no tokens. |
+| `skillscope structural` | Every dataset, and every reference the skills' markdown makes. No agent, no tokens. `--docs`, `--external`, `--exclude-url`. |
 | `skillscope run` | Routing and/or behavior. `--mode`, `--skill`, `--routing-skills`, `--only`, `--min-accuracy`, `--keep-logs`. |
 | `skillscope select` | The CI plan for a change, as JSON: which skills, which runners, which harness version. |
 | `skillscope list-skills` | The skills that have a dataset, as JSON. |

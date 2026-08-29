@@ -195,10 +195,17 @@ holds.
 
 ```bash
 skillscope structural                               # structure only: no agent, no tokens, instant
+skillscope structural --external                    # the same, plus fetching every URL
 skillscope run --mode behavior --skill <your-skill> # your skill, end to end
 skillscope run --mode routing --routing-skills <your-skill>,<a-neighbour>
 skillscope run --only <case-id> --keep-logs logs    # one case, keeping the transcript
 ```
+
+`structural` covers your skill's prose as well as its dataset: every relative
+path and heading anchor in its markdown has to resolve, because a link the
+agent follows to nothing is a step it will improvise around. `--external`
+fetches the URLs too, which needs the network and so is asked for rather than
+assumed.
 
 Everything but `structural` needs the `claude` CLI authenticated, plus whatever
 your own cases need.
