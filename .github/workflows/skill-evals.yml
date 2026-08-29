@@ -117,9 +117,12 @@ on:
         type: string
         default: ""
       min_accuracy:
-        description: "Fail the routing run below this accuracy (0-1). 0 reports without gating."
+        description: >-
+          Fail the routing run below this accuracy (0-1). The default of 1
+          fails on any wrong routing decision; 0 reports the score without
+          gating on it.
         type: string
-        default: "0"
+        default: "1"
       extended:
         description: >-
           Run each skill's optional evals/extended_evals.json alongside the
@@ -412,10 +415,11 @@ jobs:
         uses: amd/skillscope@bootstrap
         with:
           command: run
-          # By default this reports rather than gates, so a low score shows up
-          # as statistics instead of a red run; pass min_accuracy to make it a
-          # hard bar. It still fails on infrastructure problems (no case
-          # produced a decision, or no skill activated anywhere).
+          # By default a wrong routing decision fails this job, the same way a
+          # failed behavior expectation does; lower min_accuracy to report the
+          # score instead, or to hold a bar short of perfect. Either way it
+          # fails on infrastructure problems (no case produced a decision, or
+          # no skill activated anywhere).
           #
           # The interpolated values are quoted because the launcher splits this
           # the way a shell would, and a comma-separated list a caller wrote
