@@ -268,9 +268,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check the model credentials
-        if: inputs.api_key_secret != '' || secrets.api_key != ''
         shell: bash
+        env:
+          EXPECT_KEY: ${{ inputs.routing != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
         run: |
+          if [ "$EXPECT_KEY" != true ]; then
+            exit 0
+          fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "error: the model API key resolved to an empty value. GitHub" \
                  "withholds secrets from pull requests opened from a fork, so" \
@@ -330,9 +334,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check the model credentials
-        if: inputs.api_key_secret != '' || secrets.api_key != ''
         shell: bash
+        env:
+          EXPECT_KEY: ${{ inputs.behavioral != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
         run: |
+          if [ "$EXPECT_KEY" != true ]; then
+            exit 0
+          fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "error: the model API key resolved to an empty value. GitHub" \
                  "withholds secrets from pull requests opened from a fork, so" \
