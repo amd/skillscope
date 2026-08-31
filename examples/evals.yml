@@ -4,7 +4,7 @@ name: skill-evals
 on:
   pull_request:
     paths:
-      - "TraceLens/Agent/Analysis/skills/**"
+      - "path/to/your/skills/**"
       - ".github/workflows/skill-evals.yml"
   workflow_dispatch:
 
@@ -18,7 +18,7 @@ jobs:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
       skills: |
-        TraceLens/Agent/Analysis/skills/analysis-orchestrator
+        path/to/your/skills/analysis-orchestrator
       # Each step can be set to `required`, `optional`, or `off`.
       structural: required
       routing: required
