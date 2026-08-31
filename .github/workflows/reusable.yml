@@ -1,0 +1,416 @@
+name: reusable
+
+# Grade a repo's skills, one runner per skill.
+#
+#   jobs:
+#     evals:
+#       uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
+#       secrets:
+#         api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+#       with:
+#         skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
+#
+# That is a whole caller. Everything else has a default, and the defaults are
+# the strict answer: every step runs, and every step can fail the run.
+#
+#   discover --> structural --> routing    (one runner per skill)
+#                           --> behavioral (one runner per skill)
+#                       --> results
+#
+# `skills` is a directory or a glob matching several, one per line or comma-
+# separated, and every skill it names is graded on a runner of its own. Ten
+# skills is ten routing legs and ten behavioral legs, all at once, each with its
+# own check and its own report -- not one job walking a list, where the ninth
+# skill waits on the eighth and the first failure buries the rest.
+#
+# Each step is `required`, `optional`, or `off`:
+#
+#   with:
+#     skills: skills/*
+#     routing: optional      # graded and reported, but cannot fail the run
+#     behavioral: off        # not run at all
+#
+# `optional` is for a bar you have not met yet: the leg runs, the report lands
+# in the step summary, and a red leg leaves the run green. `off` does not run it
+# at all. Both are one-word diffs a reviewer can see, which is the point: a step
+# nobody can see being dropped is a step nobody notices is gone.
+#
+# Every routing leg installs one skill, so it asks the half of the routing
+# question a skill can be asked alone -- does it fire on its own prompts, and
+# does it stay quiet on its own near misses and on the shared negatives? It
+# cannot ask the other half, whether this skill answers a prompt that belongs to
+# its neighbour, because the neighbour is not in the room. When two skills in a
+# repo could plausibly be confused for one another, that second half is the
+# whole point, and .github/workflows/skill-evals.yml is the pipeline that grades
+# it: it pools their datasets into one routing run, and adds change-based
+# selection and scoped hardware besides.
+#
+# The structural checks are one job rather than one per skill. They cost
+# nothing, and half of what they check is about the set -- two skills claiming
+# the same name, two datasets claiming the same case id -- which a job that
+# could only see one skill would have to miss.
+#
+# The caller maps one secret onto `api_key`, so this workflow never learns
+# your provider, your gateway, or anything else in the vault. `secrets: inherit`
+# still works if you would rather pass the vault and name the key with
+# `api_key_secret`; it is more than this workflow needs.
+
+on:
+  workflow_call:
+    inputs:
+      skills:
+        description: >-
+          The skills to grade: a directory, or a glob matching several, one per
+          line or comma-separated, relative to the repository root. Each one is
+          graded on a runner of its own.
+        type: string
+        default: "skills/*"
+
+      structural:
+        description: >-
+          Skill folders, datasets, and the references their markdown makes. No
+          agent, no tokens. `required`, `optional`, or `off`.
+        type: string
+        default: required
+      routing:
+        description: >-
+          Whether a skill fires on its own prompts and stays quiet on its near
+          misses. `required`, `optional`, or `off`.
+        type: string
+        default: required
+      behavioral:
+        description: >-
+          What a skill does once it has fired. `required`, `optional`, or `off`.
+        type: string
+        default: required
+
+      runner:
+        description: "`runs-on` for every job: one label, or a JSON array of them."
+        type: string
+        default: ubuntu-latest
+      min_accuracy:
+        description: >-
+          Fail a routing leg below this accuracy (0-1). The default fails on any
+          wrong routing decision; `0` reports the score without gating on it.
+        type: string
+        default: "1"
+      version:
+        description: >-
+          Harness version to run, overriding the pin in each skill's evals.json.
+          Blank runs those pins, and this workflow's own ref where there is none.
+        type: string
+        default: ""
+      api_key_secret:
+        description: >-
+          Name of the secret holding the model API key when the caller uses
+          `secrets: inherit`. Prefer mapping that secret onto `api_key` instead.
+          Blank means the runner is already authenticated and no key is exported.
+        type: string
+        default: ANTHROPIC_API_KEY
+
+    secrets:
+      api_key:
+        description: >-
+          Model API key for the routing and behavioral legs. Map your repository
+          secret here; this workflow does not need the rest of the vault. Leave
+          it unset if the runner is already authenticated, or if you pass
+          `secrets: inherit` and name the key with `api_key_secret`.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Which skills are there, and are the three step inputs words this workflow
+  # knows? Both answers are wanted before a runner installs anything, and a
+  # mistyped path has to be an error rather than an empty matrix -- a run that
+  # graded nothing would otherwise pass, which is the one way a green check can
+  # lie about a skill.
+  discover:
+    name: Discover
+    # A label or a JSON array, so `runner: ubuntu-latest` and
+    # `runner: '["self-hosted", "gpu"]'` both say what they look like.
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    outputs:
+      skills: ${{ steps.matrix.outputs.skills }}
+      count: ${{ steps.matrix.outputs.count }}
+      globs: ${{ steps.globs.outputs.globs }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # One glob per line is how a list wants to be written in YAML, and commas
+      # are what every skillscope flag takes. Accept both, pass on one.
+      - name: Read the skill list
+        id: globs
+        shell: bash
+        env:
+          SKILLS: ${{ inputs.skills }}
+        run: |
+          globs=$(printf '%s' "$SKILLS" | tr '\n' ',' | tr -s ',' | sed 's/^,//; s/,$//')
+          if [ -z "$globs" ]; then
+            echo "error: 'skills' is empty, so there is nothing to grade." >&2
+            exit 1
+          fi
+          echo "skills: $globs"
+          echo "globs=$globs" >> "$GITHUB_OUTPUT"
+
+      # The harness answers this, rather than a glob walk written here: which
+      # directories are skills, and which of those ship a dataset, are questions
+      # about the repo under test that the CLI already answers the same way for
+      # everything else that runs against it.
+      - name: List the skills
+        id: found
+        uses: danielholanda/skillscope@main
+        with:
+          command: list-skills
+          skills: ${{ steps.globs.outputs.globs }}
+          version: ${{ inputs.version }}
+
+      - name: Build the matrix
+        id: matrix
+        shell: python
+        env:
+          FOUND: ${{ steps.found.outputs.stdout }}
+          GLOBS: ${{ steps.globs.outputs.globs }}
+          STRUCTURAL: ${{ inputs.structural }}
+          ROUTING: ${{ inputs.routing }}
+          BEHAVIORAL: ${{ inputs.behavioral }}
+        run: |
+          import json
+          import os
+          import sys
+
+          MODES = ("required", "optional", "off")
+          steps = {
+              name: os.environ[name.upper()]
+              for name in ("structural", "routing", "behavioral")
+          }
+          wrong = [f"{k}: {v!r}" for k, v in steps.items() if v not in MODES]
+          if wrong:
+              sys.exit(
+                  "error: every step is `required`, `optional`, or `off`, in "
+                  "lowercase. Got " + "; ".join(wrong) + "."
+              )
+
+          skills = json.loads(os.environ["FOUND"])
+          if not skills:
+              sys.exit(
+                  f"error: no skill with a dataset under {os.environ['GLOBS']}. "
+                  "A skill is a directory holding a SKILL.md, and it is graded "
+                  "here once it also has an evals/evals.json beside it -- "
+                  "`skillscope template` prints one to start from. Check the "
+                  "paths in `skills`, which are relative to the repository root."
+              )
+
+          print(f"{len(skills)} skill(s), one runner each: " + ", ".join(skills))
+          print("steps: " + ", ".join(f"{k} {v}" for k, v in steps.items()))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("skills=" + json.dumps(skills, separators=(",", ":")) + "\n")
+              out.write(f"count={len(skills)}\n")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as out:
+                  out.write(
+                      "### skillscope\n\n"
+                      + " &middot; ".join(f"{k}: **{v}**" for k, v in steps.items())
+                      + "\n\n| skill |\n| --- |\n"
+                      + "\n".join(f"| `{skill}` |" for skill in skills)
+                      + "\n\n"
+                  )
+
+  # Free and offline, so it runs before anything that spends a token and gates
+  # it: a malformed dataset should not be found halfway through a paid run.
+  structural:
+    name: structural
+    needs: discover
+    if: inputs.structural != 'off'
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    # `optional` changes nothing about the run except what it can do to the
+    # result: the checks still run, and the report still lands.
+    continue-on-error: ${{ inputs.structural != 'required' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check every skill's structure
+        uses: danielholanda/skillscope@main
+        with:
+          command: structural
+          skills: ${{ needs.discover.outputs.globs }}
+          version: ${{ inputs.version }}
+
+  routing:
+    name: routing (${{ matrix.skill }})
+    needs: [discover, structural]
+    # Read as: run unless routing is off, or the structural checks were meant to
+    # gate it and did not pass. `!cancelled()` rather than `success()` so that a
+    # structural job which is allowed to fail cannot hold this one back.
+    if: >-
+      ${{ !cancelled()
+          && needs.discover.result == 'success'
+          && inputs.routing != 'off'
+          && (inputs.structural != 'required' || needs.structural.result != 'failure') }}
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    continue-on-error: ${{ inputs.routing != 'required' }}
+    timeout-minutes: 40
+    strategy:
+      # One skill's score should not hide the others'.
+      fail-fast: false
+      matrix:
+        skill: ${{ fromJSON(needs.discover.outputs.skills) }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.api_key || secrets[inputs.api_key_secret] }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check the model credentials
+        if: inputs.api_key_secret != '' || secrets.api_key != ''
+        shell: bash
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "error: the model API key resolved to an empty value. GitHub" \
+                 "withholds secrets from pull requests opened from a fork, so" \
+                 "re-run this from a branch in the repository; otherwise check" \
+                 "that the secret is set and that the caller maps it onto" \
+                 "'api_key' (or passes 'secrets: inherit')." >&2
+            exit 1
+          fi
+
+      - name: Run the routing eval for ${{ matrix.skill }}
+        uses: danielholanda/skillscope@main
+        with:
+          command: routing
+          # One skill in the room, named, so the score is about this skill alone
+          # whatever else the repo ships. A wrong routing decision fails the leg
+          # by default; `min_accuracy` lowers that bar and `routing: optional`
+          # removes it.
+          args: >-
+            --routing-skills '${{ matrix.skill }}'
+            --min-accuracy '${{ inputs.min_accuracy }}'
+            --output routing-report.json
+            --keep-logs routing-logs
+          skills: ${{ needs.discover.outputs.globs }}
+          skill: ${{ matrix.skill }}
+          version: ${{ inputs.version }}
+          install-claude: "true"
+
+      - name: Upload the routing report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: routing-${{ matrix.skill }}
+          path: |
+            routing-report.json
+            routing-logs/
+          if-no-files-found: warn
+
+  behavioral:
+    name: behavioral (${{ matrix.skill }})
+    needs: [discover, structural]
+    if: >-
+      ${{ !cancelled()
+          && needs.discover.result == 'success'
+          && inputs.behavioral != 'off'
+          && (inputs.structural != 'required' || needs.structural.result != 'failure') }}
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    continue-on-error: ${{ inputs.behavioral != 'required' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        skill: ${{ fromJSON(needs.discover.outputs.skills) }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.api_key || secrets[inputs.api_key_secret] }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check the model credentials
+        if: inputs.api_key_secret != '' || secrets.api_key != ''
+        shell: bash
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "error: the model API key resolved to an empty value. GitHub" \
+                 "withholds secrets from pull requests opened from a fork, so" \
+                 "re-run this from a branch in the repository; otherwise check" \
+                 "that the secret is set and that the caller maps it onto" \
+                 "'api_key' (or passes 'secrets: inherit')." >&2
+            exit 1
+          fi
+
+      - name: Run the behavioral cases for ${{ matrix.skill }}
+        uses: danielholanda/skillscope@main
+        with:
+          command: behavioral
+          args: >-
+            --skill '${{ matrix.skill }}'
+            --output behavioral-report.json
+          skills: ${{ needs.discover.outputs.globs }}
+          # This skill's own evals.json may pin the harness version its cases
+          # were written for, and this is the leg that runs them.
+          skill: ${{ matrix.skill }}
+          version: ${{ inputs.version }}
+          install-claude: "true"
+
+      - name: Upload the behavioral report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: behavioral-${{ matrix.skill }}
+          path: behavioral-report.json
+          if-no-files-found: warn
+
+  # One check to read, and the one to point branch protection at: what ran, what
+  # it did, and whether anything that was allowed to fail did.
+  results:
+    name: results
+    needs: [discover, structural, routing, behavioral]
+    if: ${{ !cancelled() }}
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    steps:
+      - name: Verify the results
+        shell: bash
+        env:
+          DISCOVER: ${{ needs.discover.result }}
+          SKILLS: ${{ needs.discover.outputs.count }}
+          STRUCTURAL: ${{ needs.structural.result }}
+          ROUTING: ${{ needs.routing.result }}
+          BEHAVIORAL: ${{ needs.behavioral.result }}
+          STRUCTURAL_MODE: ${{ inputs.structural }}
+          ROUTING_MODE: ${{ inputs.routing }}
+          BEHAVIORAL_MODE: ${{ inputs.behavioral }}
+        run: |
+          if [ "$DISCOVER" != success ]; then
+            echo "The discover job did not succeed ($DISCOVER), so nothing was graded." >&2
+            exit 1
+          fi
+
+          echo "skills graded: $SKILLS"
+          printf '%-12s %-10s %s\n' step mode result
+          printf '%-12s %-10s %s\n' structural "$STRUCTURAL_MODE" "$STRUCTURAL"
+          printf '%-12s %-10s %s\n' routing    "$ROUTING_MODE"    "$ROUTING"
+          printf '%-12s %-10s %s\n' behavioral "$BEHAVIORAL_MODE" "$BEHAVIORAL"
+
+          # A required step that failed fails the run here as well as on its own
+          # job, so this one check is the whole answer. A skipped step is not
+          # judged: either it is off, or the structural checks it waited on
+          # failed and have already said so.
+          failed=0
+          check() {
+            if [ "$2" = required ] && [ "$3" != success ] && [ "$3" != skipped ]; then
+              echo "::error::$1 is required and did not pass ($3)."
+              failed=1
+            elif [ "$2" != required ] && [ "$3" = failure ]; then
+              echo "::warning::$1 failed, and is $2, so it does not fail the run."
+            fi
+          }
+          check structural "$STRUCTURAL_MODE" "$STRUCTURAL"
+          check routing "$ROUTING_MODE" "$ROUTING"
+          check behavioral "$BEHAVIORAL_MODE" "$BEHAVIORAL"
+          [ "$failed" -eq 0 ] || exit 1
+
+          echo "Every required step passed."
