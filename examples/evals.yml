@@ -1,18 +1,9 @@
 name: skill-evals
-
-# A worked example of grading a repo's skills, one runner each. Copy it to
-# .github/workflows/skill-evals.yml and edit the `with:` block, which is the
-# whole configuration: there is no config file to add.
-#
-# What is left to write here is what this workflow cannot know: when to run.
+# A worked example of grading a repo's skills
 
 on:
   pull_request:
     paths:
-      # A skill's description and prompts are the inputs to a routing decision,
-      # and its body is the input to a behavioral run. Nothing else here matters,
-      # so nothing else pays for a run -- except this file, which says which
-      # skills are graded and how hard.
       - "TraceLens/Agent/Analysis/skills/**"
       - ".github/workflows/skill-evals.yml"
   workflow_dispatch:
@@ -23,20 +14,10 @@ permissions:
 jobs:
   evals:
     uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
-    # The called workflow reads the API key by the name given below rather than
-    # by value, which is why the caller passes its secrets rather than one key.
     secrets: inherit
     with:
-      # One skill per line, or a glob matching several. Each gets its own
-      # runner for the routing and behavioral legs, so a second skill costs
-      # wall-clock time only for the structural checks they share.
       skills: |
         TraceLens/Agent/Analysis/skills/analysis-orchestrator
-
-      # Every step is `required` unless it says otherwise. `optional` runs the
-      # step and reports it without letting it fail the run, which is where a
-      # repo that has never measured its prompts should start; `off` does not
-      # run it at all.
       structural: required
       routing: required
       behavioral: optional
