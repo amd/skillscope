@@ -58,7 +58,60 @@ Writing the datasets themselves: [docs/authoring-evals.md](docs/authoring-evals.
 
 ## In CI
 
-One job, in the calling repo:
+One job, in the calling repo, naming the skills to grade:
+
+```yaml
+jobs:
+  skills:
+    uses: danielholanda/skillscope/.github/workflows/skills.yml@main
+    secrets: inherit
+    with:
+      skills: path/to/my-skill
+```
+
+That is a whole caller. All three graders run, all three can fail the run, and
+every skill named gets a runner of its own: the structural checks first, then a
+routing leg and a behavioral leg per skill, all at once. Ten skills is twenty
+paid legs running in parallel, each with its own check and its own report.
+
+Naming several, and holding them to different bars:
+
+```yaml
+    with:
+      skills: |
+        path/to/my-skill
+        path/to/another-skill
+      routing: optional     # graded and reported, but cannot fail the run
+      behavioral: off       # not run at all
+```
+
+| Input | Default | What it decides |
+| --- | --- | --- |
+| `skills` | `skills/*` | The skills to grade: a directory, or a glob matching several, one per line or comma-separated. |
+| `structural` | `required` | `required`, `optional`, or `off`. |
+| `routing` | `required` | `required`, `optional`, or `off`. |
+| `behavioral` | `required` | `required`, `optional`, or `off`. |
+| `runner` | `ubuntu-latest` | `runs-on` for every job: one label, or a JSON array of them. |
+| `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
+| `version` | the skills' own pins | The build of the harness that grades this repo. |
+| `api_key_secret` | `ANTHROPIC_API_KEY` | Name of the secret holding the model API key. Credentials are passed by **name**, so this repo never learns your provider or your gateway. |
+
+`optional` is for a bar you have not met yet: the leg runs, the report lands in
+the step summary, and a red leg leaves the run green. `off` does not run it at
+all. Both are one-word diffs a reviewer can see, which is the point — a step
+nobody can see being dropped is a step nobody notices is gone.
+
+Each routing leg installs one skill, which answers the half of the routing
+question a skill can be asked alone: does it fire on its own prompts, and does
+it stay quiet on its near misses and on the shared negatives? For the other half
+— whether a skill answers a prompt that belongs to its neighbour — the neighbour
+has to be in the room, and that is the pipeline below.
+
+[examples/skills.yml](examples/skills.yml) is a caller with its triggers filled
+in; [.github/workflows/skills.yml](.github/workflows/skills.yml) is what it
+runs.
+
+### The full pipeline
 
 ```yaml
 jobs:
@@ -70,16 +123,18 @@ jobs:
       api_key_secret: MY_MODEL_API_KEY
 ```
 
-That is the whole pipeline: check the structure, select what the change
-affects, run routing once, run a behavioral leg per affected skill on the
-hardware that skill asks for, and report one aggregate result. See
+Same three graders, three more decisions on top: routing pools the listed
+skills' datasets into one run, so each skill's prompts are the others'
+negatives; a pull request grades only what it changed; and a skill that asks for
+particular hardware in its `evals/machine.yml` lands on the pool your workflow
+rations and pays for. Reach for it when skills in the repo could plausibly be
+confused for one another, or when a behavioral run needs a GPU. See
 [examples/skill-evals.yml](examples/skill-evals.yml) for a fully configured
 caller and
 [.github/workflows/skill-evals.yml](.github/workflows/skill-evals.yml) for every
-input. Credentials are passed by secret **name**, so this repo never learns your
-provider or your gateway.
+input.
 
-To run a single command instead of the pipeline, use the action directly:
+To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
 - uses: amd/skillscope@bootstrap
@@ -124,7 +179,8 @@ several skills in one session and so cannot honor several pins at once.
 ## Configuring the repo under test
 
 There is no config file. Everything about your repo is a workflow input, or a
-flag if you are running the CLI by hand:
+flag if you are running the CLI by hand. The full pipeline reads all of them;
+`skills.yml` reads the short list above and leaves the rest at their defaults:
 
 | Input | Flag | Default | What it decides |
 | --- | --- | --- | --- |
