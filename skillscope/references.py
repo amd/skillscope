@@ -47,7 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config
+from . import config, deadline
 
 MARKDOWN_SUFFIXES = (".md", ".markdown")
 
@@ -370,7 +370,17 @@ def external_errors(
     if not grouped:
         return []
 
-    check = probe or (lambda url: _probe(url, timeout=timeout, retries=retries))
+    def check_url(url: str) -> str:
+        wait = timeout
+        bound = deadline.active()
+        if bound is not None:
+            leftover = bound.remaining()
+            if leftover <= 0:
+                return bound.message()
+            wait = min(wait, leftover)
+        return _probe(url, timeout=wait, retries=retries)
+
+    check = probe or check_url
     # Hosts in parallel, but one request at a time within a host. A checker
     # that opens twenty connections to the same documentation site gets itself
     # throttled, and a throttled request is indistinguishable from link rot --

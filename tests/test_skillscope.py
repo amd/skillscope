@@ -24,6 +24,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -35,6 +36,7 @@ from skillscope import (
     cli,
     config,
     datasets,
+    deadline,
     references,
     routing,
     structure,
@@ -559,6 +561,64 @@ class TestCommands(unittest.TestCase):
                 cli.build_parser().parse_args(["behavioral", "--routing-skills", "all"])
             with self.assertRaises(SystemExit):
                 cli.build_parser().parse_args(["behavioral", "--min-accuracy", "0"])
+
+    def test_the_three_graders_share_a_timeout(self) -> None:
+        parser = cli.build_parser()
+        for command in ("structural", "routing", "behavioral"):
+            with self.subTest(command):
+                args = parser.parse_args([command])
+                self.assertEqual(args.timeout, 900.0)
+
+    def test_routing_keeps_a_separate_case_timeout(self) -> None:
+        args = cli.build_parser().parse_args(["routing"])
+        self.assertEqual(args.timeout, 900.0)
+        self.assertEqual(args.case_timeout, 240.0)
+
+    def test_select_does_not_take_a_timeout(self) -> None:
+        args = cli.build_parser().parse_args(["select", "--all"])
+        self.assertFalse(hasattr(args, "timeout"))
+
+
+class TestDeadline(unittest.TestCase):
+    """The command-level --timeout, distinct from a routing case's own cap."""
+
+    def test_cap_is_the_tighter_bound(self) -> None:
+        bound = deadline.Deadline(10, command="routing", start=time.perf_counter() - 6)
+        self.assertAlmostEqual(bound.cap(30), 4, places=1)
+        self.assertAlmostEqual(bound.cap(2), 2, places=1)
+
+    def test_an_elapsed_bound_is_expired(self) -> None:
+        bound = deadline.Deadline(1, command="routing", start=time.perf_counter() - 2)
+        self.assertTrue(bound.expired())
+        self.assertEqual(bound.cap(240), 0.0)
+        self.assertIn("--timeout of 1s", bound.message())
+
+    def test_an_expired_deadline_does_not_start_a_routing_case(self) -> None:
+        cases, errors = parse(triggers(id="hung", prompt="go"))
+        self.assertEqual(errors, [])
+        bound = deadline.Deadline(1, command="routing", start=time.perf_counter() - 2)
+        previous = deadline.use(bound)
+        try:
+            outcome = routing.run_case(
+                cases[0], {"demo-skill": Path(".")}, routing.RoutingConfig()
+            )
+        finally:
+            deadline.use(previous)
+        self.assertEqual(outcome.verdict, "error")
+        self.assertEqual(outcome.stop_reason, "timeout")
+        self.assertIn("routing exceeded --timeout", outcome.error)
+
+    def test_an_expired_deadline_does_not_start_a_behavioral_case(self) -> None:
+        cases, errors = parse(triggers(id="hung", prompt="go", logs_contain=["x"]))
+        self.assertEqual(errors, [])
+        bound = deadline.Deadline(1, command="behavioral", start=time.perf_counter() - 2)
+        previous = deadline.use(bound)
+        try:
+            outcome = behavior.run_case(cases[0], {}, None, "opus", "high")
+        finally:
+            deadline.use(previous)
+        self.assertFalse(outcome.passed)
+        self.assertIn("behavioral exceeded --timeout", outcome.error)
 
 
 class TestHarnessVersionPin(unittest.TestCase):
