@@ -12,8 +12,8 @@ name: skills
 # That is a whole caller. Everything else has a default, and the defaults are
 # the strict answer: every step runs, and every step can fail the run.
 #
-#   plan --> structural --> routing    (one runner per skill)
-#                       --> behavioral (one runner per skill)
+#   discover --> structural --> routing    (one runner per skill)
+#                           --> behavioral (one runner per skill)
 #                       --> results
 #
 # `skills` is a directory or a glob matching several, one per line or comma-
@@ -114,14 +114,14 @@ jobs:
   # mistyped path has to be an error rather than an empty matrix -- a run that
   # graded nothing would otherwise pass, which is the one way a green check can
   # lie about a skill.
-  plan:
-    name: Plan
+  discover:
+    name: Discover
     # A label or a JSON array, so `runner: ubuntu-latest` and
     # `runner: '["self-hosted", "gpu"]'` both say what they look like.
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     outputs:
-      skills: ${{ steps.plan.outputs.skills }}
-      count: ${{ steps.plan.outputs.count }}
+      skills: ${{ steps.matrix.outputs.skills }}
+      count: ${{ steps.matrix.outputs.count }}
       globs: ${{ steps.globs.outputs.globs }}
     steps:
       - name: Check out repository
@@ -155,8 +155,8 @@ jobs:
           skills: ${{ steps.globs.outputs.globs }}
           version: ${{ inputs.version }}
 
-      - name: Emit the plan
-        id: plan
+      - name: Build the matrix
+        id: matrix
         shell: python
         env:
           FOUND: ${{ steps.found.outputs.stdout }}
@@ -213,7 +213,7 @@ jobs:
   # it: a malformed dataset should not be found halfway through a paid run.
   structural:
     name: structural
-    needs: plan
+    needs: discover
     if: inputs.structural != 'off'
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     # `optional` changes nothing about the run except what it can do to the
@@ -227,18 +227,18 @@ jobs:
         uses: danielholanda/skillscope@main
         with:
           command: structural
-          skills: ${{ needs.plan.outputs.globs }}
+          skills: ${{ needs.discover.outputs.globs }}
           version: ${{ inputs.version }}
 
   routing:
     name: routing (${{ matrix.skill }})
-    needs: [plan, structural]
+    needs: [discover, structural]
     # Read as: run unless routing is off, or the structural checks were meant to
     # gate it and did not pass. `!cancelled()` rather than `success()` so that a
     # structural job which is allowed to fail cannot hold this one back.
     if: >-
       ${{ !cancelled()
-          && needs.plan.result == 'success'
+          && needs.discover.result == 'success'
           && inputs.routing != 'off'
           && (inputs.structural != 'required' || needs.structural.result != 'failure') }}
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
@@ -248,7 +248,7 @@ jobs:
       # One skill's score should not hide the others'.
       fail-fast: false
       matrix:
-        skill: ${{ fromJSON(needs.plan.outputs.skills) }}
+        skill: ${{ fromJSON(needs.discover.outputs.skills) }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets[inputs.api_key_secret] }}
     steps:
@@ -281,7 +281,7 @@ jobs:
             --min-accuracy '${{ inputs.min_accuracy }}'
             --output routing-report.json
             --keep-logs routing-logs
-          skills: ${{ needs.plan.outputs.globs }}
+          skills: ${{ needs.discover.outputs.globs }}
           skill: ${{ matrix.skill }}
           version: ${{ inputs.version }}
           install-claude: "true"
@@ -298,10 +298,10 @@ jobs:
 
   behavioral:
     name: behavioral (${{ matrix.skill }})
-    needs: [plan, structural]
+    needs: [discover, structural]
     if: >-
       ${{ !cancelled()
-          && needs.plan.result == 'success'
+          && needs.discover.result == 'success'
           && inputs.behavioral != 'off'
           && (inputs.structural != 'required' || needs.structural.result != 'failure') }}
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
@@ -310,7 +310,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        skill: ${{ fromJSON(needs.plan.outputs.skills) }}
+        skill: ${{ fromJSON(needs.discover.outputs.skills) }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets[inputs.api_key_secret] }}
     steps:
@@ -337,7 +337,7 @@ jobs:
           args: >-
             --skill '${{ matrix.skill }}'
             --output behavioral-report.json
-          skills: ${{ needs.plan.outputs.globs }}
+          skills: ${{ needs.discover.outputs.globs }}
           # This skill's own evals.json may pin the harness version its cases
           # were written for, and this is the leg that runs them.
           skill: ${{ matrix.skill }}
@@ -356,15 +356,15 @@ jobs:
   # it did, and whether anything that was allowed to fail did.
   results:
     name: results
-    needs: [plan, structural, routing, behavioral]
+    needs: [discover, structural, routing, behavioral]
     if: ${{ !cancelled() }}
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     steps:
       - name: Verify the results
         shell: bash
         env:
-          PLAN: ${{ needs.plan.result }}
-          SKILLS: ${{ needs.plan.outputs.count }}
+          DISCOVER: ${{ needs.discover.result }}
+          SKILLS: ${{ needs.discover.outputs.count }}
           STRUCTURAL: ${{ needs.structural.result }}
           ROUTING: ${{ needs.routing.result }}
           BEHAVIORAL: ${{ needs.behavioral.result }}
@@ -372,8 +372,8 @@ jobs:
           ROUTING_MODE: ${{ inputs.routing }}
           BEHAVIORAL_MODE: ${{ inputs.behavioral }}
         run: |
-          if [ "$PLAN" != success ]; then
-            echo "The plan job did not succeed ($PLAN), so nothing was graded." >&2
+          if [ "$DISCOVER" != success ]; then
+            echo "The discover job did not succeed ($DISCOVER), so nothing was graded." >&2
             exit 1
           fi
 
