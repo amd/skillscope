@@ -1,10 +1,10 @@
-name: skills
+name: reusable
 
 # Grade a repo's skills, one runner per skill.
 #
 #   jobs:
-#     skills:
-#       uses: danielholanda/skillscope/.github/workflows/skills.yml@main
+#     evals:
+#       uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
 #       secrets: inherit
 #       with:
 #         skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator

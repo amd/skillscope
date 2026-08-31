@@ -62,8 +62,8 @@ One job, in the calling repo, naming the skills to grade:
 
 ```yaml
 jobs:
-  skills:
-    uses: danielholanda/skillscope/.github/workflows/skills.yml@main
+  evals:
+    uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
     secrets: inherit
     with:
       skills: path/to/my-skill
@@ -107,8 +107,8 @@ it stay quiet on its near misses and on the shared negatives? For the other half
 — whether a skill answers a prompt that belongs to its neighbour — the neighbour
 has to be in the room, and that is the pipeline below.
 
-[examples/skills.yml](examples/skills.yml) is a caller with its triggers filled
-in; [.github/workflows/skills.yml](.github/workflows/skills.yml) is what it
+[examples/evals.yml](examples/evals.yml) is a caller with its triggers filled
+in; [.github/workflows/reusable.yml](.github/workflows/reusable.yml) is what it
 runs.
 
 ### The full pipeline
@@ -180,7 +180,7 @@ several skills in one session and so cannot honor several pins at once.
 
 There is no config file. Everything about your repo is a workflow input, or a
 flag if you are running the CLI by hand. The full pipeline reads all of them;
-`skills.yml` reads the short list above and leaves the rest at their defaults:
+`reusable.yml` reads the short list above and leaves the rest at their defaults:
 
 | Input | Flag | Default | What it decides |
 | --- | --- | --- | --- |

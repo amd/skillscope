@@ -21,8 +21,8 @@ permissions:
   contents: read
 
 jobs:
-  skills:
-    uses: danielholanda/skillscope/.github/workflows/skills.yml@main
+  evals:
+    uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
     # The called workflow reads the API key by the name given below rather than
     # by value, which is why the caller passes its secrets rather than one key.
     secrets: inherit
