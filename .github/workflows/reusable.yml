@@ -127,7 +127,7 @@ jobs:
   # graded nothing would otherwise pass, which is the one way a green check can
   # lie about a skill.
   discover:
-    name: Discover
+    name: Discover Skills
     # A label or a JSON array, so `runner: ubuntu-latest` and
     # `runner: '["self-hosted", "gpu"]'` both say what they look like.
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
@@ -224,7 +224,7 @@ jobs:
   # Free and offline, so it runs before anything that spends a token and gates
   # it: a malformed dataset should not be found halfway through a paid run.
   structural:
-    name: structural
+    name: Structural Tests
     needs: discover
     if: inputs.structural != 'off'
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
@@ -243,7 +243,7 @@ jobs:
           version: ${{ inputs.version }}
 
   routing:
-    name: routing (${{ matrix.skill }})
+    name: Routing Tests (${{ matrix.skill }})
     needs: [discover, structural]
     # Read as: run unless routing is off, or the structural checks were meant to
     # gate it and did not pass. `!cancelled()` rather than `success()` so that a
@@ -313,7 +313,7 @@ jobs:
           if-no-files-found: warn
 
   behavioral:
-    name: behavioral (${{ matrix.skill }})
+    name: Behavioral Tests (${{ matrix.skill }})
     needs: [discover, structural]
     if: >-
       ${{ !cancelled()
@@ -375,7 +375,7 @@ jobs:
   # One check to read, and the one to point branch protection at: what ran, what
   # it did, and whether anything that was allowed to fail did.
   results:
-    name: results
+    name: Results
     needs: [discover, structural, routing, behavioral]
     if: ${{ !cancelled() }}
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
