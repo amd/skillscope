@@ -5,7 +5,8 @@ name: reusable
 #   jobs:
 #     evals:
 #       uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
-#       secrets: inherit
+#       secrets:
+#         api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 #       with:
 #         skills: TraceLens/Agent/Analysis/skills/analysis-orchestrator
 #
@@ -49,9 +50,10 @@ name: reusable
 # the same name, two datasets claiming the same case id -- which a job that
 # could only see one skill would have to miss.
 #
-# Credentials are passed by secret *name* rather than value, so this workflow
-# never learns your provider or your gateway, and `secrets: inherit` is all a
-# caller needs to write.
+# The caller maps one secret onto `api_key`, so this workflow never learns
+# your provider, your gateway, or anything else in the vault. `secrets: inherit`
+# still works if you would rather pass the vault and name the key with
+# `api_key_secret`; it is more than this workflow needs.
 
 on:
   workflow_call:
@@ -100,10 +102,20 @@ on:
         default: ""
       api_key_secret:
         description: >-
-          Name of the secret holding the model API key. Blank means the runner is
-          already authenticated and no key is exported.
+          Name of the secret holding the model API key when the caller uses
+          `secrets: inherit`. Prefer mapping that secret onto `api_key` instead.
+          Blank means the runner is already authenticated and no key is exported.
         type: string
         default: ANTHROPIC_API_KEY
+
+    secrets:
+      api_key:
+        description: >-
+          Model API key for the routing and behavioral legs. Map your repository
+          secret here; this workflow does not need the rest of the vault. Leave
+          it unset if the runner is already authenticated, or if you pass
+          `secrets: inherit` and name the key with `api_key_secret`.
+        required: false
 
 permissions:
   contents: read
@@ -250,21 +262,21 @@ jobs:
       matrix:
         skill: ${{ fromJSON(needs.discover.outputs.skills) }}
     env:
-      ANTHROPIC_API_KEY: ${{ secrets[inputs.api_key_secret] }}
+      ANTHROPIC_API_KEY: ${{ secrets.api_key || secrets[inputs.api_key_secret] }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Check the model credentials
-        if: inputs.api_key_secret != ''
+        if: inputs.api_key_secret != '' || secrets.api_key != ''
         shell: bash
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "error: the secret ${{ inputs.api_key_secret }} resolved to an empty" \
-                 "value. GitHub withholds secrets from pull requests opened from a" \
-                 "fork, so re-run this from a branch in the repository; otherwise" \
-                 "check that the secret is set and that the caller passes" \
-                 "'secrets: inherit'." >&2
+            echo "error: the model API key resolved to an empty value. GitHub" \
+                 "withholds secrets from pull requests opened from a fork, so" \
+                 "re-run this from a branch in the repository; otherwise check" \
+                 "that the secret is set and that the caller maps it onto" \
+                 "'api_key' (or passes 'secrets: inherit')." >&2
             exit 1
           fi
 
@@ -312,21 +324,21 @@ jobs:
       matrix:
         skill: ${{ fromJSON(needs.discover.outputs.skills) }}
     env:
-      ANTHROPIC_API_KEY: ${{ secrets[inputs.api_key_secret] }}
+      ANTHROPIC_API_KEY: ${{ secrets.api_key || secrets[inputs.api_key_secret] }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Check the model credentials
-        if: inputs.api_key_secret != ''
+        if: inputs.api_key_secret != '' || secrets.api_key != ''
         shell: bash
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "error: the secret ${{ inputs.api_key_secret }} resolved to an empty" \
-                 "value. GitHub withholds secrets from pull requests opened from a" \
-                 "fork, so re-run this from a branch in the repository; otherwise" \
-                 "check that the secret is set and that the caller passes" \
-                 "'secrets: inherit'." >&2
+            echo "error: the model API key resolved to an empty value. GitHub" \
+                 "withholds secrets from pull requests opened from a fork, so" \
+                 "re-run this from a branch in the repository; otherwise check" \
+                 "that the secret is set and that the caller maps it onto" \
+                 "'api_key' (or passes 'secrets: inherit')." >&2
             exit 1
           fi
 

@@ -14,11 +14,12 @@ permissions:
 jobs:
   evals:
     uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
-    secrets: inherit
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
       skills: |
         TraceLens/Agent/Analysis/skills/analysis-orchestrator
+      # Each step can be set to `required`, `optional`, or `off`.
       structural: required
       routing: required
       behavioral: optional
-      api_key_secret: ANTHROPIC_API_KEY

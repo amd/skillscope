@@ -64,15 +64,19 @@ One job, in the calling repo, naming the skills to grade:
 jobs:
   evals:
     uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
-    secrets: inherit
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
       skills: path/to/my-skill
 ```
 
-That is a whole caller. All three graders run, all three can fail the run, and
-every skill named gets a runner of its own: the structural checks first, then a
-routing leg and a behavioral leg per skill, all at once. Ten skills is twenty
-paid legs running in parallel, each with its own check and its own report.
+That is a whole caller. Map your model key onto `api_key`; this workflow never
+sees the rest of the vault, and never learns what you named the secret.
+`secrets: inherit` still works if you would rather pass the vault and name the
+key with `api_key_secret`. All three graders run, all three can fail the run,
+and every skill named gets a runner of its own: the structural checks first,
+then a routing leg and a behavioral leg per skill, all at once. Ten skills is
+twenty paid legs running in parallel, each with its own check and its own report.
 
 Naming several, and holding them to different bars:
 
@@ -85,7 +89,7 @@ Naming several, and holding them to different bars:
       behavioral: off       # not run at all
 ```
 
-| Input | Default | What it decides |
+| Setting | Default | What it decides |
 | --- | --- | --- |
 | `skills` | `skills/*` | The skills to grade: a directory, or a glob matching several, one per line or comma-separated. |
 | `structural` | `required` | `required`, `optional`, or `off`. |
@@ -94,7 +98,8 @@ Naming several, and holding them to different bars:
 | `runner` | `ubuntu-latest` | `runs-on` for every job: one label, or a JSON array of them. |
 | `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
 | `version` | the skills' own pins | The build of the harness that grades this repo. |
-| `api_key_secret` | `ANTHROPIC_API_KEY` | Name of the secret holding the model API key. Credentials are passed by **name**, so this repo never learns your provider or your gateway. |
+| `api_key` | (none) | The model API key, mapped from the caller's vault. One secret, not the whole set. |
+| `api_key_secret` | `ANTHROPIC_API_KEY` | Name to look up under `secrets: inherit`, if you would rather pass the vault than map one key. |
 
 `optional` is for a bar you have not met yet: the leg runs, the report lands in
 the step summary, and a red leg leaves the run green. `off` does not run it at
