@@ -41,7 +41,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import datasets
+from . import datasets, deadline
 
 DEFAULT_MODEL = os.environ.get("SKILLSCOPE_MODEL", "opus")
 DEFAULT_EFFORT = os.environ.get("SKILLSCOPE_EFFORT", "high")
@@ -94,7 +94,7 @@ def claude_env() -> dict[str, str]:
     return env
 
 
-def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: int = 60) -> tuple[bool, str]:
+def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: float = 60) -> tuple[bool, str]:
     """Preflight: confirm the `claude` CLI can actually reach the API.
 
     Runs a trivial prompt with retries disabled so an unreachable API fails
@@ -111,13 +111,20 @@ def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: int = 60) ->
     if model:
         cmd += ["--model", model]
 
+    bound = deadline.active()
+    if bound is not None:
+        leftover = bound.remaining()
+        if leftover <= 0:
+            return False, bound.message()
+        timeout = min(timeout, leftover)
+
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
             input="Reply with the single word: ok", timeout=timeout, env=claude_env(),
         )
     except subprocess.TimeoutExpired:
-        return False, f"API preflight timed out after {timeout}s (is the network reachable?)"
+        return False, f"API preflight timed out after {timeout:g}s (is the network reachable?)"
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
@@ -166,10 +173,22 @@ def _run_agent(prompt_text: str, workspace: Path, model: str | None, effort: str
     if effort:
         cmd += ["--effort", effort]
 
-    proc = subprocess.run(
-        cmd, cwd=str(workspace), capture_output=True, text=True,
-        encoding="utf-8", input=prompt_text, env=claude_env(),
-    )
+    run_timeout = None
+    bound = deadline.active()
+    if bound is not None:
+        leftover = bound.remaining()
+        if leftover <= 0:
+            raise RuntimeError(bound.message())
+        run_timeout = leftover
+
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(workspace), capture_output=True, text=True,
+            encoding="utf-8", input=prompt_text, env=claude_env(),
+            timeout=run_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"agent timed out after {exc.timeout:g}s") from exc
 
     events: list[dict] = []
     for line in (proc.stdout or "").splitlines():
@@ -302,13 +321,21 @@ def _grade_with_llm(
     if judge_model:
         cmd += ["--model", judge_model]
 
+    judge_timeout = 180.0
+    bound = deadline.active()
+    if bound is not None:
+        leftover = bound.remaining()
+        if leftover <= 0:
+            return False, bound.message()
+        judge_timeout = bound.cap(judge_timeout)
+
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
-            input=prompt_text, timeout=180, env=claude_env(),
+            input=prompt_text, timeout=judge_timeout, env=claude_env(),
         )
     except subprocess.TimeoutExpired:
-        return False, "llm_judge timed out after 180s"
+        return False, f"llm_judge timed out after {judge_timeout:g}s"
 
     try:
         payload = json.loads((proc.stdout or "").strip())

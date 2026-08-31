@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import ModuleType
 
-from . import datasets
+from . import datasets, deadline
 from .agent import Check, claude
 from .datasets import Case
 
@@ -95,6 +95,18 @@ def run_case(
 ) -> BehaviorOutcome:
     """Stage one skill, run the prompt to completion, grade what happened."""
     assert case.skill is not None
+    bound = deadline.active()
+    if bound is not None and bound.expired():
+        print(f"  [FAIL] {case.id}: {bound.message()}", flush=True)
+        return BehaviorOutcome(
+            id=case.id,
+            skill=case.skill,
+            prompt=case.prompt,
+            passed=False,
+            elapsed_s=0.0,
+            error=bound.message(),
+        )
+
     seed = (datasets.skill_path(case.skill) / case.workspace) if case.workspace else None
     started = time.perf_counter()
     case_ctx = dict(ctx)

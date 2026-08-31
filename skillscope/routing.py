@@ -49,6 +49,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import deadline
 from .agent import claude_env
 from .datasets import Case
 
@@ -77,7 +78,7 @@ class RoutingConfig:
 
     model: str = "opus"
     effort: str = "high"
-    timeout: float = 240.0
+    case_timeout: float = 240.0
     max_tool_calls: int = 4
     max_inspection_calls: int = 8
     max_budget_usd: float = 0.75
@@ -135,7 +136,11 @@ def supported_flags(flags: list[str]) -> set[str]:
         return set()
     try:
         proc = subprocess.run(
-            [claude_bin, "--help"], capture_output=True, text=True, encoding="utf-8", timeout=60
+            [claude_bin, "--help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=_capped_timeout(60),
         )
     except (subprocess.SubprocessError, OSError):
         return set()
@@ -384,6 +389,30 @@ def _terminate(proc: subprocess.Popen) -> None:
         pass
 
 
+def _capped_timeout(seconds: float) -> float:
+    """``seconds``, or whatever the command's ``--timeout`` has left."""
+    bound = deadline.active()
+    return seconds if bound is None else bound.cap(seconds)
+
+
+def _command_timeout_outcome(case: Case, bound: deadline.Deadline) -> Outcome:
+    print(f"  [FAIL] {case.id}: {bound.message()}", flush=True)
+    return Outcome(
+        id=case.id,
+        category=case.category,
+        skill=case.skill,
+        prompt=case.prompt,
+        expect=case.expect_skill,
+        observed=None,
+        verdict="error",
+        passed=False,
+        stop_reason="timeout",
+        elapsed_s=0.0,
+        tool_calls=0,
+        error=bound.message(),
+    )
+
+
 def classify(expect: str | None, observed: str | None) -> str:
     if observed is None:
         return "true_negative" if expect is None else "missed_trigger"
@@ -394,6 +423,10 @@ def classify(expect: str | None, observed: str | None) -> str:
 
 def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) -> Outcome:
     """Run one prompt, stopping as soon as the routing decision is known."""
+    bound = deadline.active()
+    if bound is not None and bound.expired():
+        return _command_timeout_outcome(case, bound)
+
     claude_bin = shutil.which("claude")
     if not claude_bin:
         raise SystemExit("error: 'claude' CLI not found on PATH")
@@ -471,9 +504,9 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
             target=lambda: stderr_lines.extend(proc.stderr.readlines()), daemon=True
         ).start()
 
-        deadline = time.perf_counter() + config.timeout
+        case_deadline = time.perf_counter() + _capped_timeout(config.case_timeout)
         while True:
-            remaining = deadline - time.perf_counter()
+            remaining = case_deadline - time.perf_counter()
             if remaining <= 0:
                 stop_reason = "timeout"
                 break

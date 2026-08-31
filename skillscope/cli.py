@@ -69,7 +69,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, references, routing, structure
+from . import behavior, config, datasets, deadline, references, routing, structure
 from . import select as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -207,7 +207,7 @@ def cmd_structural(args: argparse.Namespace) -> int:
         )
 
     print(f"[evals] repo: {cfg.root}  skills: {', '.join(cfg.skill_globs)}")
-    return 0
+    return _fail_if_expired() or 0
 
 
 def cmd_list_skills(args: argparse.Namespace) -> int:
@@ -289,8 +289,19 @@ def _empty_room(args: argparse.Namespace) -> None:
     )
 
 
+def _fail_if_expired() -> int | None:
+    """Non-zero when the command's ``--timeout`` has already elapsed."""
+    bound = deadline.active()
+    if bound is None or not bound.expired():
+        return None
+    print(f"error: {bound.message()}", file=sys.stderr)
+    return 1
+
+
 def _prepare_graded_run(args: argparse.Namespace) -> list[str]:
     """Structural checks, model pin, and API reachability. Shared by both graders."""
+    if (code := _fail_if_expired()) is not None:
+        raise SystemExit(code)
     _structural_or_exit()
     args.model = enforce_model_policy(args.model) or args.model
     if not args.skip_preflight:
@@ -327,7 +338,7 @@ def cmd_routing(args: argparse.Namespace) -> int:
     routing_config = routing.RoutingConfig(
         model=args.model,
         effort=args.effort,
-        timeout=args.timeout,
+        case_timeout=args.case_timeout,
         max_tool_calls=args.max_tool_calls,
         max_inspection_calls=args.max_inspection_calls,
         max_budget_usd=args.max_budget_usd,
@@ -363,6 +374,8 @@ def cmd_routing(args: argparse.Namespace) -> int:
             "skills": list(routing_set),
             "extended": args.extended,
             "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
+            "case_timeout": args.case_timeout,
             "max_tool_calls": args.max_tool_calls,
             "max_inspection_calls": args.max_inspection_calls,
             "isolated_config_dir": routing_config.isolate_config,
@@ -373,6 +386,8 @@ def cmd_routing(args: argparse.Namespace) -> int:
     )
     _write_report(summary, routing.render_markdown(summary), args, "routing")
 
+    if (code := _fail_if_expired()) is not None:
+        return code
     reason = routing_gate(summary["totals"], args.min_accuracy)
     if reason:
         print(f"[routing] {reason}", file=sys.stderr)
@@ -409,10 +424,13 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
             "skills": skills,
             "extended": args.extended,
             "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
         },
     )
     _write_report(summary, behavior.render_markdown(summary), args, "behavioral")
+    if (code := _fail_if_expired()) is not None:
+        return code
     if summary["totals"]["passed"] != summary["totals"]["cases"]:
         return 1
     return 0
@@ -518,6 +536,20 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip the API reachability check."
     )
+    _add_timeout_argument(parser)
+
+
+def _add_timeout_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=deadline.DEFAULT_TIMEOUT_S,
+        help=(
+            "Seconds before the whole command is abandoned. Shared by "
+            "structural, routing, and behavioral. Default: 900 (15 minutes). "
+            "0 disables."
+        ),
+    )
 
 
 def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
@@ -530,13 +562,13 @@ def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
         help="Routing cases to run concurrently, each in its own workspace. Default: 4.",
     )
     parser.add_argument(
-        "--timeout",
+        "--case-timeout",
         type=float,
         default=240.0,
         help=(
             "Seconds before a routing case is abandoned. Generous because it "
             "only bites when the agent neither activates a skill nor answers. "
-            "Default: 240."
+            "Clipped to whatever --timeout has left. Default: 240."
         ),
     )
     parser.add_argument(
@@ -659,6 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"Default: {references.DEFAULT_JOBS}."
         ),
     )
+    _add_timeout_argument(structural_parser)
     structural_parser.set_defaults(handler=cmd_structural)
 
     routing_parser = commands.add_parser(
@@ -845,7 +878,18 @@ def _configure(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure(args)
-    return args.handler(args)
+    bound = None
+    timeout = getattr(args, "timeout", None)
+    if timeout is not None and timeout > 0:
+        bound = deadline.Deadline(timeout, command=args.command)
+        deadline.use(bound)
+        bound.arm()
+    try:
+        return args.handler(args)
+    finally:
+        if bound is not None:
+            bound.disarm()
+            deadline.use(None)
 
 
 if __name__ == "__main__":
