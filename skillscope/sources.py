@@ -1,6 +1,6 @@
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright Advanced Micro Devices, Inc.
 #
-# See LICENSE for license information.
+# SPDX-License-Identifier: MIT
 
 """Where a skill's evals get the source tree of the repo that owns the skill.
 

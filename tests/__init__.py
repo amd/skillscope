@@ -1,5 +1,5 @@
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright Advanced Micro Devices, Inc.
 #
-# See LICENSE for license information.
+# SPDX-License-Identifier: MIT
 
 """Test package, so `python -m unittest discover -s tests -t .` can find it."""

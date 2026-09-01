@@ -1,3 +1,9 @@
+<!--
+Copyright Advanced Micro Devices, Inc.
+
+SPDX-License-Identifier: MIT
+-->
+
 # Writing evals for a skill
 
 One file, `<your-skill>/evals/evals.json`, holding an `evaluations` array:

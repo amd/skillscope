@@ -1,3 +1,7 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 name: reusable
 
 # Grade a repo's skills, one runner per skill.

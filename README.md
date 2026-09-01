@@ -1,3 +1,9 @@
+<!--
+Copyright Advanced Micro Devices, Inc.
+
+SPDX-License-Identifier: MIT
+-->
+
 # skillscope
 
 Structural, routing, and behavioral tests for agent skills, in whatever repo the
