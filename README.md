@@ -31,7 +31,7 @@ All three read one dataset per skill, `<skill>/evals/evals.json`. How to write o
 Run from the root of the repo you want tested.
 
 ```bash
-uv tool install git+https://github.com/danielholanda/skillscope
+uv tool install git+https://github.com/amd/skillscope
 
 skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs
@@ -44,7 +44,7 @@ skillscope routing --routing-skills my-skill,its-neighbour
 ```yaml
 jobs:
   evals:
-    uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@main
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
