@@ -6,13 +6,18 @@ SPDX-License-Identifier: MIT
 
 # Skillscope
 
-A test harness for AI agent skills. Install the harness, or point a workflow at your repo.
+![AMD](https://img.shields.io/badge/AMD-Skillscope-ED1C24?logo=amd&logoColor=white)
+![Agent Skills](https://img.shields.io/badge/Agent_Skills-Standard-7B2D8E)
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-Compatible-F07535?logo=claude&logoColor=white)](https://www.anthropic.com/claude-code)
+[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Reusable-2088FF?logo=githubactions&logoColor=white)](.github/workflows/reusable.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Skillscope does three main types of tests:
+A test harness for AI agent skills. Install the harness, or point a workflow at your repo. Skillscope enables three main types of tests:
 
-* **structural**: Checks whether the skill is well structured (contains the expected files, a proper hierarchy, etc.).
-* **routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
-* **behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
+* **Structural**: Checks whether the skill is well structured (contains the expected files, a proper hierarchy, etc.).
+* **Routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
+* **Behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
 
 All three read one dataset per skill, `<skill>/evals/evals.json`. How to write one is in [docs/authoring-evals.md](docs/authoring-evals.md).
 
