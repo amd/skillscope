@@ -6,6 +6,8 @@ SPDX-License-Identifier: MIT
 
 # Skillscope
 
+![Skillscope](assets/banner.png)
+
 ![AMD](https://img.shields.io/badge/AMD-Skillscope-ED1C24?logo=amd&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent_Skills-Standard-7B2D8E)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
