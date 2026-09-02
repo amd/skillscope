@@ -19,7 +19,8 @@ Skillscope does three main types of tests:
 * **routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
 * **behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
 
-All three read one dataset per skill, `<skill>/evals/evals.json`. More info at
+All three read one dataset per skill, `<skill>/evals/evals.json`. An example is
+in [docs/usage.md](docs/usage.md#evalsjson); more on writing one is at
 [docs/authoring-evals.md](docs/authoring-evals.md).
 
 ## Quick start

@@ -12,6 +12,7 @@ CLI flag, and every workflow input. For writing a skill's dataset, see
 
 ## Contents
 
+* [evals.json](#evalsjson)
 * [Configuring the repo under test](#configuring-the-repo-under-test)
 * [What the structural check asserts](#what-the-structural-check-asserts)
 * [References](#references)
@@ -21,6 +22,39 @@ CLI flag, and every workflow input. For writing a skill's dataset, see
 * [In CI: the full pipeline](#in-ci-the-full-pipeline)
 * [Versions and pinning](#versions-and-pinning)
 * [Hand tools](#hand-tools)
+
+## evals.json
+
+Every skill ships one dataset at `<skill>/evals/evals.json`. A prompt alone
+grades routing; add expectations and it also runs end to end.
+
+```json
+{
+  "evaluations": [
+    {
+      "id": "images-cost",
+      "skill_should_trigger": true,
+      "prompt": "I'm burning too much money on image generation APIs. Generate images on my own machine instead."
+    },
+    {
+      "id": "generate-cat-image",
+      "skill_should_trigger": true,
+      "prompt": "Learn how to generate images locally, then save an image of a cat to out.png.",
+      "expected_behavior": ["Install Lemonade Server if it is not already installed"],
+      "files_exist": ["out.png"]
+    },
+    {
+      "id": "finetune-on-laptop",
+      "skill_should_trigger": false,
+      "prompt": "Fine-tune a small language model on my own dataset using my laptop GPU."
+    }
+  ]
+}
+```
+
+The field reference and coverage bar are in
+[authoring-evals.md](authoring-evals.md). `skillscope template` prints a
+dataset with the shape of each kind of evaluation.
 
 ## Configuring the repo under test
 
