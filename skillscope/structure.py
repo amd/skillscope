@@ -65,13 +65,19 @@ _FRONTMATTER = re.compile(
 _SECTION = re.compile(r"^##\s+(?P<title>.+?)\s*$")
 
 
-def errors() -> list[str]:
-    """Every structural problem with every skill folder in the repo."""
+def errors(skills: list[str] | None = None) -> list[str]:
+    """Every structural problem with every skill folder in the repo.
+
+    Given `skills`, only those folders. The directories that hold no
+    ``SKILL.md`` go with them: such a directory is nobody's skill, so there is
+    no named skill a scoped run could be reporting it against.
+    """
     cfg = config.active()
     found: list[str] = []
-    for skill in sorted(cfg.skills):
+    for skill in sorted(cfg.skills if skills is None else set(skills)):
         found.extend(skill_errors(skill))
-    found.extend(_undeclared(cfg))
+    if skills is None:
+        found.extend(_undeclared(cfg))
     return found
 
 

@@ -141,17 +141,27 @@ class Reference:
         return not parts.scheme and not parts.netloc and bool(parts.path or parts.fragment)
 
 
-def markdown_files() -> list[Path]:
-    """Every markdown file the reference checks read, in a stable order."""
+def markdown_files(skills: list[str] | None = None) -> list[Path]:
+    """Every markdown file the reference checks read, in a stable order.
+
+    Given `skills`, only those skills' folders are read, and ``--docs`` is
+    left out with them: a run narrowed to one skill is gated on that skill's
+    prose, not on a neighbour's or on the repo's docs tree.
+    """
     cfg = config.active()
+    folders = (
+        cfg.skills
+        if skills is None
+        else {name: cfg.skill_path(name) for name in sorted(set(skills))}
+    )
     found: list[Path] = []
-    for _, folder in sorted(cfg.skills.items()):
+    for _, folder in sorted(folders.items()):
         found.extend(
             path
             for path in sorted(folder.rglob("*"))
             if path.suffix.lower() in MARKDOWN_SUFFIXES and path.is_file()
         )
-    for pattern in cfg.doc_globs:
+    for pattern in cfg.doc_globs if skills is None else ():
         found.extend(
             path
             for path in sorted(cfg.root.glob(pattern))
@@ -211,11 +221,17 @@ def _targets(line: str) -> list[str]:
     return [target for target in cleaned if target]
 
 
-def collect(files: list[Path] | None = None) -> list[Reference]:
-    """Every reference in `files`, deduplicated per file, line, and target."""
+def collect(
+    files: list[Path] | None = None, *, skills: list[str] | None = None
+) -> list[Reference]:
+    """Every reference in `files`, deduplicated per file, line, and target.
+
+    Without `files`, the markdown :func:`markdown_files` finds, narrowed to
+    `skills` when a caller only wants those skills held to the bar.
+    """
     found: list[Reference] = []
     seen: set[tuple[Path, int, str]] = set()
-    for path in markdown_files() if files is None else files:
+    for path in markdown_files(skills) if files is None else files:
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

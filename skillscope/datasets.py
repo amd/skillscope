@@ -519,15 +519,26 @@ def filter_cases(cases: list[Case], only: str) -> list[Case]:
     return selected
 
 
-def structural_errors() -> list[str]:
+def structural_errors(skills: list[str] | None = None) -> list[str]:
     """Every structural problem across every dataset, as human-readable strings.
 
     Run by CI before any tokens are spent, so a malformed dataset fails in
     seconds rather than halfway through a paid run.
+
+    Given `skills`, only those skills' datasets are read, plus the shared pool
+    that every run draws on. That is the scope a graded run gates on: a run
+    asked for one skill has nothing to say about a neighbour's dataset, and
+    failing on it would leave the skill under test ungradeable until somebody
+    else's file is fixed. The repo-wide answer is what ``skillscope
+    structural`` is for, and it is the check CI gates a merge on.
     """
     errors: list[str] = []
-    cases = load_all_cases(errors, extended=True)
-    declared = set(declared_skills())
+    scope = declared_skills() if skills is None else sorted(set(skills))
+    cases: list[Case] = []
+    for skill in scope:
+        if dataset_path(skill).is_file():
+            cases.extend(load_dataset(skill, errors, extended=True))
+    cases.extend(load_shared_negatives(errors))
 
     for case_id in duplicate_ids(cases):
         errors.append(
@@ -545,7 +556,7 @@ def structural_errors() -> list[str]:
                     f"`{case.skill}/{case.workspace}`, which is not a directory."
                 )
 
-    for skill in sorted(declared):
+    for skill in scope:
         errors.extend(
             tier0_errors(skill, [c for c in cases if c.skill == skill and not c.extended])
         )

@@ -1134,6 +1134,85 @@ class TestWholeRepoStructure(unittest.TestCase):
         self.assertEqual(datasets.tier0_errors("alpha", cases), [])
 
 
+class TestTheGateAPaidRunPassesFirst(unittest.TestCase):
+    """Which skills the structural checks cover before any tokens are spent.
+
+    A run asked for one skill is gated on that skill. Holding it back for a
+    neighbour's mistake would make one skill's malformed file everybody else's
+    problem, and the repo-wide answer is what `structural` is for.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        # The neighbour, with a machine.yml naming a key that does not exist.
+        self.repo.skill(
+            "beta", dataset=tier0_dataset("beta"), machine="runner_type: mi300x\n"
+        )
+        self.repo.activate(routing_skills="alpha,beta")
+
+    def args(self, *argv) -> argparse.Namespace:
+        return cli.build_parser().parse_args([*argv, "--skip-preflight"])
+
+    def fails(self, call, *arguments) -> str:
+        """The stderr of a gate that stopped the run."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            call(*arguments)
+        return stderr.getvalue()
+
+    def test_a_neighbours_mistake_does_not_stop_a_run_of_one_skill(self) -> None:
+        selected = cli._prepare_graded_run(self.args("behavioral", "--skill", "alpha"))
+        self.assertEqual(selected, ["alpha"])
+
+    def test_the_selected_skills_own_mistake_still_stops_it(self) -> None:
+        stderr = self.fails(
+            cli._prepare_graded_run, self.args("behavioral", "--skill", "beta")
+        )
+        self.assertIn("runner_type", stderr)
+
+    def test_routing_is_gated_on_everyone_in_the_room(self) -> None:
+        # A routing score is about all of them, so all of them are read --
+        # whichever one --skill narrows the report to.
+        stderr = self.fails(
+            cli._prepare_graded_run,
+            self.args("routing", "--skill", "alpha"),
+            ["alpha", "beta"],
+        )
+        self.assertIn("runner_type", stderr)
+
+    def test_routing_reads_the_room_and_not_the_repo(self) -> None:
+        # A routing run leaves --skill off, so the gate has to take its scope
+        # from the room rather than from "every skill that has a dataset".
+        self.repo.reactivate(routing_skills="alpha")
+        args = self.args("routing", "--routing-skills", "alpha")
+        self.assertEqual(cli._prepare_graded_run(args, ["alpha"]), ["alpha", "beta"])
+
+    def test_the_repo_wide_check_still_covers_the_repo(self) -> None:
+        self.assertIn("runner_type", self.fails(cli._structural_or_exit))
+
+    def test_a_neighbours_broken_link_is_not_this_runs_problem(self) -> None:
+        (self.repo.root / "skills" / "beta" / "reference.md").write_text(
+            "[gone](./nowhere.md)\n", encoding="utf-8"
+        )
+        self.assertIn("nowhere.md", self.fails(cli._structural_or_exit))
+        self.assertEqual(cli._structural_or_exit(["alpha"]), [])
+
+    def test_the_docs_tree_waits_for_the_repo_wide_check(self) -> None:
+        # --docs is a repo's own markdown, so it belongs to no skill's run.
+        self.repo.reactivate(docs="*.md")
+        (self.repo.root / "README.md").write_text("[gone](./nowhere.md)\n", encoding="utf-8")
+        self.assertIn("README.md", self.fails(cli._structural_or_exit))
+        self.assertEqual(cli._structural_or_exit(["alpha"]), [])
+
+    def test_a_duplicate_id_outside_the_scope_is_the_repo_wide_checks_business(self) -> None:
+        self.repo.skill("gamma", dataset=tier0_dataset("alpha"))
+        self.assertEqual(datasets.structural_errors(["alpha"]), [])
+        self.assertTrue(
+            any("duplicate case id" in e for e in datasets.structural_errors())
+        )
+
+
 class TestSkillStructure(unittest.TestCase):
     """The skill folder itself: what the format requires, and what a repo adds."""
 

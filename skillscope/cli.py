@@ -119,17 +119,24 @@ def _report_failures(errors: list[str]) -> None:
         print(f"  - {err}", file=sys.stderr)
 
 
-def _structural_or_exit() -> list[references.Reference]:
+def _structural_or_exit(skills: list[str] | None = None) -> list[references.Reference]:
     """Fail before any tokens are spent if the skills are not in shape.
 
     The skill folders, the datasets, and the internal references: everything
     that costs nothing to check. External URLs are left out on purpose: they
     fail for reasons that have nothing to do with the run being gated.
+
+    Given `skills`, only those are read. A graded run passes the skills it is
+    about to install, because that is the run it is gating: a neighbour's
+    malformed dataset says nothing about whether this run can proceed, and
+    holding it back would make one skill's mistake everybody else's. The
+    repo-wide answer is ``skillscope structural``, which passes nothing here
+    and is the check that gates a merge.
     """
-    found = references.collect()
+    found = references.collect(skills=skills)
     errors = (
-        structure.errors()
-        + datasets.structural_errors()
+        structure.errors(skills)
+        + datasets.structural_errors(skills)
         + references.internal_errors(found)
     )
     if errors:
@@ -298,26 +305,38 @@ def _fail_if_expired() -> int | None:
     return 1
 
 
-def _prepare_graded_run(args: argparse.Namespace) -> list[str]:
-    """Structural checks, model pin, and API reachability. Shared by both graders."""
+def _prepare_graded_run(
+    args: argparse.Namespace, scope: list[str] | None = None
+) -> list[str]:
+    """Structural checks, model pin, and API reachability. Shared by both graders.
+
+    The structural gate reads `scope`, defaulting to the skills ``--skill``
+    selected -- the ones about to be graded, and nobody else. A routing run
+    passes the room instead, because the room is what it installs and what its
+    score is about; ``--skill`` there only narrows which of the room's cases
+    are reported on.
+    """
     if (code := _fail_if_expired()) is not None:
         raise SystemExit(code)
-    _structural_or_exit()
+    selected = _selected_skills(args.skill)
+    _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
-    return _selected_skills(args.skill)
+    return selected
 
 
 def cmd_routing(args: argparse.Namespace) -> int:
-    _prepare_graded_run(args)
-    started = time.time()
-
+    # Who is in the room decides what the structural gate covers, so it is
+    # settled before anything is checked or any token is spent.
     routing_set = config.active().routing_set
     if not routing_set:
         _empty_room(args)
+
+    _prepare_graded_run(args, list(routing_set))
+    started = time.time()
 
     if not args.routing_skills.strip():
         only = next(iter(routing_set))
