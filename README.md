@@ -11,7 +11,7 @@ Testing Harness for AI Agent Skills
 > [!IMPORTANT]
 > **Early Days**: Flags, workflow inputs, and report formats may evolve quickly as this repo takes shape.
 
-A test harness for AI agent skills. Simply pip install the harness or point a workflow at your repo.
+A test harness for AI agent skills. Install the harness, or point a workflow at your repo.
 
 Skillscope does three main types of tests:
 
@@ -19,16 +19,15 @@ Skillscope does three main types of tests:
 * **routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
 * **behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
 
-All three read one dataset per skill, `<skill>/evals/evals.json`. An example is
-in [docs/usage.md](docs/usage.md#evalsjson); more on writing one is at
-[docs/authoring-evals.md](docs/authoring-evals.md).
+All three read one dataset per skill, `<skill>/evals/evals.json`. How to write
+one is in [docs/authoring-evals.md](docs/authoring-evals.md).
 
 ## Quick start
 
 Run from the root of the repo you want tested.
 
 ```bash
-alias skillscope='uvx --from git+https://github.com/danielholanda/skillscope skillscope'
+uv tool install git+https://github.com/danielholanda/skillscope
 
 skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs

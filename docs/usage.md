@@ -26,35 +26,8 @@ CLI flag, and every workflow input. For writing a skill's dataset, see
 ## evals.json
 
 Every skill ships one dataset at `<skill>/evals/evals.json`. A prompt alone
-grades routing; add expectations and it also runs end to end.
-
-```json
-{
-  "evaluations": [
-    {
-      "id": "images-cost",
-      "skill_should_trigger": true,
-      "prompt": "I'm burning too much money on image generation APIs. Generate images on my own machine instead."
-    },
-    {
-      "id": "generate-cat-image",
-      "skill_should_trigger": true,
-      "prompt": "Learn how to generate images locally, then save an image of a cat to out.png.",
-      "expected_behavior": ["Install Lemonade Server if it is not already installed"],
-      "files_exist": ["out.png"]
-    },
-    {
-      "id": "finetune-on-laptop",
-      "skill_should_trigger": false,
-      "prompt": "Fine-tune a small language model on my own dataset using my laptop GPU."
-    }
-  ]
-}
-```
-
-The field reference and coverage bar are in
-[authoring-evals.md](authoring-evals.md). `skillscope template` prints a
-dataset with the shape of each kind of evaluation.
+grades routing; add expectations and it also runs end to end. How to write one
+is in [authoring-evals.md](authoring-evals.md).
 
 ## Configuring the repo under test
 
@@ -196,21 +169,16 @@ config dir.
 
 ## Hardware a skill needs
 
-A skill says what it needs in `evals/machine.yml`, beside the prompts that need
-it:
-
-```yaml
-os: [Linux]
-labels: [mi300x, gpu, rocm]
-```
-
-Those labels are added to `scoped_runner`, and asking for any of them is what
-makes a leg *scoped*: it lands on the pool your workflow rations with
-`scoped_gate` and pays for out of `scoped_environment`. The split is
-deliberate. The person who knows a skill needs a GPU is its owner; the person
-who knows which pool has one, who may spend it, and whose key pays for it is
-whoever runs the repo. A central table mapping skills to runners drifts from
-reality the first time a skill is added.
+A skill that cannot run on the everyday runners says so in
+`evals/machine.yml`
+([authoring-evals.md](authoring-evals.md#evalsmachineyml)). Those labels are
+added to `scoped_runner`, and asking for any of them is what makes a leg
+*scoped*: it lands on the pool your workflow rations with `scoped_gate` and
+pays for out of `scoped_environment`. The split is deliberate. The person who
+knows a skill needs a GPU is its owner; the person who knows which pool has
+one, who may spend it, and whose key pays for it is whoever runs the repo. A
+central table mapping skills to runners drifts from reality the first time a
+skill is added.
 
 Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
@@ -329,8 +297,10 @@ data:
 | `skillscope_version` in a skill's `evals/evals.json` | that skill's behavioral run, overriding the input |
 
 Both are one-line diffs a reviewer can see, which a `uses:` ref spread across
-every caller is not. Routing always runs at the workflow's version: it installs
-several skills in one session and so cannot honor several pins at once.
+every caller is not. How a skill sets the dataset pin is in
+[authoring-evals.md](authoring-evals.md#pinning-the-harness). Routing always
+runs at the workflow's version: it installs several skills in one session and
+so cannot honor several pins at once.
 
 ## Hand tools
 

@@ -6,6 +6,9 @@ SPDX-License-Identifier: MIT
 
 # Writing evals for a skill
 
+For flags, workflow inputs, and what each check asserts, see
+[usage.md](usage.md).
+
 One file, `<your-skill>/evals/evals.json`, holding an `evaluations` array:
 
 ```json
@@ -47,9 +50,10 @@ under the neighbour keeps `false` meaning "nothing fires".
 
 Your dataset's prompts are graded in a routing run only when your skill is in
 the room — one the workflow lists in `routing_skills`, or the only skill the
-repo has, which needs no listing. A prompt expecting a skill that is not in the
-room could only ever lose, and a near miss says nothing about skills that were
-never installed.
+repo has, which needs no listing. How the room is chosen is in
+[usage.md](usage.md#who-a-skill-competes-against-is-listed-not-inferred). A
+prompt expecting a skill that is not in the room could only ever lose, and a
+near miss says nothing about skills that were never installed.
 
 **When a prompt is all you provide, the evaluation grades routing only** — did
 your skill fire, and did nothing else? That is cheap, needs no hardware, and is
@@ -134,10 +138,10 @@ Anything git can resolve — a tag, a branch, a commit. It governs **this skill'
 behavioral run**, and it exists so the version that runs your prompts is bumped
 in the same file, and the same review, as the prompts themselves.
 
-It does not govern routing, which installs several skills in one session and so
-cannot honor several pins at once; that runs at the `version` the workflow asks
-for. Leave the key out and your behavioral run uses that version too, which is
-the right answer for most skills.
+It does not govern routing. Leave the key out and your behavioral run uses the
+workflow's `version` too, which is the right answer for most skills. The two
+places a version can live are in
+[usage.md](usage.md#versions-and-pinning).
 
 ## When JSON is not enough
 
@@ -155,9 +159,9 @@ labels: [mi300x, gpu]       # hardware this skill's cases need
 
 Say what the machine must have; what that *costs* is not yours to declare. The
 base labels, the pull-request label rationing a scarce pool, and the
-credentials that pay for it are set by the repo that owns the machines, in the
-workflow that calls skillscope. Asking for any label is what moves the leg onto
-that pool.
+credentials that pay for it are set by the repo that owns the machines — see
+[usage.md](usage.md#hardware-a-skill-needs). Asking for any label is what
+moves the leg onto that pool.
 
 Most skills that need this file need only `os: [Linux]`, to drop a Windows leg
 that would just exercise the failure path of Linux-only tooling.
@@ -201,33 +205,13 @@ holds.
 ## Running them
 
 ```bash
-skillscope structural                               # structure only: no agent, no tokens, instant
-skillscope structural --external                    # the same, plus fetching every URL
+skillscope structural                               # your folder, prose, and dataset
 skillscope behavioral --skill <your-skill>          # your skill, end to end
 skillscope routing --routing-skills <your-skill>,<a-neighbour>
-skillscope routing                                  # in a repo with one skill, that skill is the room
 skillscope routing --only <case-id> --keep-logs logs # one case, keeping the transcript
 ```
 
-`structural` covers your skill's folder and its prose as well as its dataset.
-Your `SKILL.md` has to declare a `name` matching the folder and a
-`description`, both within the format's limits; every relative path and heading
-anchor in your markdown has to resolve, because a link the agent follows to
-nothing is a step it will improvise around. `--external` fetches the URLs too,
-which needs the network and so is asked for rather than assumed.
-
-Everything but `structural` needs the `claude` CLI authenticated, plus whatever
-your own cases need.
-
-A run exits non-zero on a failed behavioral expectation and, because the routing
-bar defaults to every graded case being right, on a prompt that reaches the
-wrong skill. `--min-accuracy 0` reports the routing score without holding it to
-that, which is worth having while you are still learning what your prompts
-score.
-
-Two failure modes are worth knowing before you read a report. A routing case
-that ends without the agent either activating a skill or answering is reported
-as an **error**, not a missed trigger: grading it would invent a result out of
-an infrastructure problem. And if the runner has its own skills installed
-(usually `~/.claude/skills`), they join the room for every case and the report
-says so — set `ANTHROPIC_API_KEY` so the run can use an isolated config dir.
+`structural` is instant and needs no agent. Everything else needs the `claude`
+CLI authenticated, plus whatever your own cases need. Flags, what each check
+asserts, the routing bar, and how to read a report are in
+[usage.md](usage.md).
