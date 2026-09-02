@@ -462,12 +462,14 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
 
 def _add_skills_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--skills",
+        "--skills-dir",
         default="",
         metavar="GLOB[,GLOB]",
         help=(
-            "Globs naming the directories that hold skills. "
-            f"Default: {','.join(config.DEFAULT_SKILL_GLOBS)}."
+            "Globs naming the directories that are skills, relative to the "
+            "repo root: 'skills/*' for a repo that keeps them together, or a "
+            "path to a single one. Default: every directory in the one this "
+            "command was run from."
         ),
     )
 
@@ -871,7 +873,7 @@ def _configure(args: argparse.Namespace) -> None:
     settings = {
         name: getattr(args, name, None)
         for name in (
-            "skills",
+            "skills_dir",
             "routing_skills",
             "infra_paths",
             "docs",

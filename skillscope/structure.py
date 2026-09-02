@@ -68,16 +68,33 @@ _SECTION = re.compile(r"^##\s+(?P<title>.+?)\s*$")
 def errors(skills: list[str] | None = None) -> list[str]:
     """Every structural problem with every skill folder in the repo.
 
-    Given `skills`, only those folders. The directories that hold no
-    ``SKILL.md`` go with them: such a directory is nobody's skill, so there is
-    no named skill a scoped run could be reporting it against.
+    Given `skills`, only those folders. Otherwise the survey is repo-wide, and
+    finding no skill at all is itself the finding.
     """
     cfg = config.active()
     found: list[str] = []
     for skill in sorted(cfg.skills if skills is None else set(skills)):
         found.extend(skill_errors(skill))
-    if skills is None:
-        found.extend(_undeclared(cfg))
+    if skills is None and not cfg.skills and not cfg.doc_globs:
+        # A directory the globs matched that holds no SKILL.md is simply not a
+        # skill, and saying so for every one of them would be noise. Matching
+        # none of them is different: the run graded nothing and reported that
+        # as a pass, which is the one way a green check here can lie about a
+        # repo. A run given --docs still has prose to check, and a repo that
+        # keeps prose and no skills is entitled to check it.
+        #
+        # Suggesting a glob to a caller who just passed one would be
+        # suggesting the glob that found nothing.
+        example = (
+            ", such as 'skills/*'"
+            if cfg.skill_globs == config.default_skill_globs(cfg.root)
+            else ""
+        )
+        found.append(
+            f"no skill found under {', '.join(cfg.skill_globs)} in {cfg.root}. "
+            f"A skill is a directory holding a {SKILL_FILE}, and --skills-dir "
+            f"names those directories rather than the one above them{example}."
+        )
     return found
 
 
@@ -270,26 +287,3 @@ def sections(text: str) -> dict[str, str]:
         found[title] = "\n".join(body).strip()
     return found
 
-
-def _undeclared(cfg: config.Config) -> list[str]:
-    """Directories the skill globs match that hold no SKILL.md.
-
-    Discovery ignores them, which is the problem: a skill whose SKILL.md was
-    never added, or was added under another name, is not graded, not routed,
-    and not reported -- it simply is not there. Saying so costs one line and
-    the fix is either the missing file or a narrower glob.
-    """
-    found: set[str] = set()
-    for pattern in cfg.skill_globs:
-        for path in cfg.root.glob(pattern):
-            if not path.is_dir() or path.name.startswith("."):
-                continue
-            if (path / SKILL_FILE).is_file():
-                continue
-            shown = path.relative_to(cfg.root).as_posix()
-            found.add(
-                f"{shown}: no {SKILL_FILE}, so nothing in this directory is "
-                "graded. Add one, or narrow --skills so the directory is not "
-                "taken for a skill."
-            )
-    return sorted(found)

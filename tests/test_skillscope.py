@@ -117,7 +117,7 @@ class Repo:
         hooks: str | None = None,
         workspace: dict[str, str] | None = None,
         description: str = "",
-        where: str = "skills",
+        where: str = ".",
     ) -> Path:
         folder = self.root / where / name
         (folder / "evals").mkdir(parents=True, exist_ok=True)
@@ -145,6 +145,15 @@ class Repo:
         # the config resolves its globs on every read, and several tests grow
         # the repo mid-test to see what the structural checks make of the result.
         return folder
+
+    def chdir(self, relative: str = ".") -> None:
+        """Run the rest of the test from a directory inside this repo.
+
+        Registered after the temp directory's own cleanup, so it is undone
+        first: Windows will not remove a directory that is the cwd.
+        """
+        self.test.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.root / relative)
 
     def activate(self, **settings) -> config.Config:
         """Configure the harness for this repo the way the CLI's flags would."""
@@ -280,7 +289,7 @@ class TestMachineRejections(unittest.TestCase):
         self.repo.activate(behavior_os=["Linux", "Windows"])
 
     def plan(self, text: str) -> dict:
-        path = self.repo.root / "skills" / "demo-skill" / "evals" / "machine.yml"
+        path = self.repo.root / "demo-skill" / "evals" / "machine.yml"
         path.write_text(text, encoding="utf-8")
         return datasets.machine_plan("demo-skill")
 
@@ -326,7 +335,7 @@ class TestMachineRejections(unittest.TestCase):
     def test_structural_checks_report_a_broken_machine_file_rather_than_raising(self) -> None:
         # `skillscope structural` has to survey every skill, so one bad file is
         # a reported error, not an abandoned run.
-        (self.repo.root / "skills" / "demo-skill" / "evals" / "machine.yml").write_text(
+        (self.repo.root / "demo-skill" / "evals" / "machine.yml").write_text(
             "labels: nope\n", encoding="utf-8"
         )
         self.assertTrue(any("`labels`" in e for e in datasets.structural_errors()))
@@ -338,6 +347,7 @@ class TestConfig(unittest.TestCase):
     def test_a_repo_that_configures_nothing_still_works(self) -> None:
         repo = Repo(self)
         repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        repo.chdir()
         cfg = repo.activate()
         self.assertEqual(cfg.skill_globs, config.DEFAULT_SKILL_GLOBS)
         self.assertEqual(cfg.routing_skills, ())
@@ -346,14 +356,54 @@ class TestConfig(unittest.TestCase):
     def test_skills_can_live_anywhere_the_globs_say(self) -> None:
         repo = Repo(self)
         repo.skill("shipped", dataset=tier0_dataset("shipped"), where="agents/skills")
-        repo.activate(skills="agents/skills/*")
+        repo.activate(skills_dir="agents/skills/*")
         self.assertEqual(datasets.declared_skills(), ["shipped"])
         self.assertTrue(datasets.dataset_path("shipped").is_file())
+
+    def test_the_default_looks_one_level_down_and_no_further(self) -> None:
+        # Deep enough for a repo that keeps its skills where you are standing,
+        # shallow enough that a vendored copy further down is not found and
+        # silently graded.
+        repo = Repo(self)
+        repo.skill("at-the-root", dataset=tier0_dataset("root"))
+        repo.skill("buried", dataset=tier0_dataset("buried"), where="vendor/skills")
+        repo.chdir()
+        repo.activate()
+        self.assertEqual(datasets.declared_skills(), ["at-the-root"])
+
+    def test_the_default_is_the_directory_the_command_was_run_from(self) -> None:
+        # A repo whose skills sit a level down is the usual layout, and
+        # `cd skills && skillscope structural` is what a person does about it.
+        # The glob is still reported against the root, which is the base every
+        # other path in a run is measured from.
+        repo = Repo(self)
+        repo.skill("shipped", dataset=tier0_dataset("shipped"), where="skills")
+        repo.chdir("skills")
+        cfg = repo.activate()
+        self.assertEqual(cfg.skill_globs, ("skills/*",))
+        self.assertEqual(datasets.declared_skills(), ["shipped"])
+
+    def test_a_command_run_from_outside_the_repo_gets_that_repos_root(self) -> None:
+        # `--repo somewhere-else` is not standing anywhere in it, so the only
+        # directory it can mean is the root it was handed.
+        repo = Repo(self)
+        repo.skill("at-the-root", dataset=tier0_dataset("root"))
+        self.assertEqual(repo.activate().skill_globs, config.DEFAULT_SKILL_GLOBS)
+        self.assertEqual(datasets.declared_skills(), ["at-the-root"])
+
+    def test_a_glob_that_was_passed_is_relative_to_the_root_not_the_cwd(self) -> None:
+        # Every other path flag is root-relative, and a workflow that names
+        # `skills/*` means the same thing wherever its runner happens to be.
+        repo = Repo(self)
+        repo.skill("shipped", dataset=tier0_dataset("shipped"), where="skills")
+        repo.chdir("skills")
+        repo.activate(skills_dir="skills/*")
+        self.assertEqual(datasets.declared_skills(), ["shipped"])
 
     def test_a_directory_without_a_skill_file_is_not_a_skill(self) -> None:
         repo = Repo(self)
         repo.skill("real-skill", dataset=tier0_dataset("real"))
-        (repo.root / "skills" / "notes").mkdir(parents=True)
+        (repo.root / "notes").mkdir(parents=True)
         repo.activate()
         self.assertEqual(datasets.declared_skills(), ["real-skill"])
 
@@ -391,7 +441,8 @@ class TestConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, {config.SKILLS_ENV: "agents/skills/*"}):
             self.assertEqual(config.build(repo.root).skill_globs, ("agents/skills/*",))
             self.assertEqual(
-                config.build(repo.root, skills="skills/*").skill_globs, ("skills/*",)
+                config.build(repo.root, skills_dir="skills/*").skill_globs,
+                ("skills/*",),
             )
 
     def test_the_version_comes_from_the_environment_when_unset(self) -> None:
@@ -412,7 +463,7 @@ class TestRoutingSet(unittest.TestCase):
     def test_the_listed_skills_are_what_gets_installed(self) -> None:
         cfg = self.repo.activate(routing_skills="one,two")
         self.assertEqual(list(cfg.routing_set), ["one", "two"])
-        self.assertEqual(cfg.routing_set["one"], self.repo.root / "skills" / "one")
+        self.assertEqual(cfg.routing_set["one"], self.repo.root / "one")
 
     def test_an_unlisted_skill_is_not_in_the_room(self) -> None:
         cfg = self.repo.activate(routing_skills="one")
@@ -477,7 +528,7 @@ class TestASingleSkillIsItsOwnRoom(unittest.TestCase):
         # Otherwise the flag would be redundant on the runner and still
         # required for CI to schedule the job that runs it.
         self.resolve(infra_paths=".github/workflows/evals.yml")
-        self.assertTrue(select_module.routing_needed({"skills/only-skill/SKILL.md"}))
+        self.assertTrue(select_module.routing_needed({"only-skill/SKILL.md"}))
         self.assertTrue(
             select_module.plan(["only-skill"], routing=True, labels=set())["routing"]
         )
@@ -754,7 +805,7 @@ class TestSelection(unittest.TestCase):
 
     def gpu(self, skill: str = "alpha") -> None:
         """Give `skill` a machine.yml asking for hardware this repo rations."""
-        (self.repo.root / "skills" / skill / "evals" / "machine.yml").write_text(
+        (self.repo.root / skill / "evals" / "machine.yml").write_text(
             "labels: [gpu]\n", encoding="utf-8"
         )
         self.repo.reactivate(
@@ -769,7 +820,7 @@ class TestSelection(unittest.TestCase):
 
     def test_a_touched_skill_is_selected(self) -> None:
         self.assertEqual(
-            select_module.select_from_changes({"skills/alpha/SKILL.md"}), ["alpha"]
+            select_module.select_from_changes({"alpha/SKILL.md"}), ["alpha"]
         )
 
     def test_an_infra_path_selects_everything(self) -> None:
@@ -784,21 +835,21 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(select_module.select_from_changes({"README.md"}), [])
 
     def test_a_description_change_buys_a_routing_run(self) -> None:
-        self.assertTrue(select_module.routing_needed({"skills/alpha/SKILL.md"}))
+        self.assertTrue(select_module.routing_needed({"alpha/SKILL.md"}))
 
     def test_a_dataset_change_buys_a_routing_run(self) -> None:
-        self.assertTrue(select_module.routing_needed({"skills/beta/evals/evals.json"}))
+        self.assertTrue(select_module.routing_needed({"beta/evals/evals.json"}))
 
     def test_a_reference_file_under_a_skill_does_not(self) -> None:
-        self.assertFalse(select_module.routing_needed({"skills/alpha/reference.md"}))
+        self.assertFalse(select_module.routing_needed({"alpha/reference.md"}))
 
     def test_an_unlisted_skills_description_is_not_a_routing_input(self) -> None:
         self.repo.skill("draft", dataset=tier0_dataset("draft"))
-        self.assertFalse(select_module.routing_needed({"skills/draft/SKILL.md"}))
+        self.assertFalse(select_module.routing_needed({"draft/SKILL.md"}))
 
     def test_with_no_routing_set_nothing_buys_a_routing_run(self) -> None:
         self.repo.reactivate(routing_skills="")
-        self.assertFalse(select_module.routing_needed({"skills/alpha/SKILL.md"}))
+        self.assertFalse(select_module.routing_needed({"alpha/SKILL.md"}))
         self.assertFalse(
             select_module.routing_needed({".github/workflows/evals.yml"})
         )
@@ -836,7 +887,7 @@ class TestSelection(unittest.TestCase):
     def test_hardware_with_no_environment_stays_in_one_matrix(self) -> None:
         # Only credentials force a second job. A repo that rations a pool but
         # pays for it out of the same key should not get an extra one.
-        (self.repo.root / "skills" / "alpha" / "evals" / "machine.yml").write_text(
+        (self.repo.root / "alpha" / "evals" / "machine.yml").write_text(
             "labels: [gpu]\n", encoding="utf-8"
         )
         self.repo.reactivate(scoped_runner="self-hosted", scoped_gate="enable_gpu_ci")
@@ -1192,7 +1243,7 @@ class TestTheGateAPaidRunPassesFirst(unittest.TestCase):
         self.assertIn("runner_type", self.fails(cli._structural_or_exit))
 
     def test_a_neighbours_broken_link_is_not_this_runs_problem(self) -> None:
-        (self.repo.root / "skills" / "beta" / "reference.md").write_text(
+        (self.repo.root / "beta" / "reference.md").write_text(
             "[gone](./nowhere.md)\n", encoding="utf-8"
         )
         self.assertIn("nowhere.md", self.fails(cli._structural_or_exit))
@@ -1222,9 +1273,7 @@ class TestSkillStructure(unittest.TestCase):
         self.repo.activate()
 
     def write(self, text: str, skill: str = "demo-skill") -> None:
-        (self.repo.root / "skills" / skill / "SKILL.md").write_text(
-            text, encoding="utf-8"
-        )
+        (self.repo.root / skill / "SKILL.md").write_text(text, encoding="utf-8")
 
     def declares(self, frontmatter: str, body: str = "\n# Demo\n") -> None:
         self.write(f"---\n{frontmatter}\n---\n{body}")
@@ -1293,14 +1342,12 @@ class TestSkillStructure(unittest.TestCase):
         self.declares("name: demo-skill\ndescription: Does things.", f"\n\n{lines}\n\n\n")
         self.assertEqual(structure.errors(), [])
 
-    def test_a_globbed_directory_with_no_skill_file_is_reported(self) -> None:
-        # It is not a skill, so nothing grades it, routes it, or reports on it.
-        # Silence there is the failure: either the file is missing or the glob
-        # is too wide, and both are worth one line.
-        (self.repo.root / "skills" / "notes").mkdir(parents=True)
-        errors = structure.errors()
-        self.assertEqual(len(errors), 1, errors)
-        self.assertIn("skills/notes", errors[0])
+    def test_a_globbed_directory_with_no_skill_file_is_passed_over(self) -> None:
+        # A directory holding no SKILL.md is not a skill, and the default glob
+        # matches every directory in the repo, so reporting one would be a line
+        # per README folder.
+        (self.repo.root / "notes").mkdir(parents=True)
+        self.assertEqual(structure.errors(), [])
 
     def test_a_repo_that_requires_nothing_extra_requires_nothing_extra(self) -> None:
         self.assertEqual(structure.errors(), [])
@@ -1347,6 +1394,41 @@ class TestSkillStructure(unittest.TestCase):
         self.declares("name: demo-skill")
         with self.assertRaises(SystemExit):
             cli._structural_or_exit()
+
+
+class TestARepoWhereNoSkillWasFound(unittest.TestCase):
+    """Grading nothing is reported, because a green check for it would lie."""
+
+    def test_finding_no_skill_is_itself_the_finding(self) -> None:
+        repo = Repo(self)
+        repo.activate()
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("no skill found", errors[0])
+
+    def test_the_globs_that_matched_nothing_are_named(self) -> None:
+        # A glob pointing somewhere the skills are not is the usual cause, so
+        # the message has to say which one was used.
+        repo = Repo(self)
+        repo.skill("shipped", dataset=tier0_dataset("shipped"), where="agents/skills")
+        repo.activate(skills_dir="skills/*")
+        self.assertIn("skills/*", structure.errors()[0])
+
+    def test_an_example_glob_is_offered_only_to_a_caller_who_passed_none(self) -> None:
+        # Suggesting one to a caller who just passed one would be suggesting
+        # the glob that found nothing.
+        repo = Repo(self)
+        repo.activate()
+        self.assertIn("such as", structure.errors()[0])
+        repo.reactivate(skills_dir="skills/*")
+        self.assertNotIn("such as", structure.errors()[0])
+
+    def test_a_run_asked_for_docs_still_has_work_to_do(self) -> None:
+        # --docs is a repo checking its own prose, which is a real run in a
+        # repo that ships no skill at all.
+        repo = Repo(self)
+        repo.activate(docs="*.md")
+        self.assertEqual(structure.errors(), [])
 
 
 def targets(text: str) -> list[str]:
@@ -1489,10 +1571,10 @@ class TestInternalReferences(unittest.TestCase):
         self.assertEqual(self.errors(), [])
 
     def test_root_relative_links_resolve_from_the_repo_root(self) -> None:
-        self.write("SKILL.md", "[ok](/skills/demo/SKILL.md) [no](/skills/demo/gone.md)\n")
+        self.write("SKILL.md", "[ok](/demo/SKILL.md) [no](/demo/gone.md)\n")
         errors = self.errors()
         self.assertEqual(len(errors), 1, errors)
-        self.assertIn("/skills/demo/gone.md", errors[0])
+        self.assertIn("/demo/gone.md", errors[0])
 
     def test_percent_encoding_is_decoded_before_the_file_is_looked_for(self) -> None:
         self.write("a file.md", "# Spaced\n")

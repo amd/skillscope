@@ -51,18 +51,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Laid out the way the default glob expects one: skills at the root, so
+      # not a step below passes `skills`, which is the configuration a repo
+      # starting from nothing has.
       - name: Build a repo to test
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p fixture/skills/demo-skill/evals
-          cat > fixture/skills/demo-skill/SKILL.md <<'EOF'
+          mkdir -p fixture/demo-skill/evals
+          cat > fixture/demo-skill/SKILL.md <<'EOF'
           ---
           name: demo-skill
           description: Does demonstrable things, for a test that needs a skill.
           ---
           EOF
-          cat > fixture/skills/demo-skill/skill-card.md <<'EOF'
+          cat > fixture/demo-skill/skill-card.md <<'EOF'
           # Skill Card
 
           ## Description
@@ -77,7 +80,7 @@ jobs:
 
           MIT
           EOF
-          cat > fixture/skills/demo-skill/evals/evals.json <<'EOF'
+          cat > fixture/demo-skill/evals/evals.json <<'EOF'
           {
             "evaluations": [
               {"id": "demo-a", "skill_should_trigger": true, "prompt": "do the demo thing"},
@@ -105,8 +108,9 @@ jobs:
 
       # This repo has no skills, so what is left is its own prose -- which is
       # exactly the half a harness for checking references should not be
-      # allowed to get wrong about itself. Offline, so nothing here depends on
-      # the network being polite today.
+      # allowed to get wrong about itself. `--docs` is also what makes a run
+      # that finds no skill a real run rather than one that graded nothing.
+      # Offline, so nothing here depends on the network being polite today.
       - name: Check this repo's own references
         uses: ./
         with:

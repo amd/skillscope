@@ -13,7 +13,7 @@ That data arrives as command-line flags, and the caller that passes them is
 the repo's own workflow::
 
     skillscope select --changed \\
-      --skills 'skills/*' \\
+      --skills-dir 'skills/*' \\
       --routing-skills local-ai-use,serving-llms-on-instinct \\
       --behavior-runner '["self-hosted", "strix_halo"]' \\
       --infra-paths .github/workflows/evals.yml
@@ -23,13 +23,17 @@ evals already has a workflow saying when to run them, on what, and with which
 credentials; splitting the other half of the same decision into a second file
 means two places to read, two places to change, and a file whose only reader
 is the workflow next to it. Every flag has a default, so a repo that keeps its
-skills in ``skills/`` and grades nothing on special hardware passes none of
-them.
+skills where the command is run and grades nothing on special hardware passes
+none of them.
 
-The defaults are modest rather than clever. Guessing where skills live by
-scanning a whole tree finds vendored copies, fixtures, and a contributor's
-local install, and each of those silently changes a routing score; naming the
-directory costs one flag and cannot drift.
+Every path a flag carries is relative to the repo root, which is the only base
+a workflow input, a line of ``git diff --name-only``, and a root-relative
+markdown link can all agree on. The one default that is not is
+``--skills-dir``, which falls back to the directory the command was typed in:
+see `default_skill_globs`. Either way it looks one level down and no further,
+because searching a whole tree for every ``SKILL.md`` finds vendored copies,
+fixtures, and a contributor's local install, and each of those silently
+changes a routing score.
 """
 
 from __future__ import annotations
@@ -47,12 +51,16 @@ from pathlib import Path
 # `SKILLSCOPE_SKILLS` is where the skills are, and it is an environment
 # variable rather than only a flag because the launcher needs the same answer
 # this does: it looks in a skill's dataset for the version pin before it has
-# fetched the harness that could parse a flag. `--skills` still wins.
+# fetched the harness that could parse a flag. `--skills-dir` still wins.
 REPO_ENV = "SKILLSCOPE_REPO"
 VERSION_ENV = "SKILLSCOPE_VERSION"
 SKILLS_ENV = "SKILLSCOPE_SKILLS"
 
-DEFAULT_SKILL_GLOBS = ("skills/*",)
+# Every directory in the one the command was run from, and no deeper. See
+# `default_skill_globs`, which is what actually resolves it; this is the form
+# it takes at the repo root, and the fallback when the command was run from
+# outside the repo it was pointed at.
+DEFAULT_SKILL_GLOBS = ("./*",)
 
 # GitHub-hosted Linux, which is what a repo with no runners of its own has.
 DEFAULT_BEHAVIOR_RUNNER = ("ubuntu-latest",)
@@ -73,7 +81,7 @@ class Config:
 
     root: Path
 
-    # Globs naming the directories that hold skills.
+    # Globs naming the directories that are skills.
     skill_globs: tuple[str, ...] = DEFAULT_SKILL_GLOBS
 
     # The skills a routing run installs side by side, in the order given, and
@@ -143,7 +151,7 @@ class Config:
                         f"error: two skills are both named '{path.name}' "
                         f"({previous} and {path}). A skill's directory name is "
                         "its identity, so the names have to be unique across "
-                        "the globs passed to --skills."
+                        "the globs passed to --skills-dir."
                     )
                 found[path.name] = path
         return found
@@ -213,6 +221,28 @@ def find_root(start: Path | None = None) -> Path:
     return here
 
 
+def default_skill_globs(root: Path) -> tuple[str, ...]:
+    """Every directory in the current one, as a glob relative to `root`.
+
+    A glob that was *passed* is relative to the repo root, because that is the
+    only base a workflow input, a line of ``git diff --name-only``, and a
+    root-relative markdown link can all agree on. A glob nobody passed is
+    relative to the directory the command was typed in, because standing in a
+    tree of skills and running ``skillscope structural`` can only mean these
+    ones. Under CI the two are the same: the launcher runs from the repo root.
+
+    The answer is still expressed against `root`, so everything downstream has
+    one base to reason about rather than two.
+    """
+    try:
+        here = Path.cwd().resolve().relative_to(root)
+    except (OSError, ValueError):
+        # Outside the repo entirely, which is what `--repo` somewhere else
+        # looks like. Its root is the only directory that can be meant.
+        return DEFAULT_SKILL_GLOBS
+    return (f"{here.as_posix()}/*",)
+
+
 def _items(value: object, flag: str) -> tuple[str, ...]:
     """Parse a list-valued flag: a JSON array, or comma-separated values.
 
@@ -268,7 +298,7 @@ def wants_no_skills(value: object) -> bool:
 def build(
     root: Path | None = None,
     *,
-    skills: object = None,
+    skills_dir: object = None,
     routing_skills: object = None,
     infra_paths: object = None,
     docs: object = None,
@@ -296,9 +326,9 @@ def build(
     root = (root or find_root()).resolve()
 
     globs = (
-        _items(skills, "--skills")
+        _items(skills_dir, "--skills-dir")
         or _items(os.environ.get(SKILLS_ENV, ""), SKILLS_ENV)
-        or DEFAULT_SKILL_GLOBS
+        or default_skill_globs(root)
     )
     routing = _items(routing_skills, "--routing-skills")
     if wants_all_skills(routing):

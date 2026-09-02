@@ -39,7 +39,7 @@ places to disagree.
 
 | Flag | Workflow input | Default | What it decides |
 | --- | --- | --- | --- |
-| `--skills` | `skill_globs` | `skills/*` | Globs naming the directories that hold skills. A skill is a directory with a `SKILL.md`, and its directory name is its identity. |
+| `--skills-dir` | `skill_globs` | the directory you are in | Globs naming the directories that *are* skills, relative to the repo root. A skill is a directory with a `SKILL.md`, and its directory name is its identity. A repo that keeps its skills together passes `skills/*`. |
 | `--routing-skills` | `routing_skills` | the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means a repo with one skill runs that skill while a repo with several has to choose. |
 | `--infra-paths` | `infra_paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
 | `--docs` | `doc_globs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
@@ -59,6 +59,25 @@ some skills or some case ids, `--no-extended` to skip a skill's optional
 whole command. Routing adds `--jobs`, `--case-timeout`, `--max-tool-calls`,
 `--max-budget-usd`, `--keep-logs`, and `--min-accuracy`. `--help` is the
 authority on all of them.
+
+### Where the skills are
+
+Every path in the table is relative to the repository root, which is the only
+base a workflow input, a line of `git diff --name-only`, and a root-relative
+markdown link can all agree on. `skills/*` in a workflow means the same thing
+wherever its runner happens to have started.
+
+The one thing measured from somewhere else is `--skills-dir` when you do not
+pass it: then it is every directory in the one you ran the command from.
+Standing in a tree of skills and typing `skillscope structural` can only mean
+these ones, and a repo that keeps them a level down works with a `cd` rather
+than a flag. Under CI the two bases coincide, because the launcher runs from
+the repo root — so a run with no `--skills-dir` grades the directories at the
+root, and a repo whose skills live anywhere else names them.
+
+Either way it looks one level down and no further. Searching a whole tree for
+every `SKILL.md` finds vendored copies, fixtures, and a contributor's local
+install, and each of those silently changes a routing score.
 
 ### Who a skill competes against is listed, not inferred
 
@@ -95,8 +114,11 @@ agent that simply never uses the skill. So every `SKILL.md` is read first:
 | `description` | non-empty, at most 1024 characters |
 | body | at most 500 lines — past that it is reference material, and an agent reads it in full every time the skill loads |
 
-A directory your skill globs match that holds no `SKILL.md` is reported too.
-Either the file is missing or the glob is too wide, and both are worth one line.
+A directory that holds no `SKILL.md` is simply not a skill, and is passed over
+without a word. Matching *no* skill at all is the case that is reported, since
+a run that graded nothing and called itself green is the one way this harness
+can lie about a repo; a run given `--docs` is exempt, having been asked to
+check a repo's own prose.
 
 Whatever else your repo asks of a skill is policy rather than format, so it is
 configuration:
@@ -222,7 +244,7 @@ Naming several, and holding them to different bars:
 
 | Input | Default | What it decides |
 | --- | --- | --- |
-| `skills` | `skills/*` | The skills to grade: a directory, or a glob matching several, one per line or comma-separated. |
+| `skills` | `./*` | The skills to grade: a directory, or a glob matching several, one per line or comma-separated. The default is every directory at the repo root. |
 | `structural` | `required` | `required`, `optional`, or `off`. |
 | `routing` | `required` | `required`, `optional`, or `off`. |
 | `behavioral` | `required` | `required`, `optional`, or `off`. |

@@ -64,9 +64,11 @@ on:
       # --- what this repo looks like ---------------------------------------
       skill_globs:
         description: >-
-          Globs naming the directories that hold skills, comma-separated.
+          Globs naming the directories that are skills, comma-separated. The
+          default is every directory at the repository root; a repo that keeps
+          its skills together says so with `skills/*`.
         type: string
-        default: "skills/*"
+        default: "./*"
       routing_skills:
         description: >-
           Skills to install side by side for the routing run, comma-separated,
@@ -340,8 +342,8 @@ jobs:
               args += ["--ignore-gates", extended]
 
           # What this repo looks like. Planning is the only step that needs all
-          # of it, so this is the one place that spells it out; `--skills` goes
-          # to the action instead, because the launcher needs it too.
+          # of it, so this is the one place that spells it out; `--skills-dir`
+          # goes to the action instead, because the launcher needs it too.
           for flag, name in (
               ("--routing-skills", "ROUTING_SKILLS"),
               ("--infra-paths", "INFRA_PATHS"),
