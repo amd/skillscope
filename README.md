@@ -6,14 +6,14 @@ SPDX-License-Identifier: MIT
 
 # Skillscope
 
-![Skillscope](assets/banner.png)
-
 ![AMD](https://img.shields.io/badge/AMD-Skillscope-ED1C24?logo=amd&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent_Skills-Standard-7B2D8E)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Compatible-F07535?logo=claude&logoColor=white)](https://www.anthropic.com/claude-code)
 [![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Reusable-2088FF?logo=githubactions&logoColor=white)](.github/workflows/reusable.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+![Skillscope](assets/banner.png)
 
 A test harness for AI agent skills. Install the harness, or point a workflow at your repo. Skillscope enables three main types of tests:
 
@@ -73,8 +73,8 @@ the repo under test — worth adding to `.gitignore`.
 
 ## Docs
 
-* [docs/authoring-evals.md](docs/authoring-evals.md) — writing a skill's dataset.
-* [docs/usage.md](docs/usage.md) — every flag, every workflow input, and what
+* [docs/authoring-evals.md](docs/authoring-evals.md): writing a skill's tests.
+* [docs/usage.md](docs/usage.md): every flag, every workflow input, and what
   each check actually asserts.
 
 ## Development
