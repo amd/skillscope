@@ -14,7 +14,7 @@ the repo's own workflow::
 
     skillscope select --changed \\
       --skills-dir 'skills/*' \\
-      --routing-skills local-ai-use,serving-llms-on-instinct \\
+      --routing-room local-ai-use,serving-llms-on-instinct \\
       --behavior-runner '["self-hosted", "strix_halo"]' \\
       --infra-paths .github/workflows/evals.yml
 
@@ -66,7 +66,7 @@ DEFAULT_SKILL_GLOBS = ("./*",)
 DEFAULT_BEHAVIOR_RUNNER = ("ubuntu-latest",)
 DEFAULT_BEHAVIOR_OS = ("Linux",)
 
-# The two answers `--routing-skills` takes instead of a list of names: every
+# The two answers `--routing-room` takes instead of a list of names: every
 # skill in the repo that ships a dataset, and no routing run at all. Both are
 # words rather than shapes of an empty flag, because saying nothing means "work
 # it out" -- a repo with one skill has only one room its skill can be in -- and
@@ -89,7 +89,7 @@ class Config:
     # never named has become that skill, and `none` -- or a repo with several
     # skills that said nothing about which of them compete -- has become empty,
     # which is no routing run.
-    routing_skills: tuple[str, ...] = ()
+    routing_room: tuple[str, ...] = ()
 
     # Paths that change the harness rather than one skill, so touching one
     # re-runs every skill instead of guessing at the blast radius.
@@ -176,14 +176,14 @@ class Config:
         the report harder to compare against the flag that produced it.
         """
         skills = self.skills
-        unknown = [name for name in self.routing_skills if name not in skills]
+        unknown = [name for name in self.routing_room if name not in skills]
         if unknown:
             raise SystemExit(
-                f"error: --routing-skills names {', '.join(unknown)}, which "
+                f"error: --routing-room names {', '.join(unknown)}, which "
                 f"{'is' if len(unknown) == 1 else 'are'} not in this repo. "
                 f"Found: {', '.join(sorted(skills)) or '(none)'}."
             )
-        return {name: skills[name] for name in self.routing_skills}
+        return {name: skills[name] for name in self.routing_room}
 
     def base_labels(self, extra: list[str] | tuple[str, ...]) -> list[str]:
         """The `runs-on` labels a leg starts from, given what it asked for.
@@ -281,17 +281,17 @@ def _items(value: object, flag: str) -> tuple[str, ...]:
 
 
 def _is_sentinel(value: object, word: str) -> bool:
-    items = _items(value, "--routing-skills")
+    items = _items(value, "--routing-room")
     return len(items) == 1 and items[0].lower() == word
 
 
 def wants_all_skills(value: object) -> bool:
-    """Whether a ``--routing-skills`` value is the ``all`` shorthand."""
+    """Whether a ``--routing-room`` value is the ``all`` shorthand."""
     return _is_sentinel(value, ALL_SKILLS)
 
 
 def wants_no_skills(value: object) -> bool:
-    """Whether a ``--routing-skills`` value is the ``none`` shorthand."""
+    """Whether a ``--routing-room`` value is the ``none`` shorthand."""
     return _is_sentinel(value, NO_SKILLS)
 
 
@@ -299,7 +299,7 @@ def build(
     root: Path | None = None,
     *,
     skills_dir: object = None,
-    routing_skills: object = None,
+    routing_room: object = None,
     infra_paths: object = None,
     docs: object = None,
     excluded_urls: object = None,
@@ -330,7 +330,7 @@ def build(
         or _items(os.environ.get(SKILLS_ENV, ""), SKILLS_ENV)
         or default_skill_globs(root)
     )
-    routing = _items(routing_skills, "--routing-skills")
+    routing = _items(routing_room, "--routing-room")
     if wants_all_skills(routing):
         routing = tuple(dataset_skills if dataset_skills is not None else ())
     elif wants_no_skills(routing):
@@ -345,7 +345,7 @@ def build(
     return Config(
         root=root,
         skill_globs=globs,
-        routing_skills=routing,
+        routing_room=routing,
         infra_paths=frozenset(_items(infra_paths, "--infra-paths")),
         doc_globs=_items(docs, "--docs"),
         excluded_urls=_items(excluded_urls, "--exclude-url"),

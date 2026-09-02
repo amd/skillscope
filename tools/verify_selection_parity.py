@@ -33,7 +33,7 @@ from pathlib import Path
 SETTINGS = [
     "--skills-dir",
     "skills/*",
-    "--routing-skills",
+    "--routing-room",
     "local-ai-use,local-ai-app-integration,serving-llms-on-instinct,"
     "tracelens-analysis-orchestrator,hyperloom-workload-optimizer",
     "--infra-paths",

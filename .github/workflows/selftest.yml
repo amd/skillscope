@@ -123,7 +123,7 @@ jobs:
         uses: ./
         with:
           command: select
-          args: --all --routing-skills demo-skill
+          args: --all --routing-room demo-skill
           repo: fixture
           source: .
 
@@ -141,7 +141,7 @@ jobs:
         uses: ./
         with:
           command: select
-          args: --all --routing-skills none
+          args: --all --routing-room none
           repo: fixture
           source: .
 

@@ -350,7 +350,7 @@ class TestConfig(unittest.TestCase):
         repo.chdir()
         cfg = repo.activate()
         self.assertEqual(cfg.skill_globs, config.DEFAULT_SKILL_GLOBS)
-        self.assertEqual(cfg.routing_skills, ())
+        self.assertEqual(cfg.routing_room, ())
         self.assertEqual(datasets.declared_skills(), ["demo-skill"])
 
     def test_skills_can_live_anywhere_the_globs_say(self) -> None:
@@ -461,12 +461,12 @@ class TestRoutingSet(unittest.TestCase):
         self.repo.skill("two", dataset=tier0_dataset("two"))
 
     def test_the_listed_skills_are_what_gets_installed(self) -> None:
-        cfg = self.repo.activate(routing_skills="one,two")
+        cfg = self.repo.activate(routing_room="one,two")
         self.assertEqual(list(cfg.routing_set), ["one", "two"])
         self.assertEqual(cfg.routing_set["one"], self.repo.root / "one")
 
     def test_an_unlisted_skill_is_not_in_the_room(self) -> None:
-        cfg = self.repo.activate(routing_skills="one")
+        cfg = self.repo.activate(routing_room="one")
         self.assertEqual(list(cfg.routing_set), ["one"])
 
     def test_listing_nothing_where_there_is_a_choice_means_no_routing_run(self) -> None:
@@ -479,10 +479,10 @@ class TestRoutingSet(unittest.TestCase):
         # Resolved by the CLI, which is where "has a dataset" can be answered.
         cfg = config.build(
             self.repo.root,
-            routing_skills="all",
+            routing_room="all",
             dataset_skills=["one", "two"],
         )
-        self.assertEqual(cfg.routing_skills, ("one", "two"))
+        self.assertEqual(cfg.routing_room, ("one", "two"))
 
     def test_none_says_no_routing_run_outright(self) -> None:
         # The one way to turn routing off, and it survives a repo having only
@@ -490,18 +490,18 @@ class TestRoutingSet(unittest.TestCase):
         for available in (["one"], ["one", "two"]):
             with self.subTest(available=available):
                 cfg = config.build(
-                    self.repo.root, routing_skills="none", dataset_skills=available
+                    self.repo.root, routing_room="none", dataset_skills=available
                 )
-                self.assertEqual(cfg.routing_skills, ())
+                self.assertEqual(cfg.routing_room, ())
 
     def test_a_skill_that_does_not_exist_is_refused(self) -> None:
-        cfg = self.repo.activate(routing_skills="one,ghost")
+        cfg = self.repo.activate(routing_room="one,ghost")
         with self.assertRaises(SystemExit) as caught:
             cfg.routing_set  # noqa: B018 -- the property is the assertion
         self.assertIn("ghost", str(caught.exception))
 
     def test_the_listed_order_is_kept(self) -> None:
-        cfg = self.repo.activate(routing_skills="two,one")
+        cfg = self.repo.activate(routing_room="two,one")
         self.assertEqual(list(cfg.routing_set), ["two", "one"])
 
 
@@ -544,7 +544,7 @@ class TestASingleSkillIsItsOwnRoom(unittest.TestCase):
         self.assertEqual(list(self.resolve().routing_set), ["only-skill"])
 
     def test_saying_none_still_turns_routing_off(self) -> None:
-        cfg = self.resolve(routing_skills="none")
+        cfg = self.resolve(routing_room="none")
         self.assertEqual(cfg.routing_set, {})
         self.assertFalse(
             select_module.plan(["only-skill"], routing=True, labels=set())["routing"]
@@ -559,7 +559,7 @@ class TestASingleSkillIsItsOwnRoom(unittest.TestCase):
                 ["--repo", str(self.repo.root), "routing"]
             )
         )
-        self.assertEqual(config.active().routing_skills, ("only-skill",))
+        self.assertEqual(config.active().routing_room, ("only-skill",))
 
 
 class TestARoutingRunWithNobodyInTheRoom(unittest.TestCase):
@@ -583,8 +583,8 @@ class TestARoutingRunWithNobodyInTheRoom(unittest.TestCase):
 
     def test_asking_for_routing_and_emptying_the_room_is_a_contradiction(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            cli._empty_room(self.args("--routing-skills", "none"))
-        self.assertIn("--routing-skills none", str(caught.exception))
+            cli._empty_room(self.args("--routing-room", "none"))
+        self.assertIn("--routing-room none", str(caught.exception))
 
 
 class TestCommands(unittest.TestCase):
@@ -609,7 +609,7 @@ class TestCommands(unittest.TestCase):
     def test_behavioral_does_not_take_routing_flags(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                cli.build_parser().parse_args(["behavioral", "--routing-skills", "all"])
+                cli.build_parser().parse_args(["behavioral", "--routing-room", "all"])
             with self.assertRaises(SystemExit):
                 cli.build_parser().parse_args(["behavioral", "--min-accuracy", "0"])
 
@@ -799,7 +799,7 @@ class TestSelection(unittest.TestCase):
         self.repo.skill("alpha", dataset=self.graded)
         self.repo.skill("beta", dataset=tier0_dataset("beta"))
         self.repo.activate(
-            routing_skills="alpha,beta",
+            routing_room="alpha,beta",
             infra_paths=".github/workflows/evals.yml",
         )
 
@@ -848,7 +848,7 @@ class TestSelection(unittest.TestCase):
         self.assertFalse(select_module.routing_needed({"draft/SKILL.md"}))
 
     def test_with_no_routing_set_nothing_buys_a_routing_run(self) -> None:
-        self.repo.reactivate(routing_skills="")
+        self.repo.reactivate(routing_room="")
         self.assertFalse(select_module.routing_needed({"alpha/SKILL.md"}))
         self.assertFalse(
             select_module.routing_needed({".github/workflows/evals.yml"})
@@ -1116,7 +1116,7 @@ class TestWholeRepoStructure(unittest.TestCase):
             workspace={"evals/files/stub/main.py": "print('hi')\n"},
         )
         self.repo.skill("beta", dataset=tier0_dataset("beta"))
-        self.repo.activate(routing_skills="alpha,beta")
+        self.repo.activate(routing_room="alpha,beta")
 
     def test_a_healthy_repo_checks_out_clean(self) -> None:
         self.assertEqual(datasets.structural_errors(), [])
@@ -1152,7 +1152,7 @@ class TestWholeRepoStructure(unittest.TestCase):
     def test_every_listed_skill_brings_prompts_to_the_routing_run(self) -> None:
         # A skill in the room with no gradeable prompt of its own would silently
         # drop out of the score rather than failing.
-        listed = config.active().routing_skills
+        listed = config.active().routing_room
         cases = datasets.routing_cases(list(listed))
         covered = {case.expect_skill for case in cases if case.expect_skill}
         self.assertEqual(sorted(covered), sorted(listed))
@@ -1200,7 +1200,7 @@ class TestTheGateAPaidRunPassesFirst(unittest.TestCase):
         self.repo.skill(
             "beta", dataset=tier0_dataset("beta"), machine="runner_type: mi300x\n"
         )
-        self.repo.activate(routing_skills="alpha,beta")
+        self.repo.activate(routing_room="alpha,beta")
 
     def args(self, *argv) -> argparse.Namespace:
         return cli.build_parser().parse_args([*argv, "--skip-preflight"])
@@ -1235,8 +1235,8 @@ class TestTheGateAPaidRunPassesFirst(unittest.TestCase):
     def test_routing_reads_the_room_and_not_the_repo(self) -> None:
         # A routing run leaves --skill off, so the gate has to take its scope
         # from the room rather than from "every skill that has a dataset".
-        self.repo.reactivate(routing_skills="alpha")
-        args = self.args("routing", "--routing-skills", "alpha")
+        self.repo.reactivate(routing_room="alpha")
+        args = self.args("routing", "--routing-room", "alpha")
         self.assertEqual(cli._prepare_graded_run(args, ["alpha"]), ["alpha", "beta"])
 
     def test_the_repo_wide_check_still_covers_the_repo(self) -> None:
@@ -1847,7 +1847,7 @@ class TestRoutingStaging(unittest.TestCase):
         repo.skill("one", dataset=tier0_dataset("one"))
         repo.skill("two", dataset=tier0_dataset("two"))
         repo.skill("unlisted", dataset=tier0_dataset("unlisted"))
-        cfg = repo.activate(routing_skills="one,two")
+        cfg = repo.activate(routing_room="one,two")
         workspace = routing.stage_workspace(cfg.routing_set)
         try:
             staged = sorted(p.name for p in (workspace / ".claude" / "skills").iterdir())
@@ -2179,7 +2179,7 @@ class TestRoutingCasePooling(unittest.TestCase):
         self.repo = Repo(self)
         self.repo.skill("listed", dataset=tier0_dataset("listed"))
         self.repo.skill("unlisted", dataset=tier0_dataset("unlisted"))
-        self.repo.activate(routing_skills="listed")
+        self.repo.activate(routing_room="listed")
 
     def test_a_listed_skill_brings_both_kinds_of_prompt(self) -> None:
         # Its positives are the room's positives; its near misses assert that

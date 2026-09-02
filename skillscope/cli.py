@@ -9,7 +9,7 @@ reads those datasets and grades them with three commands:
 
   * ``structural`` -- every skill folder, every dataset, and every reference
     the skill's markdown makes. No agent, no tokens, instant.
-  * ``routing`` -- installs the skills named by ``--routing-skills`` side by
+  * ``routing`` -- installs the skills named by ``--routing-room`` side by
     side and checks that the right one fires (and that nothing fires when
     nothing should). Cheap, no hardware, and it pools those skills' prompts so
     each one's positives are the others' negatives. A repo with a single skill
@@ -40,11 +40,11 @@ Usage::
     skillscope behavioral --skill serving-llms-on-epyc
 
     # what CI runs: a routing miss fails the run, like a behavioral miss does
-    skillscope routing --routing-skills local-ai-use,tracelens --no-extended
+    skillscope routing --routing-room local-ai-use,tracelens --no-extended
     skillscope behavioral --skill local-ai-use --no-extended
 
     # a routing run that reports its score instead of gating on it
-    skillscope routing --routing-skills all --min-accuracy 0
+    skillscope routing --routing-room all --min-accuracy 0
 
     # a repo with one skill: the room is that skill, so nothing names it
     skillscope routing
@@ -267,7 +267,7 @@ def cmd_select(args: argparse.Namespace) -> int:
 def _empty_room(args: argparse.Namespace) -> None:
     """A routing run was asked for with nobody in the room.
 
-    ``--routing-skills none`` on this command is a contradiction: the command
+    ``--routing-room none`` on this command is a contradiction: the command
     is the routing run, and that flag empties the room. Skipping routing is
     done by not invoking ``routing`` -- ``select`` still takes ``none`` so CI
     can leave the job off the plan.
@@ -279,17 +279,17 @@ def _empty_room(args: argparse.Namespace) -> None:
     skill is the exception, and never reaches this function -- there is only
     one room its skill can be in.
     """
-    if config.wants_no_skills(args.routing_skills):
+    if config.wants_no_skills(args.routing_room):
         raise SystemExit(
             "error: `routing` asks for a routing run and "
-            "`--routing-skills none` empties the room. Name the skills that "
+            "`--routing-room none` empties the room. Name the skills that "
             "go in it, or skip this command."
         )
 
     available = ", ".join(datasets.skills_with_datasets()) or "(none)"
     raise SystemExit(
         "error: `routing` needs the skills that go in the room: "
-        "`--routing-skills a,b` or `all` for every skill with a dataset. "
+        "`--routing-room a,b` or `all` for every skill with a dataset. "
         "Only a repo with one skill gets a default, because who a skill "
         "competes against is what its routing score means. Skills with a "
         f"dataset here: {available}."
@@ -338,10 +338,10 @@ def cmd_routing(args: argparse.Namespace) -> int:
     _prepare_graded_run(args, list(routing_set))
     started = time.time()
 
-    if not args.routing_skills.strip():
+    if not args.routing_room.strip():
         only = next(iter(routing_set))
         print(
-            f"[routing] --routing-skills was not given, and {only} is the "
+            f"[routing] --routing-room was not given, and {only} is the "
             "only skill here with a dataset, so it is the room."
         )
 
@@ -486,7 +486,7 @@ def _add_docs_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_routing_skills_argument(
+def _add_routing_room_argument(
     parser: argparse.ArgumentParser, *, skip_allowed: bool = True
 ) -> None:
     if skip_allowed:
@@ -506,7 +506,7 @@ def _add_routing_skills_argument(
             "assume."
         )
     parser.add_argument(
-        "--routing-skills",
+        "--routing-room",
         default="",
         metavar="A,B,C",
         help=help_text,
@@ -575,7 +575,7 @@ def _add_timeout_argument(parser: argparse.ArgumentParser) -> None:
 
 def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
     _add_graded_arguments(parser)
-    _add_routing_skills_argument(parser, skip_allowed=False)
+    _add_routing_room_argument(parser, skip_allowed=False)
     parser.add_argument(
         "--jobs",
         type=int,
@@ -719,7 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
         "routing",
         help="Grade which skill fires, with several installed together.",
         description=(
-            "Install the skills named by --routing-skills side by side and "
+            "Install the skills named by --routing-room side by side and "
             "grade the trigger decision for every evaluation those skills own. "
             "A repo with one skill need not name it; a repo with several must, "
             "because who is in the room is what the score means."
@@ -748,7 +748,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_skills_argument(select_parser)
-    _add_routing_skills_argument(select_parser)
+    _add_routing_room_argument(select_parser)
     mode = select_parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--all", action="store_true", help="Every skill with a dataset.")
     mode.add_argument("--changed", action="store_true", help="Read changed paths from stdin.")
@@ -863,7 +863,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _configure(args: argparse.Namespace) -> None:
     """Make the flags this subcommand was given the active config.
 
-    Built twice for a subcommand that takes ``--routing-skills``, because two
+    Built twice for a subcommand that takes ``--routing-room``, because two
     of the answers that flag accepts -- ``all``, and the single skill a repo
     with one of them never had to name -- are questions about which skills
     ship a dataset, and that is itself answered through the config. The first
@@ -874,7 +874,7 @@ def _configure(args: argparse.Namespace) -> None:
         name: getattr(args, name, None)
         for name in (
             "skills_dir",
-            "routing_skills",
+            "routing_room",
             "infra_paths",
             "docs",
             "excluded_urls",
@@ -890,7 +890,7 @@ def _configure(args: argparse.Namespace) -> None:
     settings["version"] = getattr(args, "version", None)
 
     config.use(config.build(root, **settings))
-    if settings["routing_skills"] is not None:
+    if settings["routing_room"] is not None:
         config.use(
             config.build(root, **settings, dataset_skills=datasets.skills_with_datasets())
         )

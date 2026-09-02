@@ -40,7 +40,7 @@ places to disagree.
 | Flag | Workflow input | Default | What it decides |
 | --- | --- | --- | --- |
 | `--skills-dir` | `skill_globs` | the directory you are in | Globs naming the directories that *are* skills, relative to the repo root. A skill is a directory with a `SKILL.md`, and its directory name is its identity. A repo that keeps its skills together passes `skills/*`. |
-| `--routing-skills` | `routing_skills` | the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means a repo with one skill runs that skill while a repo with several has to choose. |
+| `--routing-room` | `routing_room` | the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means a repo with one skill runs that skill while a repo with several has to choose. |
 | `--infra-paths` | `infra_paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
 | `--docs` | `doc_globs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
 | `--exclude-url` | `excluded_urls` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
@@ -81,7 +81,7 @@ install, and each of those silently changes a routing score.
 
 ### Who a skill competes against is listed, not inferred
 
-`routing_skills` is the one input with no useful default, because the answer is
+`routing_room` is the one input with no useful default, because the answer is
 what the score *means*. Install every skill on disk and a work-in-progress
 directory drops everyone's number; install only the skill under review and it
 wins every prompt by walkover. A skill you leave off the list still gets its
@@ -89,13 +89,13 @@ dataset checked and its behavioral cases run — it just does not move anybody's
 routing score. Listing them also makes the change visible: a skill joining or
 leaving the room moves every other skill's number, and that deserves a diff.
 
-A repo with one skill has no such choice, so leave `routing_skills` blank and
+A repo with one skill has no such choice, so leave `routing_room` blank and
 its only skill is the room. The score is then the half of the question that can
 be answered alone — does the skill fire on its own prompts, and does it stay
 quiet on its near misses and the shared negatives — and it stops meaning that
 the moment a second skill shows up, at which point the flag becomes required
 again rather than quietly picking a room for you. To turn routing off instead,
-say so: `routing_skills: none`.
+say so: `routing_room: none`.
 
 ## What the structural check asserts
 
@@ -282,7 +282,7 @@ jobs:
     uses: amd/skillscope/.github/workflows/skill-evals.yml@main
     secrets: inherit
     with:
-      routing_skills: my-skill,its-neighbour
+      routing_room: my-skill,its-neighbour
       api_key_secret: MY_MODEL_API_KEY
 ```
 

@@ -172,7 +172,7 @@ def routing_needed(changed: set[str], extended: bool = True) -> bool:
     runs.
     """
     cfg = config.active()
-    routing_set = set(cfg.routing_skills)
+    routing_set = set(cfg.routing_room)
     if not routing_set:
         return False
     if changed & infra_paths():
@@ -218,7 +218,7 @@ def plan(
         skills, labels, ignore_gates=ignore_gates, extended=extended
     )
     return {
-        "routing": routing and bool(config.active().routing_skills),
+        "routing": routing and bool(config.active().routing_room),
         "extended": extended,
         # Routing installs several skills in one session, so it runs at the
         # version this run is already using; a per-skill pin governs that
