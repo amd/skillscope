@@ -6,44 +6,34 @@ SPDX-License-Identifier: MIT
 
 # skillscope
 
+Testing Harness for AI Agent Skills
+
 > [!IMPORTANT]
-> **Beta — not a formal release.** skillscope grew up grading the skills in
-> `amd/skills` and is being generalized to work for skill authors anywhere.
-> Flags, workflow inputs, and report formats can still change without a
-> deprecation path, so pin a version if that matters to you.
+> **Early Days**: Flags, workflow inputs, and report formats may evolve quickly as this repo takes shape.
 
-A test harness for agent skills, in whatever repo the skills live in. Point it
-at a repo and it grades three things that fail independently of each other:
+A test harness for AI agent skills. Simply pip install the harness or point a workflow at your repo.
 
-* **structural** — every skill folder, every dataset, and every reference the
-  skills' markdown makes. No agent, no tokens, instant.
-* **routing** — installs skills side by side and grades which one a prompt
-  wakes up.
-* **behavioral** — installs one skill, runs the prompt to completion, and
-  grades what the agent actually did.
+Skillscope does three main types of tests:
 
-All three read one dataset per skill, `<skill>/evals/evals.json` — a prompt,
-and what should be true after it runs. A prompt on its own grades routing; add
-an expectation and the same prompt also runs end to end. Writing one is
+* **structural**: Checks whether the skill is well structured (contains the expected files, a proper hierarchy, etc.).
+* **routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
+* **behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
+
+All three read one dataset per skill, `<skill>/evals/evals.json`. More info at
 [docs/authoring-evals.md](docs/authoring-evals.md).
 
 ## Quick start
 
-Run from the root of the repo you want tested. A repo that keeps its skills in
-`skills/*`, each with a `SKILL.md`, passes no flags at all.
+Run from the root of the repo you want tested.
 
 ```bash
 alias skillscope='uvx --from git+https://github.com/danielholanda/skillscope skillscope'
 
 skillscope structural                        # no agent, no tokens
-skillscope structural --external             # the same, plus fetching every URL
+skillscope structural --external             # the same, plus checking external URLs
 skillscope behavioral --skill my-skill       # needs an authenticated `claude` CLI
 skillscope routing --routing-skills my-skill,its-neighbour
 ```
-
-`--routing-skills` is the one thing without a sensible default once a repo has
-more than one skill: who a skill competes against is what its score means. A
-repo with a single skill can leave it off.
 
 ## In CI
 
