@@ -192,7 +192,7 @@ one runner per skill:
 ```yaml
 jobs:
   evals:
-    uses: danielholanda/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@main
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
@@ -257,7 +257,7 @@ pays for.
 ```yaml
 jobs:
   skill-evals:
-    uses: danielholanda/skillscope/.github/workflows/skill-evals.yml@main
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@main
     secrets: inherit
     with:
       routing_skills: my-skill,its-neighbour
@@ -272,7 +272,7 @@ workflow file documents every one.
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
-- uses: danielholanda/skillscope@main
+- uses: amd/skillscope@main
   with:
     command: structural
 ```
