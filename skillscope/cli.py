@@ -338,16 +338,11 @@ def cmd_routing(args: argparse.Namespace) -> int:
     _prepare_graded_run(args, list(routing_set))
     started = time.time()
 
-    if not args.routing_room.strip():
-        only = next(iter(routing_set))
-        print(
-            f"[routing] --routing-room was not given, and {only} is the "
-            "only skill here with a dataset, so it is the room."
-        )
-
     # Pool the routing set's cases: skill Y's positives are skill X's
     # negatives, which is where most of the false-trigger coverage comes
-    # from. --skill narrows what is *reported on*, not what is installed.
+    # from. --skill narrows what is *reported on*, not what is installed,
+    # unless the room was left unnamed, in which case it is both -- either
+    # the skills --skill named, or the only skill here with a dataset.
     cases = datasets.routing_cases(list(routing_set), extended=args.extended)
     if args.only:
         cases = datasets.filter_cases(cases, args.only)
@@ -500,10 +495,10 @@ def _add_routing_room_argument(
     else:
         help_text = (
             "Skills to install side by side: a list, or `all` for every skill "
-            "with a dataset. Left out, a repo with one skill runs that skill "
-            "and a repo with several stops -- who a skill competes against is "
-            "what its routing score means, so there is nothing sensible to "
-            "assume."
+            "with a dataset. Left out, --skill is the room if it was given; "
+            "otherwise a repo with one skill runs that skill and a repo with "
+            "several stops -- who a skill competes against is what its routing "
+            "score means, so there is nothing sensible to assume."
         )
     parser.add_argument(
         "--routing-room",
@@ -868,6 +863,10 @@ def _configure(args: argparse.Namespace) -> None:
     with one of them never had to name -- are questions about which skills
     ship a dataset, and that is itself answered through the config. The first
     pass is what makes the repo readable, the second records the answer.
+
+    A blank room with ``--skill`` set is filled from ``--skill`` before that
+    second pass: naming the skills to grade also names who they sit with,
+    and an explicit ``--routing-room`` still wins.
     """
     root = Path(args.repo).expanduser() if args.repo else None
     settings = {
@@ -891,6 +890,10 @@ def _configure(args: argparse.Namespace) -> None:
 
     config.use(config.build(root, **settings))
     if settings["routing_room"] is not None:
+        if not str(settings["routing_room"]).strip():
+            skill = getattr(args, "skill", "") or ""
+            if skill.strip():
+                settings["routing_room"] = skill
         config.use(
             config.build(root, **settings, dataset_skills=datasets.skills_with_datasets())
         )

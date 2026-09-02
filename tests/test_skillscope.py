@@ -586,6 +586,29 @@ class TestARoutingRunWithNobodyInTheRoom(unittest.TestCase):
             cli._empty_room(self.args("--routing-room", "none"))
         self.assertIn("--routing-room none", str(caught.exception))
 
+    def configure(self, *argv) -> None:
+        cli._configure(
+            cli.build_parser().parse_args(
+                ["--repo", str(self.repo.root), "routing", *argv]
+            )
+        )
+
+    def test_skill_names_the_room_when_the_room_was_not(self) -> None:
+        self.configure("--skill", "one")
+        self.assertEqual(config.active().routing_room, ("one",))
+
+    def test_skill_can_name_several_as_the_room(self) -> None:
+        self.configure("--skill", "two,one")
+        self.assertEqual(config.active().routing_room, ("two", "one"))
+
+    def test_an_explicit_room_wins_over_skill(self) -> None:
+        self.configure("--routing-room", "two", "--skill", "one")
+        self.assertEqual(config.active().routing_room, ("two",))
+
+    def test_none_is_an_explicit_room_and_stays_empty(self) -> None:
+        self.configure("--routing-room", "none", "--skill", "one")
+        self.assertEqual(config.active().routing_room, ())
+
 
 class TestCommands(unittest.TestCase):
     """The three graders are commands, not modes of run."""

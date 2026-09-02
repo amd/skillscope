@@ -40,7 +40,7 @@ places to disagree.
 | Flag | Workflow input | Default | What it decides |
 | --- | --- | --- | --- |
 | `--skills-dir` | `skill_globs` | the directory you are in | Globs naming the directories that *are* skills, relative to the repo root. A skill is a directory with a `SKILL.md`, and its directory name is its identity. A repo that keeps its skills together passes `skills/*`. |
-| `--routing-room` | `routing_room` | the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means a repo with one skill runs that skill while a repo with several has to choose. |
+| `--routing-room` | `routing_room` | `--skill` if given, else the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means `--skill` is the room, a repo with one skill runs that skill, and a repo with several and no `--skill` has to choose. |
 | `--infra-paths` | `infra_paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
 | `--docs` | `doc_globs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
 | `--exclude-url` | `excluded_urls` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
@@ -94,8 +94,10 @@ its only skill is the room. The score is then the half of the question that can
 be answered alone — does the skill fire on its own prompts, and does it stay
 quiet on its near misses and the shared negatives — and it stops meaning that
 the moment a second skill shows up, at which point the flag becomes required
-again rather than quietly picking a room for you. To turn routing off instead,
-say so: `routing_room: none`.
+again rather than quietly picking a room for you. Naming skills with `--skill`
+and leaving `--routing-room` off is still a listing, not a guess: those skills
+are the room. The workflow input has no `--skill`, so a repo with several still
+has to choose. To turn routing off instead, say so: `routing_room: none`.
 
 ## What the structural check asserts
 
