@@ -16,7 +16,7 @@ catches the four failure modes a description can cause:
   * false trigger   -- no skill was expected and one activated (over-triggering).
 
 Which skills are in the room is the workflow's decision, passed in as
-``--routing-skills``. Wherever there is a choice it has to be a decision
+``--routing-room``. Wherever there is a choice it has to be a decision
 someone makes deliberately, because that set is what the number means: a skill
 tested alongside two neighbours is answering a harder question than one tested
 alongside none. A repo with a single skill has no choice to make and so makes

@@ -66,9 +66,10 @@ on:
         description: >-
           The skills to grade: a directory, or a glob matching several, one per
           line or comma-separated, relative to the repository root. Each one is
-          graded on a runner of its own.
+          graded on a runner of its own. The default is every directory at the
+          root; a repo that keeps its skills together says so with `skills/*`.
         type: string
-        default: "skills/*"
+        default: "./*"
 
       structural:
         description: >-
@@ -297,7 +298,7 @@ jobs:
           # by default; `min_accuracy` lowers that bar and `routing: optional`
           # removes it.
           args: >-
-            --routing-skills '${{ matrix.skill }}'
+            --routing-room '${{ matrix.skill }}'
             --min-accuracy '${{ inputs.min_accuracy }}'
             --output routing-report.json
             --keep-logs routing-logs

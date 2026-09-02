@@ -13,8 +13,8 @@ That data arrives as command-line flags, and the caller that passes them is
 the repo's own workflow::
 
     skillscope select --changed \\
-      --skills 'skills/*' \\
-      --routing-skills local-ai-use,serving-llms-on-instinct \\
+      --skills-dir 'skills/*' \\
+      --routing-room local-ai-use,serving-llms-on-instinct \\
       --behavior-runner '["self-hosted", "strix_halo"]' \\
       --infra-paths .github/workflows/evals.yml
 
@@ -23,13 +23,17 @@ evals already has a workflow saying when to run them, on what, and with which
 credentials; splitting the other half of the same decision into a second file
 means two places to read, two places to change, and a file whose only reader
 is the workflow next to it. Every flag has a default, so a repo that keeps its
-skills in ``skills/`` and grades nothing on special hardware passes none of
-them.
+skills where the command is run and grades nothing on special hardware passes
+none of them.
 
-The defaults are modest rather than clever. Guessing where skills live by
-scanning a whole tree finds vendored copies, fixtures, and a contributor's
-local install, and each of those silently changes a routing score; naming the
-directory costs one flag and cannot drift.
+Every path a flag carries is relative to the repo root, which is the only base
+a workflow input, a line of ``git diff --name-only``, and a root-relative
+markdown link can all agree on. The one default that is not is
+``--skills-dir``, which falls back to the directory the command was typed in:
+see `default_skill_globs`. Either way it looks one level down and no further,
+because searching a whole tree for every ``SKILL.md`` finds vendored copies,
+fixtures, and a contributor's local install, and each of those silently
+changes a routing score.
 """
 
 from __future__ import annotations
@@ -47,18 +51,22 @@ from pathlib import Path
 # `SKILLSCOPE_SKILLS` is where the skills are, and it is an environment
 # variable rather than only a flag because the launcher needs the same answer
 # this does: it looks in a skill's dataset for the version pin before it has
-# fetched the harness that could parse a flag. `--skills` still wins.
+# fetched the harness that could parse a flag. `--skills-dir` still wins.
 REPO_ENV = "SKILLSCOPE_REPO"
 VERSION_ENV = "SKILLSCOPE_VERSION"
 SKILLS_ENV = "SKILLSCOPE_SKILLS"
 
-DEFAULT_SKILL_GLOBS = ("skills/*",)
+# Every directory in the one the command was run from, and no deeper. See
+# `default_skill_globs`, which is what actually resolves it; this is the form
+# it takes at the repo root, and the fallback when the command was run from
+# outside the repo it was pointed at.
+DEFAULT_SKILL_GLOBS = ("./*",)
 
 # GitHub-hosted Linux, which is what a repo with no runners of its own has.
 DEFAULT_BEHAVIOR_RUNNER = ("ubuntu-latest",)
 DEFAULT_BEHAVIOR_OS = ("Linux",)
 
-# The two answers `--routing-skills` takes instead of a list of names: every
+# The two answers `--routing-room` takes instead of a list of names: every
 # skill in the repo that ships a dataset, and no routing run at all. Both are
 # words rather than shapes of an empty flag, because saying nothing means "work
 # it out" -- a repo with one skill has only one room its skill can be in -- and
@@ -73,7 +81,7 @@ class Config:
 
     root: Path
 
-    # Globs naming the directories that hold skills.
+    # Globs naming the directories that are skills.
     skill_globs: tuple[str, ...] = DEFAULT_SKILL_GLOBS
 
     # The skills a routing run installs side by side, in the order given, and
@@ -81,7 +89,7 @@ class Config:
     # never named has become that skill, and `none` -- or a repo with several
     # skills that said nothing about which of them compete -- has become empty,
     # which is no routing run.
-    routing_skills: tuple[str, ...] = ()
+    routing_room: tuple[str, ...] = ()
 
     # Paths that change the harness rather than one skill, so touching one
     # re-runs every skill instead of guessing at the blast radius.
@@ -143,7 +151,7 @@ class Config:
                         f"error: two skills are both named '{path.name}' "
                         f"({previous} and {path}). A skill's directory name is "
                         "its identity, so the names have to be unique across "
-                        "the globs passed to --skills."
+                        "the globs passed to --skills-dir."
                     )
                 found[path.name] = path
         return found
@@ -168,14 +176,14 @@ class Config:
         the report harder to compare against the flag that produced it.
         """
         skills = self.skills
-        unknown = [name for name in self.routing_skills if name not in skills]
+        unknown = [name for name in self.routing_room if name not in skills]
         if unknown:
             raise SystemExit(
-                f"error: --routing-skills names {', '.join(unknown)}, which "
+                f"error: --routing-room names {', '.join(unknown)}, which "
                 f"{'is' if len(unknown) == 1 else 'are'} not in this repo. "
                 f"Found: {', '.join(sorted(skills)) or '(none)'}."
             )
-        return {name: skills[name] for name in self.routing_skills}
+        return {name: skills[name] for name in self.routing_room}
 
     def base_labels(self, extra: list[str] | tuple[str, ...]) -> list[str]:
         """The `runs-on` labels a leg starts from, given what it asked for.
@@ -211,6 +219,28 @@ def find_root(start: Path | None = None) -> Path:
         if (candidate / ".git").exists():
             return candidate
     return here
+
+
+def default_skill_globs(root: Path) -> tuple[str, ...]:
+    """Every directory in the current one, as a glob relative to `root`.
+
+    A glob that was *passed* is relative to the repo root, because that is the
+    only base a workflow input, a line of ``git diff --name-only``, and a
+    root-relative markdown link can all agree on. A glob nobody passed is
+    relative to the directory the command was typed in, because standing in a
+    tree of skills and running ``skillscope structural`` can only mean these
+    ones. Under CI the two are the same: the launcher runs from the repo root.
+
+    The answer is still expressed against `root`, so everything downstream has
+    one base to reason about rather than two.
+    """
+    try:
+        here = Path.cwd().resolve().relative_to(root)
+    except (OSError, ValueError):
+        # Outside the repo entirely, which is what `--repo` somewhere else
+        # looks like. Its root is the only directory that can be meant.
+        return DEFAULT_SKILL_GLOBS
+    return (f"{here.as_posix()}/*",)
 
 
 def _items(value: object, flag: str) -> tuple[str, ...]:
@@ -251,25 +281,25 @@ def _items(value: object, flag: str) -> tuple[str, ...]:
 
 
 def _is_sentinel(value: object, word: str) -> bool:
-    items = _items(value, "--routing-skills")
+    items = _items(value, "--routing-room")
     return len(items) == 1 and items[0].lower() == word
 
 
 def wants_all_skills(value: object) -> bool:
-    """Whether a ``--routing-skills`` value is the ``all`` shorthand."""
+    """Whether a ``--routing-room`` value is the ``all`` shorthand."""
     return _is_sentinel(value, ALL_SKILLS)
 
 
 def wants_no_skills(value: object) -> bool:
-    """Whether a ``--routing-skills`` value is the ``none`` shorthand."""
+    """Whether a ``--routing-room`` value is the ``none`` shorthand."""
     return _is_sentinel(value, NO_SKILLS)
 
 
 def build(
     root: Path | None = None,
     *,
-    skills: object = None,
-    routing_skills: object = None,
+    skills_dir: object = None,
+    routing_room: object = None,
     infra_paths: object = None,
     docs: object = None,
     excluded_urls: object = None,
@@ -296,11 +326,11 @@ def build(
     root = (root or find_root()).resolve()
 
     globs = (
-        _items(skills, "--skills")
+        _items(skills_dir, "--skills-dir")
         or _items(os.environ.get(SKILLS_ENV, ""), SKILLS_ENV)
-        or DEFAULT_SKILL_GLOBS
+        or default_skill_globs(root)
     )
-    routing = _items(routing_skills, "--routing-skills")
+    routing = _items(routing_room, "--routing-room")
     if wants_all_skills(routing):
         routing = tuple(dataset_skills if dataset_skills is not None else ())
     elif wants_no_skills(routing):
@@ -315,7 +345,7 @@ def build(
     return Config(
         root=root,
         skill_globs=globs,
-        routing_skills=routing,
+        routing_room=routing,
         infra_paths=frozenset(_items(infra_paths, "--infra-paths")),
         doc_globs=_items(docs, "--docs"),
         excluded_urls=_items(excluded_urls, "--exclude-url"),

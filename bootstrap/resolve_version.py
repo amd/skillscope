@@ -36,7 +36,9 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_SKILL_GLOBS = ["skills/*"]
+# Kept in step with skillscope.config by hand: this script is deliberately
+# ignorant of the package it is about to fetch, so it cannot import the value.
+DEFAULT_SKILL_GLOBS = ["./*"]
 DATASET_RELPATH = "evals/evals.json"
 VERSION_KEY = "skillscope_version"
 
@@ -114,17 +116,17 @@ def main(argv: list[str] | None = None) -> int:
         "--default", default="", help="Fallback when nothing else pins a version."
     )
     parser.add_argument(
-        "--skills",
+        "--skills-dir",
         default="",
         help=(
-            "Comma-separated globs naming the directories that hold skills, "
-            "so a repo that keeps them somewhere unusual is still searched for "
-            f"the pin. Default: {','.join(DEFAULT_SKILL_GLOBS)}."
+            "Comma-separated globs naming the directories that are skills, so "
+            "a repo that keeps them somewhere other than its root is still "
+            f"searched for the pin. Default: {','.join(DEFAULT_SKILL_GLOBS)}."
         ),
     )
     args = parser.parse_args(argv)
 
-    globs = [g.strip() for g in args.skills.split(",") if g.strip()]
+    globs = [g.strip() for g in args.skills_dir.split(",") if g.strip()]
     version = resolve(
         root=Path(args.repo).expanduser().resolve(),
         requested=args.version,
