@@ -31,7 +31,7 @@ All three read one dataset per skill, `<skill>/evals/evals.json`. How to write o
 Run from the root of the repo you want tested.
 
 ```bash
-uv tool install git+https://github.com/amd/skillscope
+uv tool install --system-certs git+https://github.com/amd/skillscope
 
 skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs
