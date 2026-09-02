@@ -9,7 +9,7 @@ reads those datasets and grades them with three commands:
 
   * ``structural`` -- every skill folder, every dataset, and every reference
     the skill's markdown makes. No agent, no tokens, instant.
-  * ``routing`` -- installs the skills named by ``--routing-skills`` side by
+  * ``routing`` -- installs the skills named by ``--routing-room`` side by
     side and checks that the right one fires (and that nothing fires when
     nothing should). Cheap, no hardware, and it pools those skills' prompts so
     each one's positives are the others' negatives. A repo with a single skill
@@ -40,11 +40,11 @@ Usage::
     skillscope behavioral --skill serving-llms-on-epyc
 
     # what CI runs: a routing miss fails the run, like a behavioral miss does
-    skillscope routing --routing-skills local-ai-use,tracelens --no-extended
+    skillscope routing --routing-room local-ai-use,tracelens --no-extended
     skillscope behavioral --skill local-ai-use --no-extended
 
     # a routing run that reports its score instead of gating on it
-    skillscope routing --routing-skills all --min-accuracy 0
+    skillscope routing --routing-room all --min-accuracy 0
 
     # a repo with one skill: the room is that skill, so nothing names it
     skillscope routing
@@ -119,17 +119,24 @@ def _report_failures(errors: list[str]) -> None:
         print(f"  - {err}", file=sys.stderr)
 
 
-def _structural_or_exit() -> list[references.Reference]:
+def _structural_or_exit(skills: list[str] | None = None) -> list[references.Reference]:
     """Fail before any tokens are spent if the skills are not in shape.
 
     The skill folders, the datasets, and the internal references: everything
     that costs nothing to check. External URLs are left out on purpose: they
     fail for reasons that have nothing to do with the run being gated.
+
+    Given `skills`, only those are read. A graded run passes the skills it is
+    about to install, because that is the run it is gating: a neighbour's
+    malformed dataset says nothing about whether this run can proceed, and
+    holding it back would make one skill's mistake everybody else's. The
+    repo-wide answer is ``skillscope structural``, which passes nothing here
+    and is the check that gates a merge.
     """
-    found = references.collect()
+    found = references.collect(skills=skills)
     errors = (
-        structure.errors()
-        + datasets.structural_errors()
+        structure.errors(skills)
+        + datasets.structural_errors(skills)
         + references.internal_errors(found)
     )
     if errors:
@@ -260,7 +267,7 @@ def cmd_select(args: argparse.Namespace) -> int:
 def _empty_room(args: argparse.Namespace) -> None:
     """A routing run was asked for with nobody in the room.
 
-    ``--routing-skills none`` on this command is a contradiction: the command
+    ``--routing-room none`` on this command is a contradiction: the command
     is the routing run, and that flag empties the room. Skipping routing is
     done by not invoking ``routing`` -- ``select`` still takes ``none`` so CI
     can leave the job off the plan.
@@ -272,17 +279,17 @@ def _empty_room(args: argparse.Namespace) -> None:
     skill is the exception, and never reaches this function -- there is only
     one room its skill can be in.
     """
-    if config.wants_no_skills(args.routing_skills):
+    if config.wants_no_skills(args.routing_room):
         raise SystemExit(
             "error: `routing` asks for a routing run and "
-            "`--routing-skills none` empties the room. Name the skills that "
+            "`--routing-room none` empties the room. Name the skills that "
             "go in it, or skip this command."
         )
 
     available = ", ".join(datasets.skills_with_datasets()) or "(none)"
     raise SystemExit(
         "error: `routing` needs the skills that go in the room: "
-        "`--routing-skills a,b` or `all` for every skill with a dataset. "
+        "`--routing-room a,b` or `all` for every skill with a dataset. "
         "Only a repo with one skill gets a default, because who a skill "
         "competes against is what its routing score means. Skills with a "
         f"dataset here: {available}."
@@ -298,37 +305,44 @@ def _fail_if_expired() -> int | None:
     return 1
 
 
-def _prepare_graded_run(args: argparse.Namespace) -> list[str]:
-    """Structural checks, model pin, and API reachability. Shared by both graders."""
+def _prepare_graded_run(
+    args: argparse.Namespace, scope: list[str] | None = None
+) -> list[str]:
+    """Structural checks, model pin, and API reachability. Shared by both graders.
+
+    The structural gate reads `scope`, defaulting to the skills ``--skill``
+    selected -- the ones about to be graded, and nobody else. A routing run
+    passes the room instead, because the room is what it installs and what its
+    score is about; ``--skill`` there only narrows which of the room's cases
+    are reported on.
+    """
     if (code := _fail_if_expired()) is not None:
         raise SystemExit(code)
-    _structural_or_exit()
+    selected = _selected_skills(args.skill)
+    _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
-    return _selected_skills(args.skill)
+    return selected
 
 
 def cmd_routing(args: argparse.Namespace) -> int:
-    _prepare_graded_run(args)
-    started = time.time()
-
+    # Who is in the room decides what the structural gate covers, so it is
+    # settled before anything is checked or any token is spent.
     routing_set = config.active().routing_set
     if not routing_set:
         _empty_room(args)
 
-    if not args.routing_skills.strip():
-        only = next(iter(routing_set))
-        print(
-            f"[routing] --routing-skills was not given, and {only} is the "
-            "only skill here with a dataset, so it is the room."
-        )
+    _prepare_graded_run(args, list(routing_set))
+    started = time.time()
 
     # Pool the routing set's cases: skill Y's positives are skill X's
     # negatives, which is where most of the false-trigger coverage comes
-    # from. --skill narrows what is *reported on*, not what is installed.
+    # from. --skill narrows what is *reported on*, not what is installed,
+    # unless the room was left unnamed, in which case it is both -- either
+    # the skills --skill named, or the only skill here with a dataset.
     cases = datasets.routing_cases(list(routing_set), extended=args.extended)
     if args.only:
         cases = datasets.filter_cases(cases, args.only)
@@ -443,12 +457,14 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
 
 def _add_skills_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--skills",
+        "--skills-dir",
         default="",
         metavar="GLOB[,GLOB]",
         help=(
-            "Globs naming the directories that hold skills. "
-            f"Default: {','.join(config.DEFAULT_SKILL_GLOBS)}."
+            "Globs naming the directories that are skills, relative to the "
+            "repo root: 'skills/*' for a repo that keeps them together, or a "
+            "path to a single one. Default: every directory in the one this "
+            "command was run from."
         ),
     )
 
@@ -465,7 +481,7 @@ def _add_docs_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_routing_skills_argument(
+def _add_routing_room_argument(
     parser: argparse.ArgumentParser, *, skip_allowed: bool = True
 ) -> None:
     if skip_allowed:
@@ -479,13 +495,13 @@ def _add_routing_skills_argument(
     else:
         help_text = (
             "Skills to install side by side: a list, or `all` for every skill "
-            "with a dataset. Left out, a repo with one skill runs that skill "
-            "and a repo with several stops -- who a skill competes against is "
-            "what its routing score means, so there is nothing sensible to "
-            "assume."
+            "with a dataset. Left out, --skill is the room if it was given; "
+            "otherwise a repo with one skill runs that skill and a repo with "
+            "several stops -- who a skill competes against is what its routing "
+            "score means, so there is nothing sensible to assume."
         )
     parser.add_argument(
-        "--routing-skills",
+        "--routing-room",
         default="",
         metavar="A,B,C",
         help=help_text,
@@ -554,7 +570,7 @@ def _add_timeout_argument(parser: argparse.ArgumentParser) -> None:
 
 def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
     _add_graded_arguments(parser)
-    _add_routing_skills_argument(parser, skip_allowed=False)
+    _add_routing_room_argument(parser, skip_allowed=False)
     parser.add_argument(
         "--jobs",
         type=int,
@@ -698,7 +714,7 @@ def build_parser() -> argparse.ArgumentParser:
         "routing",
         help="Grade which skill fires, with several installed together.",
         description=(
-            "Install the skills named by --routing-skills side by side and "
+            "Install the skills named by --routing-room side by side and "
             "grade the trigger decision for every evaluation those skills own. "
             "A repo with one skill need not name it; a repo with several must, "
             "because who is in the room is what the score means."
@@ -727,7 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_skills_argument(select_parser)
-    _add_routing_skills_argument(select_parser)
+    _add_routing_room_argument(select_parser)
     mode = select_parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--all", action="store_true", help="Every skill with a dataset.")
     mode.add_argument("--changed", action="store_true", help="Read changed paths from stdin.")
@@ -842,18 +858,22 @@ def build_parser() -> argparse.ArgumentParser:
 def _configure(args: argparse.Namespace) -> None:
     """Make the flags this subcommand was given the active config.
 
-    Built twice for a subcommand that takes ``--routing-skills``, because two
+    Built twice for a subcommand that takes ``--routing-room``, because two
     of the answers that flag accepts -- ``all``, and the single skill a repo
     with one of them never had to name -- are questions about which skills
     ship a dataset, and that is itself answered through the config. The first
     pass is what makes the repo readable, the second records the answer.
+
+    A blank room with ``--skill`` set is filled from ``--skill`` before that
+    second pass: naming the skills to grade also names who they sit with,
+    and an explicit ``--routing-room`` still wins.
     """
     root = Path(args.repo).expanduser() if args.repo else None
     settings = {
         name: getattr(args, name, None)
         for name in (
-            "skills",
-            "routing_skills",
+            "skills_dir",
+            "routing_room",
             "infra_paths",
             "docs",
             "excluded_urls",
@@ -869,7 +889,11 @@ def _configure(args: argparse.Namespace) -> None:
     settings["version"] = getattr(args, "version", None)
 
     config.use(config.build(root, **settings))
-    if settings["routing_skills"] is not None:
+    if settings["routing_room"] is not None:
+        if not str(settings["routing_room"]).strip():
+            skill = getattr(args, "skill", "") or ""
+            if skill.strip():
+                settings["routing_room"] = skill
         config.use(
             config.build(root, **settings, dataset_skills=datasets.skills_with_datasets())
         )

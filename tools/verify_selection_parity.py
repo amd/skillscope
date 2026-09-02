@@ -31,9 +31,9 @@ from pathlib import Path
 
 # What amd/skills' workflow passes. Mirrors .github/workflows/evals.yml there.
 SETTINGS = [
-    "--skills",
+    "--skills-dir",
     "skills/*",
-    "--routing-skills",
+    "--routing-room",
     "local-ai-use,local-ai-app-integration,serving-llms-on-instinct,"
     "tracelens-analysis-orchestrator,hyperloom-workload-optimizer",
     "--infra-paths",

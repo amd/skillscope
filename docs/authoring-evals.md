@@ -49,7 +49,7 @@ skills in one workspace, so it is the same assertion either way, and filing it
 under the neighbour keeps `false` meaning "nothing fires".
 
 Your dataset's prompts are graded in a routing run only when your skill is in
-the room — one the workflow lists in `routing_skills`, or the only skill the
+the room — one the workflow lists in `routing_room`, or the only skill the
 repo has, which needs no listing. How the room is chosen is in
 [usage.md](usage.md#who-a-skill-competes-against-is-listed-not-inferred). A
 prompt expecting a skill that is not in the room could only ever lose, and a
@@ -207,7 +207,7 @@ holds.
 ```bash
 skillscope structural                               # your folder, prose, and dataset
 skillscope behavioral --skill <your-skill>          # your skill, end to end
-skillscope routing --routing-skills <your-skill>,<a-neighbour>
+skillscope routing --routing-room <your-skill>,<a-neighbour>
 skillscope routing --only <case-id> --keep-logs logs # one case, keeping the transcript
 ```
 

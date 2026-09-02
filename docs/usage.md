@@ -39,8 +39,8 @@ places to disagree.
 
 | Flag | Workflow input | Default | What it decides |
 | --- | --- | --- | --- |
-| `--skills` | `skill_globs` | `skills/*` | Globs naming the directories that hold skills. A skill is a directory with a `SKILL.md`, and its directory name is its identity. |
-| `--routing-skills` | `routing_skills` | the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means a repo with one skill runs that skill while a repo with several has to choose. |
+| `--skills-dir` | `skill_globs` | the directory you are in | Globs naming the directories that *are* skills, relative to the repo root. A skill is a directory with a `SKILL.md`, and its directory name is its identity. A repo that keeps its skills together passes `skills/*`. |
+| `--routing-room` | `routing_room` | `--skill` if given, else the only skill, if there is one | The skills a routing run installs side by side. `all` means every skill with a dataset, `none` means no routing run, and blank means `--skill` is the room, a repo with one skill runs that skill, and a repo with several and no `--skill` has to choose. |
 | `--infra-paths` | `infra_paths` | none | Paths that change the harness rather than one skill, so touching one re-runs every skill instead of guessing at the blast radius. Your own workflow file belongs here. |
 | `--docs` | `doc_globs` | none | Markdown outside the skills whose references should be checked too: a README, a docs tree. The skills themselves are always checked. |
 | `--exclude-url` | `excluded_urls` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
@@ -60,9 +60,28 @@ whole command. Routing adds `--jobs`, `--case-timeout`, `--max-tool-calls`,
 `--max-budget-usd`, `--keep-logs`, and `--min-accuracy`. `--help` is the
 authority on all of them.
 
+### Where the skills are
+
+Every path in the table is relative to the repository root, which is the only
+base a workflow input, a line of `git diff --name-only`, and a root-relative
+markdown link can all agree on. `skills/*` in a workflow means the same thing
+wherever its runner happens to have started.
+
+The one thing measured from somewhere else is `--skills-dir` when you do not
+pass it: then it is every directory in the one you ran the command from.
+Standing in a tree of skills and typing `skillscope structural` can only mean
+these ones, and a repo that keeps them a level down works with a `cd` rather
+than a flag. Under CI the two bases coincide, because the launcher runs from
+the repo root — so a run with no `--skills-dir` grades the directories at the
+root, and a repo whose skills live anywhere else names them.
+
+Either way it looks one level down and no further. Searching a whole tree for
+every `SKILL.md` finds vendored copies, fixtures, and a contributor's local
+install, and each of those silently changes a routing score.
+
 ### Who a skill competes against is listed, not inferred
 
-`routing_skills` is the one input with no useful default, because the answer is
+`routing_room` is the one input with no useful default, because the answer is
 what the score *means*. Install every skill on disk and a work-in-progress
 directory drops everyone's number; install only the skill under review and it
 wins every prompt by walkover. A skill you leave off the list still gets its
@@ -70,13 +89,15 @@ dataset checked and its behavioral cases run — it just does not move anybody's
 routing score. Listing them also makes the change visible: a skill joining or
 leaving the room moves every other skill's number, and that deserves a diff.
 
-A repo with one skill has no such choice, so leave `routing_skills` blank and
+A repo with one skill has no such choice, so leave `routing_room` blank and
 its only skill is the room. The score is then the half of the question that can
 be answered alone — does the skill fire on its own prompts, and does it stay
 quiet on its near misses and the shared negatives — and it stops meaning that
 the moment a second skill shows up, at which point the flag becomes required
-again rather than quietly picking a room for you. To turn routing off instead,
-say so: `routing_skills: none`.
+again rather than quietly picking a room for you. Naming skills with `--skill`
+and leaving `--routing-room` off is still a listing, not a guess: those skills
+are the room. The workflow input has no `--skill`, so a repo with several still
+has to choose. To turn routing off instead, say so: `routing_room: none`.
 
 ## What the structural check asserts
 
@@ -95,8 +116,11 @@ agent that simply never uses the skill. So every `SKILL.md` is read first:
 | `description` | non-empty, at most 1024 characters |
 | body | at most 500 lines — past that it is reference material, and an agent reads it in full every time the skill loads |
 
-A directory your skill globs match that holds no `SKILL.md` is reported too.
-Either the file is missing or the glob is too wide, and both are worth one line.
+A directory that holds no `SKILL.md` is simply not a skill, and is passed over
+without a word. Matching *no* skill at all is the case that is reported, since
+a run that graded nothing and called itself green is the one way this harness
+can lie about a repo; a run given `--docs` is exempt, having been asked to
+check a repo's own prose.
 
 Whatever else your repo asks of a skill is policy rather than format, so it is
 configuration:
@@ -222,7 +246,7 @@ Naming several, and holding them to different bars:
 
 | Input | Default | What it decides |
 | --- | --- | --- |
-| `skills` | `skills/*` | The skills to grade: a directory, or a glob matching several, one per line or comma-separated. |
+| `skills` | `./*` | The skills to grade: a directory, or a glob matching several, one per line or comma-separated. The default is every directory at the repo root. |
 | `structural` | `required` | `required`, `optional`, or `off`. |
 | `routing` | `required` | `required`, `optional`, or `off`. |
 | `behavioral` | `required` | `required`, `optional`, or `off`. |
@@ -260,7 +284,7 @@ jobs:
     uses: amd/skillscope/.github/workflows/skill-evals.yml@main
     secrets: inherit
     with:
-      routing_skills: my-skill,its-neighbour
+      routing_room: my-skill,its-neighbour
       api_key_secret: MY_MODEL_API_KEY
 ```
 

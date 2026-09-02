@@ -44,9 +44,10 @@ inputs:
     default: ""
   skills:
     description: >-
-      Globs naming the directories that hold skills, comma-separated. The
+      Globs naming the directories that are skills, comma-separated. The
       launcher needs these to find a skill's version pin before it has fetched
-      anything, and passes them on to the harness. Default: skills/*.
+      anything, and passes them on to the harness. Default: ./*, every
+      directory at the repo root.
     required: false
     default: ""
   repo:

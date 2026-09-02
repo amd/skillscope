@@ -36,7 +36,7 @@ uv tool install --system-certs git+https://github.com/amd/skillscope
 skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs
 skillscope behavioral --skill my-skill       # needs an authenticated `claude` CLI
-skillscope routing --routing-skills my-skill,its-neighbour
+skillscope routing --routing-room my-skill,its-neighbour
 ```
 
 ## Run it from your CI

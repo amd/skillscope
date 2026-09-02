@@ -20,7 +20,7 @@ name: skill-evals
 #       secrets: inherit
 #       with:
 #         skill_globs: skills/*
-#         routing_skills: my-skill,its-neighbour
+#         routing_room: my-skill,its-neighbour
 #
 # The caller's `with:` block is the whole configuration. There is no config file
 # in the repo under test: a repo that runs these evals already has a workflow
@@ -32,7 +32,7 @@ name: skill-evals
 # in YAML cannot be tested and cannot be run locally. What is left here is job
 # topology, which is the one thing that has to be YAML.
 #
-#   * routing installs the skills named in `routing_skills` side by side and
+#   * routing installs the skills named in `routing_room` side by side and
 #     grades which one fires. Who a skill competes against is what the score
 #     means, so wherever there is a choice it is a decision a human makes
 #     rather than one this workflow guesses; a repo with a single skill has no
@@ -64,10 +64,12 @@ on:
       # --- what this repo looks like ---------------------------------------
       skill_globs:
         description: >-
-          Globs naming the directories that hold skills, comma-separated.
+          Globs naming the directories that are skills, comma-separated. The
+          default is every directory at the repository root; a repo that keeps
+          its skills together says so with `skills/*`.
         type: string
-        default: "skills/*"
-      routing_skills:
+        default: "./*"
+      routing_room:
         description: >-
           Skills to install side by side for the routing run, comma-separated,
           `all` for every skill with a dataset, or `none` to skip routing.
@@ -305,7 +307,7 @@ jobs:
           IGNORE_GATES: ${{ inputs.ignore_gates && '--ignore-gates' || '' }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-          ROUTING_SKILLS: ${{ inputs.routing_skills }}
+          ROUTING_ROOM: ${{ inputs.routing_room }}
           INFRA_PATHS: ${{ inputs.infra_paths }}
           BEHAVIOR_RUNNER: ${{ inputs.behavior_runner }}
           BEHAVIOR_OS: ${{ inputs.behavior_os }}
@@ -340,10 +342,10 @@ jobs:
               args += ["--ignore-gates", extended]
 
           # What this repo looks like. Planning is the only step that needs all
-          # of it, so this is the one place that spells it out; `--skills` goes
-          # to the action instead, because the launcher needs it too.
+          # of it, so this is the one place that spells it out; `--skills-dir`
+          # goes to the action instead, because the launcher needs it too.
           for flag, name in (
-              ("--routing-skills", "ROUTING_SKILLS"),
+              ("--routing-room", "ROUTING_ROOM"),
               ("--infra-paths", "INFRA_PATHS"),
               ("--behavior-runner", "BEHAVIOR_RUNNER"),
               ("--behavior-os", "BEHAVIOR_OS"),
@@ -508,7 +510,7 @@ jobs:
           # the way a shell would, and a comma-separated list a caller wrote
           # with spaces in it would otherwise arrive as several arguments.
           args: >-
-            --routing-skills '${{ inputs.routing_skills }}'
+            --routing-room '${{ inputs.routing_room }}'
             --min-accuracy '${{ inputs.min_accuracy }}'
             ${{ needs.discover.outputs.extended }}
             ${{ inputs.only && format('--only ''{0}''', inputs.only) || '' }}

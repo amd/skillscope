@@ -246,12 +246,13 @@ def main() -> None:
         help="Root of the repo holding the skills. Default: the enclosing checkout.",
     )
     parser.add_argument(
-        "--skills",
+        "--skills-dir",
         default="",
         metavar="GLOB[,GLOB]",
         help=(
-            "Globs naming the directories that hold skills. "
-            f"Default: {','.join(config.DEFAULT_SKILL_GLOBS)}."
+            "Globs naming the directories that are skills, relative to the "
+            "repo root. Default: every directory in the one this command was "
+            "run from."
         ),
     )
     parser.add_argument(
@@ -293,7 +294,8 @@ def main() -> None:
     extra_args = [a for a in extra_args if a != "--"]
     config.use(
         config.build(
-            Path(args.repo).expanduser() if args.repo else None, skills=args.skills
+            Path(args.repo).expanduser() if args.repo else None,
+            skills_dir=args.skills_dir,
         )
     )
 

@@ -24,7 +24,7 @@ Configuration arrives as environment variables, set from the action's inputs:
     SKILLSCOPE_COMMAND   the subcommand, e.g. "structural"
     SKILLSCOPE_ARGS      further arguments, shell-quoted
     SKILLSCOPE_REPO      root of the repo under test (default ".")
-    SKILLSCOPE_SKILLS    globs naming the directories that hold skills
+    SKILLSCOPE_SKILLS    globs naming the directories that are skills
     SKILLSCOPE_SOURCE    owner/repo (or a local path) to install from
     SKILLSCOPE_REQUESTED an explicit version, which wins outright
     SKILLSCOPE_VERSION   a version from the environment
