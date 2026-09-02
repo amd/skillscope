@@ -4,12 +4,7 @@ Copyright Advanced Micro Devices, Inc.
 SPDX-License-Identifier: MIT
 -->
 
-# skillscope
-
-Testing Harness for AI Agent Skills
-
-> [!IMPORTANT]
-> **Early Days**: Flags, workflow inputs, and report formats may evolve quickly as this repo takes shape.
+# Skillscope
 
 A test harness for AI agent skills. Install the harness, or point a workflow at your repo.
 
@@ -19,8 +14,10 @@ Skillscope does three main types of tests:
 * **routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
 * **behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
 
-All three read one dataset per skill, `<skill>/evals/evals.json`. How to write
-one is in [docs/authoring-evals.md](docs/authoring-evals.md).
+All three read one dataset per skill, `<skill>/evals/evals.json`. How to write one is in [docs/authoring-evals.md](docs/authoring-evals.md).
+
+> [!IMPORTANT]
+> **Early Days**: Flags, workflow inputs, and report formats may evolve quickly as this repo takes shape.
 
 ## Quick start
 
