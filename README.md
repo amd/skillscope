@@ -39,22 +39,23 @@ skillscope behavioral --skill my-skill       # needs an authenticated `claude` C
 skillscope routing --routing-skills my-skill,its-neighbour
 ```
 
-## In CI
+## Run it from your CI
+
+Simply add an `evals.json` file to your skill and a workflow that points to our reusable workflow. This will triger all graders to run directly from your repo.
+
+<img src="assets/reusable_workflow.png" alt="Skillscope" width="720">
 
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
       skills: skills/*
 ```
 
-That is a whole caller: all three graders run, each skill gets a runner of its
-own, and any grader can fail the run. Turning one down to `optional` or `off`,
-moving the routing bar, change-based selection, and skills that need particular
-hardware are all in [docs/usage.md](docs/usage.md).
+You may also choose to customize or even disable some tests if you prefer it. See [docs/usage.md](docs/usage.md) for details.
 
 ## Commands
 
