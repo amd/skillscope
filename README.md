@@ -48,7 +48,7 @@ Simply add an `evals.json` file to your skill and a workflow that points to our 
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
