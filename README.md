@@ -43,7 +43,7 @@ skillscope routing --routing-skills my-skill,its-neighbour
 
 Simply add an `evals.json` file to your skill and a workflow that points to our reusable workflow. This will triger all graders to run directly from your repo.
 
-![Skillscope](assets/reusable_workflow.png)
+<img src="assets/reusable_workflow.png" alt="Skillscope" width="720">
 
 ```yaml
 jobs:
