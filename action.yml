@@ -1,3 +1,7 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 name: skillscope
 description: >-
   Run one skillscope command against the calling repository, at the harness

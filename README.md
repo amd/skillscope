@@ -1,3 +1,9 @@
+<!--
+Copyright Advanced Micro Devices, Inc.
+
+SPDX-License-Identifier: MIT
+-->
+
 # skillscope
 
 Structural, routing, and behavioral tests for agent skills, in whatever repo the
@@ -112,8 +118,9 @@ it stay quiet on its near misses and on the shared negatives? For the other half
 — whether a skill answers a prompt that belongs to its neighbour — the neighbour
 has to be in the room, and that is the pipeline below.
 
-[examples/evals.yml](examples/evals.yml) is a caller with its triggers filled
-in; [.github/workflows/reusable.yml](.github/workflows/reusable.yml) is what it
+[examples/amd-skills-checks.yml](examples/amd-skills-checks.yml) is a caller
+with its triggers filled in;
+[.github/workflows/reusable.yml](.github/workflows/reusable.yml) is what it
 runs.
 
 ### The full pipeline
@@ -134,8 +141,6 @@ negatives; a pull request grades only what it changed; and a skill that asks for
 particular hardware in its `evals/machine.yml` lands on the pool your workflow
 rations and pays for. Reach for it when skills in the repo could plausibly be
 confused for one another, or when a behavioral run needs a GPU. See
-[examples/skill-evals.yml](examples/skill-evals.yml) for a fully configured
-caller and
 [.github/workflows/skill-evals.yml](.github/workflows/skill-evals.yml) for every
 input.
 

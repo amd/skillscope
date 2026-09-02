@@ -1,6 +1,6 @@
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright Advanced Micro Devices, Inc.
 #
-# See LICENSE for license information.
+# SPDX-License-Identifier: MIT
 
 """``python -m skillscope``, for running from a checkout without installing."""
 

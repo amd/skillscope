@@ -1,6 +1,6 @@
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright Advanced Micro Devices, Inc.
 #
-# See LICENSE for license information.
+# SPDX-License-Identifier: MIT
 
 """Decide what a CI run should actually run for a given change.
 
