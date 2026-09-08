@@ -5,7 +5,7 @@
 """Run one skillscope command from the composite action's own checkout.
 
 Callers pin a tag on the action or on a reusable workflow in this repo
-(``amd/skillscope@v0.1.0``, ``.../reusable.yml@v0.1.0``). This script installs
+(``amd/skillscope@v0.1.1``, ``.../reusable.yml@v0.1.1``). This script installs
 *that* checkout with ``uvx`` and execs the command. It does not fetch some
 other ref: the ``uses:`` pin is the harness.
 
@@ -28,10 +28,15 @@ unread, so a new CLI flag does not require a matching action input.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+# Read out of the checkout rather than imported, because the launcher runs
+# before anything is installed.
+VERSION_PATTERN = re.compile(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -60,6 +65,22 @@ def action_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def packaged_version(checkout: Path) -> str:
+    """The version declared by the harness in `checkout`, or "" if unreadable.
+
+    The `uses:` pin decides which harness runs, but a reusable workflow reaches
+    this action through a nested checkout, where `$GITHUB_ACTION_REF` is empty
+    and the path says nothing. Reporting what the checkout calls itself is what
+    lets a caller confirm from the log that the pin did what they meant.
+    """
+    try:
+        text = (checkout / "skillscope" / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    found = VERSION_PATTERN.search(text)
+    return found.group(1) if found else ""
+
+
 def main() -> int:
     repo = Path(_env("SKILLSCOPE_REPO", ".") or ".").expanduser().resolve()
     command = _env("SKILLSCOPE_COMMAND")
@@ -70,8 +91,9 @@ def main() -> int:
     if not (source / "pyproject.toml").is_file():
         raise SystemExit(
             f"error: {source} has no pyproject.toml. The action must run from "
-            "a skillscope checkout (for example amd/skillscope@v0.1.0)."
+            "a skillscope checkout (for example amd/skillscope@v0.1.1)."
         )
+    version = packaged_version(source) or "unknown"
 
     cmd = [
         "uvx",
@@ -81,7 +103,7 @@ def main() -> int:
         *shlex.split(command),
         *shlex.split(_env("SKILLSCOPE_ARGS")),
     ]
-    print(f"[skillscope] {source}: {' '.join(cmd)}", flush=True)
+    print(f"[skillscope] {version} from {source}: {' '.join(cmd)}", flush=True)
 
     stdin_path = _env("SKILLSCOPE_STDIN")
     stdin = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
@@ -118,13 +140,12 @@ def main() -> int:
         if stdin is not subprocess.DEVNULL:
             stdin.close()
 
-    ref = _env("GITHUB_ACTION_REF") or source.name
-    _emit("version", ref)
+    _emit("version", version)
     # Commands that answer with data (`select`) print one line of JSON, so the
     # last line of output is that answer. A command that prints a report leaves
     # a harmless last line here and is read from the step summary instead.
     _emit("stdout", captured[-1] if captured else "")
-    _summarize(f"<sub>skillscope <code>{command}</code> ran from <code>{source}</code>.</sub>")
+    _summarize(f"<sub>skillscope <code>{command}</code> ran at <code>{version}</code>.</sub>")
     return code
 
 

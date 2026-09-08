@@ -9,7 +9,7 @@ description: >-
 
 # Pin the tag you want to run, the same way you pin the reusable workflow:
 #
-#   - uses: amd/skillscope@v0.1.0
+#   - uses: amd/skillscope@v0.1.1
 #
 # The Python in that checkout is the harness. There is no second version to
 # resolve, and nothing here fetches a different ref.
@@ -58,7 +58,7 @@ inputs:
 
 outputs:
   version:
-    description: "The action ref that ran, when GitHub provides one."
+    description: "The harness version that ran, read from the checkout it ran from."
     value: ${{ steps.skillscope.outputs.version }}
   stdout:
     description: >-

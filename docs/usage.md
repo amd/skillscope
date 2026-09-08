@@ -216,7 +216,7 @@ one runner per skill:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
@@ -280,7 +280,7 @@ pays for.
 ```yaml
 jobs:
   skill-evals:
-    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.0
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.1
     secrets: inherit
     with:
       routing_room: my-skill,its-neighbour
@@ -295,7 +295,7 @@ workflow file documents every one.
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
-- uses: amd/skillscope@v0.1.0
+- uses: amd/skillscope@v0.1.1
   with:
     command: structural
 ```
@@ -315,12 +315,16 @@ the tag you want to run:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
 ```
 
-That tag's checkout is what grades your skills. Bump to `v0.1.1` (or whatever
-you need) in the same line when you want a newer harness. There is no separate
-`version` input and no pin inside `evals.json`.
+That tag's checkout is what grades your skills. Bump the ref in that one line
+when you want a newer harness. There is no separate `version` input and no pin
+inside `evals.json`.
+
+`v0.1.1` is the first tag where this holds. At `v0.1.0` every job inside the
+reusable workflow said `uses: amd/skillscope@main`, so pinning that tag ran
+whatever `main` happened to be that morning.
 
 ## Hand tools
 

@@ -15,4 +15,4 @@ a repo describes itself, and ``skillscope.datasets`` for the dataset format.
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
