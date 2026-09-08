@@ -198,6 +198,67 @@ class TestTheVersionIsOneNumber(unittest.TestCase):
         self.assertEqual(launcher["packaged_version"](REPO_ROOT), skillscope.__version__)
 
 
+class TestEveryRunStepIsPortable(unittest.TestCase):
+    """Nothing that grades a skill may assume the runner's shell.
+
+    A workflow step with no `shell:` gets the runner's default -- bash on Linux
+    and macOS, PowerShell on Windows -- so it runs anywhere. A composite action
+    has no such option: GitHub requires a shell on every `run:`, and naming
+    `bash` is a bet that every runner has it. Hosted Windows does, having Git
+    Bash on PATH; a self-hosted Windows box need not, and there the bet loses
+    as `bash: command not found` on a step that had nothing to do with bash.
+
+    Which platforms a run lands on is the caller's to decide -- `runner` here,
+    `behavior_os` and a skill's own `machine.yml` in the full pipeline -- so
+    every step that can reach one of them is written in Python. That is not a
+    taste in scripting languages; it is the only shell all three platforms are
+    guaranteed to agree on, and this test is what keeps the next step honest.
+    """
+
+    # Every runner in these three is a caller's input -- `runner`,
+    # `behavior_runner`, `scoped_runner`, and `coordinator_runner` all default
+    # to something but none is ours to assume. selftest.yml is left out on
+    # purpose: it runs on this repo's own matrix, so it may use bash.
+    CI_FILES = (
+        Path("action.yml"),
+        Path(".github") / "workflows" / "reusable.yml",
+        Path(".github") / "workflows" / "skill-evals.yml",
+    )
+
+    def steps(self, document: object) -> list[dict]:
+        """Every step in a workflow or an action, wherever it is nested."""
+        if isinstance(document, dict):
+            found = []
+            for key, value in document.items():
+                if key == "steps" and isinstance(value, list):
+                    found += [item for item in value if isinstance(item, dict)]
+                found += self.steps(value)
+            return found
+        if isinstance(document, list):
+            return [step for item in document for step in self.steps(item)]
+        return []
+
+    def test_no_run_step_names_a_shell_a_runner_might_not_have(self) -> None:
+        import yaml
+
+        portable = {"python"}
+        for relative in self.CI_FILES:
+            path = REPO_ROOT / relative
+            self.assertTrue(path.is_file(), f"{relative} is missing")
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for step in self.steps(document):
+                if "run" not in step:
+                    continue
+                shell = step.get("shell", "")
+                name = step.get("name", step.get("id", "<unnamed>"))
+                self.assertIn(
+                    shell,
+                    portable,
+                    f"{relative}: step {name!r} runs under {shell!r}. A step that "
+                    f"can land on a runner a caller chose must use one of {sorted(portable)}.",
+                )
+
+
 class TestSchemaStaysInSyncWithParser(unittest.TestCase):
     """The schema is documentation; these tests stop it becoming fiction."""
 

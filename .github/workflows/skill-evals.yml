@@ -716,7 +716,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.coordinator_runner) }}
     steps:
       - name: Verify eval results
-        shell: bash
+        shell: python
         env:
           DISCOVER: ${{ needs.discover.result }}
           ROUTING: ${{ needs.routing.result }}
@@ -728,49 +728,47 @@ jobs:
           SKIPPED: ${{ needs.discover.outputs.skipped }}
           HARNESS: ${{ job.workflow_ref }}
         run: |
-          echo "harness:         $HARNESS"
-          echo "discover:        $DISCOVER"
-          echo "routing:         $ROUTING (requested: $ROUTING_WANTED)"
-          echo "behavioral:        $BEHAVIOR (requested: $BEHAVIOR_WANTED)"
-          echo "behavioral-scoped: $SCOPED (requested: $SCOPED_WANTED)"
-          echo "held back:       $SKIPPED"
+          import os
+          import sys
+
+          def value(name: str) -> str:
+              return os.environ.get(name, "")
+
+          print(f"harness:           {value('HARNESS')}")
+          print(f"discover:          {value('DISCOVER')}")
+          print(f"routing:           {value('ROUTING')} (requested: {value('ROUTING_WANTED')})")
+          print(f"behavioral:        {value('BEHAVIOR')} (requested: {value('BEHAVIOR_WANTED')})")
+          print(f"behavioral-scoped: {value('SCOPED')} (requested: {value('SCOPED_WANTED')})")
+          print(f"held back:         {value('SKIPPED')}")
 
           # If discovery itself failed, surface that rather than guessing. It
           # also covers the structural checks, so a malformed SKILL.md, a
           # malformed evals.json, or a reference pointing nowhere lands here as
           # a clear failure.
-          if [ "$DISCOVER" != "success" ]; then
-            echo "The discover job did not succeed ($DISCOVER)." >&2
-            exit 1
-          fi
+          if value("DISCOVER") != "success":
+              sys.exit(f"The discover job did not succeed ({value('DISCOVER')}).")
 
           # Say loudly when a change went out without running on real hardware.
-          if [ -n "$SKIPPED" ] && [ "$SKIPPED" != "[]" ]; then
-            echo "::warning::These skills' behavioral cases were held back for a" \
-                 "missing gate label and did not run: $SKIPPED"
-          fi
+          skipped = value("SKIPPED").strip()
+          if skipped and skipped != "[]":
+              print(
+                  "::warning::These skills' behavioral cases were held back for a "
+                  f"missing gate label and did not run: {skipped}"
+              )
 
-          failed=0
-          if [ "$ROUTING_WANTED" = "true" ] && [ "$ROUTING" != "success" ]; then
-            echo "Routing did not pass ($ROUTING)." >&2
-            failed=1
-          fi
-          if [ "$BEHAVIOR_WANTED" = "true" ] && [ "$BEHAVIOR" != "success" ]; then
-            echo "Behavioral cases did not pass ($BEHAVIOR)." >&2
-            failed=1
-          fi
-          if [ "$SCOPED_WANTED" = "true" ] && [ "$SCOPED" != "success" ]; then
-            echo "Scoped-hardware behavioral cases did not pass ($SCOPED)." >&2
-            failed=1
-          fi
-          if [ "$failed" -ne 0 ]; then
-            exit 1
-          fi
+          legs = (
+              ("Routing", "ROUTING_WANTED", "ROUTING"),
+              ("Behavioral cases", "BEHAVIOR_WANTED", "BEHAVIOR"),
+              ("Scoped-hardware behavioral cases", "SCOPED_WANTED", "SCOPED"),
+          )
+          requested = [leg for leg in legs if value(leg[1]) == "true"]
 
-          if [ "$ROUTING_WANTED" != "true" ] && [ "$BEHAVIOR_WANTED" != "true" ] \
-             && [ "$SCOPED_WANTED" != "true" ]; then
-            echo "No evals affected by this change."
-          else
-            echo "All affected evals passed."
-          fi
-          exit 0
+          failures = [
+              f"{label} did not pass ({value(result)})."
+              for label, _, result in requested
+              if value(result) != "success"
+          ]
+          if failures:
+              sys.exit("\n".join(failures))
+
+          print("All affected evals passed." if requested else "No evals affected by this change.")
