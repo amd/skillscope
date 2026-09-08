@@ -8,7 +8,7 @@ name: reusable
 #
 #   jobs:
 #     evals:
-#       uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
+#       uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
 #       secrets:
 #         api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 #       with:
@@ -63,7 +63,8 @@ name: reusable
 # let a reusable workflow interpolate that pin into `uses: amd/skillscope@...`,
 # so each job checks out this repository at `job.workflow_sha` (the commit the
 # caller referenced) and runs the composite action from that tree. Pinning
-# `@v0.1.0` grades with v0.1.0; pinning `@v0.1.1` grades with v0.1.1.
+# `@v0.1.1` grades with v0.1.1, `@main` grades with main, and a branch grades
+# with that branch -- so there is no release ritual and nothing to keep in step.
 
 on:
   workflow_call:

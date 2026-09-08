@@ -94,6 +94,7 @@ jobs:
       # `uses: ./` runs this checkout, so a pull request tests the action and
       # the harness it is about to change.
       - name: Check the fixture structurally
+        id: structural
         uses: ./
         with:
           command: structural
@@ -101,6 +102,25 @@ jobs:
           # asks for them the way a repo with a governance card would.
           args: --skill-files skill-card.md --skill-sections Description,Owner,License
           repo: fixture
+
+      # The version story, end to end. Nothing here can fetch another build, so
+      # the harness that just ran has to be the one in this checkout -- and the
+      # action has to be able to say which one that was. It reports the version
+      # rather than its own ref precisely because the reusable workflows reach
+      # it through a nested checkout, where the ref is empty.
+      - name: Check it ran the harness from this checkout
+        shell: python
+        env:
+          REPORTED: ${{ steps.structural.outputs.version }}
+        run: |
+          import os
+          import re
+
+          pyproject = open("pyproject.toml", encoding="utf-8").read()
+          declared = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject).group(1)
+          reported = os.environ["REPORTED"]
+          assert reported == declared, f"ran {reported!r}, but this checkout is {declared!r}"
+          print(f"skillscope {reported}, from this checkout.")
 
       # This repo has no skills, so what is left is its own prose -- which is
       # exactly the half a harness for checking references should not be

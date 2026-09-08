@@ -23,6 +23,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import runpy
 import tempfile
 import time
 import unittest
@@ -30,6 +32,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+import skillscope
 from skillscope import (
     agent,
     behavior,
@@ -44,6 +47,7 @@ from skillscope import (
 from skillscope import select as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 
+REPO_ROOT = datasets.PACKAGE_DIR.parent
 SCHEMA_DIR = datasets.PACKAGE_DIR / "schema"
 TRIGGERING = "triggeringEvaluation"
 NON_TRIGGERING = "nonTriggeringEvaluation"
@@ -164,6 +168,34 @@ class Repo:
     def reactivate(self, **overrides) -> config.Config:
         """Re-activate with `overrides` applied, for a test that changes one setting."""
         return self.activate(**{**self.settings, **overrides})
+
+
+class TestTheVersionIsOneNumber(unittest.TestCase):
+    """The version a run reports has to be the version that was packaged.
+
+    The `uses:` pin decides which harness runs, and the workflows derive that
+    pin rather than repeating it, so there is no list of refs to keep in step.
+    What is left is the label: the action reads `__version__` out of the
+    checkout it ran from and reports it, and that is how a caller confirms the
+    pin did what they meant. If `__version__` and the packaging metadata can
+    disagree, the label is a guess.
+    """
+
+    def test_the_packaged_version_matches_the_module(self) -> None:
+        declared = re.search(
+            r'(?m)^version\s*=\s*"([^"]+)"',
+            (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+        )
+        self.assertIsNotNone(declared, "pyproject.toml declares no version")
+        self.assertEqual(declared.group(1), skillscope.__version__)
+
+    def test_the_launcher_reads_the_version_it_reports(self) -> None:
+        # The launcher cannot import skillscope -- it runs before anything is
+        # installed -- so it scrapes `__version__` with a regex. This is what
+        # says the regex still matches the file it is aimed at. Run without
+        # `__main__`, so loading it does not launch anything.
+        launcher = runpy.run_path(str(REPO_ROOT / "bootstrap" / "launch.py"))
+        self.assertEqual(launcher["packaged_version"](REPO_ROOT), skillscope.__version__)
 
 
 class TestSchemaStaysInSyncWithParser(unittest.TestCase):
