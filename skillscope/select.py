@@ -10,17 +10,15 @@ downstream consumes::
     {
       "routing": true,
       "extended": false,
-      "version": "v1.2.0",
       "default": [
         {"skill": "local-ai-use", "os": "Linux",
          "runner": "[\\"self-hosted\\",\\"strix_halo\\",\\"Linux\\"]",
-         "gate": "", "version": "v1.2.0"}
+         "gate": ""}
       ],
       "scoped": [
         {"skill": "serving-llms-on-instinct", "os": "Linux",
          "runner": "[\\"self-hosted\\",\\"mi300x\\",\\"Linux\\"]",
-         "environment": "behavioral-instinct", "gate": "enable_mi_ci",
-         "version": "v1.2.0"}
+         "environment": "behavioral-instinct", "gate": "enable_mi_ci"}
       ],
       "skipped": [{"skill": "serving-llms-on-instinct", "gate": "enable_mi_ci"}],
       "gates": ["enable_mi_ci"]
@@ -40,11 +38,6 @@ a pull-request label and pay for out of a separate environment, and the two
 matrices have to be separate jobs because a job's credentials are fixed before
 its matrix expands. A repo that declares no scoped environment gets one matrix,
 labels and all.
-
-``version`` is which build of the harness grades the leg, so a skill can pin
-the harness in its own dataset and have CI honor it (see
-``datasets.pinned_version``). The top-level one covers everything that is not
-one skill's behavioral run.
 
 ``extended`` echoes back whether the optional ``evals/extended_evals.json``
 datasets are in play, so the workflow decides that once and every job reads the
@@ -77,8 +70,8 @@ def infra_paths() -> set[str]:
 
     Touching one re-runs everything rather than guessing at the blast radius.
     The workflow names them with ``--infra-paths``, and the workflow file
-    itself is the usual entry: it now holds the harness pin and the routing
-    set, so a change to it can move any result.
+    itself is the usual entry: it holds the routing set and the harness ref, so
+    a change to it can move any result.
     """
     return set(config.active().infra_paths)
 
@@ -147,9 +140,6 @@ def matrix_entries(
                 "os": os_name,
                 "runner": json.dumps(runs_on(plan, os_name)),
                 "gate": gate,
-                # Per leg, because a skill owner pins the harness in the same
-                # file as the prompts it grades.
-                "version": datasets.pinned_version(skill),
             }
             if scoped and cfg.scoped_environment:
                 leg["environment"] = cfg.scoped_environment
@@ -220,10 +210,6 @@ def plan(
     return {
         "routing": routing and bool(config.active().routing_room),
         "extended": extended,
-        # Routing installs several skills in one session, so it runs at the
-        # version this run is already using; a per-skill pin governs that
-        # skill's behavioral leg.
-        "version": datasets.pinned_version(),
         "default": [leg for leg in include if "environment" not in leg],
         "scoped": [leg for leg in include if "environment" in leg],
         "skipped": skipped,

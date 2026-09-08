@@ -8,7 +8,7 @@ Porting `.github/scripts/select_evals.py` into `skillscope select` changed where
 every input comes from: skills globs, runner labels, infra paths, and the
 routing set are now flags the caller's workflow passes. The output is supposed
 to be unchanged. This runs both planners over the same sample diffs and prints
-any difference, ignoring the per-leg `version` that only the new one emits.
+any difference.
 
     git -C /path/to/amd-skills worktree add --detach /tmp/pre-split <commit>
     python tools/verify_selection_parity.py /tmp/pre-split /path/to/amd-skills
@@ -72,8 +72,8 @@ SAMPLES: dict[str, list[str]] = {
 # Cases where the plans are supposed to differ, and why.
 EXPECTED_DIFFERENCES = {
     "the harness itself (gone from this repo)": (
-        "eval/** used to be an infra path; the harness is a version pin now, "
-        "so touching a file that no longer exists selects nothing."
+        "eval/** used to be an infra path; the harness is a ref in the workflow "
+        "now, so touching a file that no longer exists selects nothing."
     ),
     "the marketplace bundle": (
         "publishing a skill used to change what routing installed. The routing "
@@ -82,16 +82,6 @@ EXPECTED_DIFFERENCES = {
 }
 
 LABEL_SETS = ["", "enable_mi_ci"]
-
-
-def normalize(plan: dict) -> dict:
-    """Drop what only the new implementation emits."""
-    plan = json.loads(json.dumps(plan))
-    plan.pop("version", None)
-    for key in ("default", "scoped"):
-        for leg in plan.get(key, []):
-            leg.pop("version", None)
-    return plan
 
 
 def run(cmd: list[str], cwd: Path, changed: list[str]) -> dict:
@@ -116,38 +106,34 @@ def main(argv: list[str]) -> int:
     differences = 0
     for name, changed in SAMPLES.items():
         for labels in LABEL_SETS:
-            old = normalize(
-                run(
-                    [
-                        sys.executable,
-                        ".github/scripts/select_evals.py",
-                        "--changed",
-                        "--labels",
-                        labels,
-                        "--no-extended",
-                    ],
-                    old_root,
-                    changed,
-                )
+            old = run(
+                [
+                    sys.executable,
+                    ".github/scripts/select_evals.py",
+                    "--changed",
+                    "--labels",
+                    labels,
+                    "--no-extended",
+                ],
+                old_root,
+                changed,
             )
-            new = normalize(
-                run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "skillscope",
-                        "--repo",
-                        str(new_root),
-                        "select",
-                        "--changed",
-                        "--labels",
-                        labels,
-                        "--no-extended",
-                        *SETTINGS,
-                    ],
-                    new_root / "skillscope",
-                    changed,
-                )
+            new = run(
+                [
+                    sys.executable,
+                    "-m",
+                    "skillscope",
+                    "--repo",
+                    str(new_root),
+                    "select",
+                    "--changed",
+                    "--labels",
+                    labels,
+                    "--no-extended",
+                    *SETTINGS,
+                ],
+                new_root / "skillscope",
+                changed,
             )
             if old == new:
                 print(f"[same] {name} (labels: {labels or 'none'})")

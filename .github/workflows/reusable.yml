@@ -8,7 +8,7 @@ name: reusable
 #
 #   jobs:
 #     evals:
-#       uses: amd/skillscope/.github/workflows/reusable.yml@main
+#       uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
 #       secrets:
 #         api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 #       with:
@@ -16,6 +16,14 @@ name: reusable
 #
 # That is a whole caller. Everything else has a default, and the defaults are
 # the strict answer: every step runs, and every step can fail the run.
+#
+# The ref you pin is the harness you get. Every step below references
+# `amd/skillscope@v0.1.1`, the release this file ships in, and the action
+# installs the harness out of that checkout rather than resolving a version
+# from anywhere else -- so `reusable.yml@v0.1.1` grades your skills with
+# skillscope v0.1.1, and there is no second setting that can quietly say
+# otherwise. The workflow and the harness move as one release; `version` is the
+# only way to break the pair, for a caller trying a build before it ships.
 #
 #   discover --> structural --> routing    (one runner per skill)
 #                           --> behavioral (one runner per skill)
@@ -101,8 +109,9 @@ on:
         default: "1"
       version:
         description: >-
-          Harness version to run, overriding the pin in each skill's evals.json.
-          Blank runs those pins, and this workflow's own ref where there is none.
+          A harness build to run instead of the one this workflow's release
+          ships with: a tag, a branch, or a commit. Blank is the answer that
+          cannot drift from the ref you pinned this workflow at.
         type: string
         default: ""
       api_key_secret:
@@ -166,7 +175,7 @@ jobs:
       # everything else that runs against it.
       - name: List the skills
         id: found
-        uses: amd/skillscope@main
+        uses: amd/skillscope@v0.1.1
         with:
           command: list-skills
           skills: ${{ steps.globs.outputs.globs }}
@@ -241,7 +250,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check every skill's structure
-        uses: amd/skillscope@main
+        uses: amd/skillscope@v0.1.1
         with:
           command: structural
           skills: ${{ needs.discover.outputs.globs }}
@@ -290,7 +299,7 @@ jobs:
           fi
 
       - name: Run the routing eval for ${{ matrix.skill }}
-        uses: amd/skillscope@main
+        uses: amd/skillscope@v0.1.1
         with:
           command: routing
           # One skill in the room, named, so the score is about this skill alone
@@ -303,7 +312,6 @@ jobs:
             --output routing-report.json
             --keep-logs routing-logs
           skills: ${{ needs.discover.outputs.globs }}
-          skill: ${{ matrix.skill }}
           version: ${{ inputs.version }}
           install-claude: "true"
 
@@ -356,16 +364,13 @@ jobs:
           fi
 
       - name: Run the behavioral cases for ${{ matrix.skill }}
-        uses: amd/skillscope@main
+        uses: amd/skillscope@v0.1.1
         with:
           command: behavioral
           args: >-
             --skill '${{ matrix.skill }}'
             --output behavioral-report.json
           skills: ${{ needs.discover.outputs.globs }}
-          # This skill's own evals.json may pin the harness version its cases
-          # were written for, and this is the leg that runs them.
-          skill: ${{ matrix.skill }}
           version: ${{ inputs.version }}
           install-claude: "true"
 

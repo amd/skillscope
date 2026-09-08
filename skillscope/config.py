@@ -45,15 +45,11 @@ from pathlib import Path
 
 # The environment contract with the launcher, checked before anything is
 # inferred. `SKILLSCOPE_REPO` points at the repo under test (CI runs from its
-# checkout, so this is rarely needed). `SKILLSCOPE_VERSION` is the build of the
-# harness that is running, so a plan can tell CI to keep using it.
-#
-# `SKILLSCOPE_SKILLS` is where the skills are, and it is an environment
-# variable rather than only a flag because the launcher needs the same answer
-# this does: it looks in a skill's dataset for the version pin before it has
-# fetched the harness that could parse a flag. `--skills-dir` still wins.
+# checkout, so this is rarely needed). `SKILLSCOPE_SKILLS` is where the skills
+# are, as an environment variable rather than only a flag: a workflow says it
+# once as an action input and every command in the run sees it, instead of each
+# one composing the same `--skills-dir` into its arguments. The flag still wins.
 REPO_ENV = "SKILLSCOPE_REPO"
-VERSION_ENV = "SKILLSCOPE_VERSION"
 SKILLS_ENV = "SKILLSCOPE_SKILLS"
 
 # Every directory in the one the command was run from, and no deeper. See
@@ -127,10 +123,6 @@ class Config:
     # a skill says what hardware it needs, not who pays for it.
     scoped_gate: str = ""
     scoped_environment: str = ""
-
-    # The build of the harness this run is. Echoed into a CI plan so every leg
-    # keeps using it unless the skill's own dataset pins another.
-    version: str = ""
 
     @property
     def skills(self) -> dict[str, Path]:
@@ -310,7 +302,6 @@ def build(
     scoped_runner: object = None,
     scoped_gate: str = "",
     scoped_environment: str = "",
-    version: str | None = None,
     dataset_skills: list[str] | None = None,
 ) -> Config:
     """A Config from loose values: what the CLI hands over after parsing.
@@ -357,9 +348,6 @@ def build(
         scoped_runner=_items(scoped_runner, "--scoped-runner"),
         scoped_gate=(scoped_gate or "").strip(),
         scoped_environment=(scoped_environment or "").strip(),
-        version=(
-            version if version is not None else os.environ.get(VERSION_ENV, "")
-        ).strip(),
     )
 
 

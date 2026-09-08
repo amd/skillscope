@@ -11,8 +11,7 @@ name: selftest
 # and runs on every platform a behavioral leg can be scheduled on, because that
 # is where the path handling breaks. The smoke test drives the real launcher
 # against a throwaway repo built in the job, which is the only way to find out
-# that action.yml, the version resolver, and the CLI still agree on their
-# interface.
+# that action.yml, the launcher, and the CLI still agree on their interface.
 
 on:
   push:
@@ -92,11 +91,13 @@ jobs:
           }
           EOF
 
-      # `source: .` installs this checkout rather than a published ref, so a
-      # pull request tests the launcher and the payload it is about to change.
-      # No `version`: the fixture pins nothing, which exercises the bottom rung
-      # of the resolution ladder.
+      # `uses: ./` makes this checkout the action, and the action installs the
+      # harness from the checkout it is running out of -- so a pull request
+      # tests the launcher against the payload it is about to change, which is
+      # the same path a caller takes at a tag. No `version`, which is the input
+      # that would reach the network for someone else's build instead.
       - name: Check the fixture structurally
+        id: structural
         uses: ./
         with:
           command: structural
@@ -104,7 +105,25 @@ jobs:
           # asks for them the way a repo with a governance card would.
           args: --skill-files skill-card.md --skill-sections Description,Owner,License
           repo: fixture
-          source: .
+
+      # The version story, end to end: nothing above named a version, so the
+      # harness that just ran has to be the one in this checkout. A launcher
+      # that fetched a build from anywhere else would report a git ref here
+      # instead, which is the failure a caller pinning a tag cannot see for
+      # themselves.
+      - name: Check it ran the harness from this checkout
+        shell: python
+        env:
+          REPORTED: ${{ steps.structural.outputs.version }}
+        run: |
+          import os
+          import re
+
+          pyproject = open("pyproject.toml", encoding="utf-8").read()
+          declared = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject).group(1)
+          reported = os.environ["REPORTED"]
+          assert reported == declared, f"ran {reported!r}, but this checkout is {declared!r}"
+          print(f"skillscope {reported}, from this checkout.")
 
       # This repo has no skills, so what is left is its own prose -- which is
       # exactly the half a harness for checking references should not be
@@ -116,7 +135,6 @@ jobs:
         with:
           command: structural
           args: --docs '*.md,docs/**/*.md'
-          source: .
 
       - name: Select runs for a change
         id: select
@@ -125,7 +143,6 @@ jobs:
           command: select
           args: --all --routing-room demo-skill
           repo: fixture
-          source: .
 
       - name: Select runs without naming the routing set
         id: inferred
@@ -134,7 +151,6 @@ jobs:
           command: select
           args: --all
           repo: fixture
-          source: .
 
       - name: Select runs with routing turned off
         id: unrouted
@@ -143,7 +159,6 @@ jobs:
           command: select
           args: --all --routing-room none
           repo: fixture
-          source: .
 
       - name: Check the plan
         shell: python

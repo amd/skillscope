@@ -15,4 +15,8 @@ a repo describes itself, and ``skillscope.datasets`` for the dataset format.
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+# Released as the tag `v` + this, and the workflows in this repo reference the
+# action at that tag so a caller who pins one gets the other. The suite checks
+# all three agree, because a release where they do not is a caller running a
+# harness they did not ask for.
+__version__ = "0.1.1"

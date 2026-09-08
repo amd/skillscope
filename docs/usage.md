@@ -216,7 +216,7 @@ one runner per skill:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
@@ -252,7 +252,7 @@ Naming several, and holding them to different bars:
 | `behavioral` | `required` | `required`, `optional`, or `off`. |
 | `runner` | `ubuntu-latest` | `runs-on` for every job: one label, or a JSON array of them. |
 | `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
-| `version` | the skills' own pins | The build of the harness that grades this repo. |
+| `version` | the ref you pinned | A different harness build to run. See [Versions and pinning](#versions-and-pinning). |
 | `api_key` | (none) | The model API key, mapped from the caller's vault. One secret, not the whole set. |
 | `api_key_secret` | `ANTHROPIC_API_KEY` | Name to look up under `secrets: inherit`, if you would rather pass the vault than map one key. |
 
@@ -281,7 +281,7 @@ pays for.
 ```yaml
 jobs:
   skill-evals:
-    uses: amd/skillscope/.github/workflows/skill-evals.yml@main
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.1
     secrets: inherit
     with:
       routing_room: my-skill,its-neighbour
@@ -296,7 +296,7 @@ workflow file documents every one.
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
-- uses: amd/skillscope@main
+- uses: amd/skillscope@v0.1.1
   with:
     command: structural
 ```
@@ -310,21 +310,35 @@ git diff --name-only main HEAD | skillscope select --changed
 
 ## Versions and pinning
 
-The action's ref is a contract, not a release: it only resolves a version and
-execs it, and it imports nothing from the harness, so it cannot break on a
-payload version it predates. The version that actually grades your skills is
-data:
+The ref you pin is the version you get. There is no second setting, and nothing
+to work out at run time:
 
-| Where | Scope |
-| --- | --- |
-| the `version` input on the action or workflow | the repo, and everything that is not one skill's behavioral run |
-| `skillscope_version` in a skill's `evals/evals.json` | that skill's behavioral run, overriding the input |
+```yaml
+uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1   # runs skillscope v0.1.1
+```
 
-Both are one-line diffs a reviewer can see, which a `uses:` ref spread across
-every caller is not. How a skill sets the dataset pin is in
-[authoring-evals.md](authoring-evals.md#pinning-the-harness). Routing always
-runs at the workflow's version: it installs several skills in one session and
-so cannot honor several pins at once.
+That holds because the tag ships both halves. `reusable.yml@v0.1.1` is the
+workflow from that release, every step in it references `amd/skillscope@v0.1.1`,
+and the action installs the harness out of the checkout Actions downloaded to
+run it — not from a version named in some other file. So the workflow and the
+harness only ever move together, and nothing in your repo can quietly select a
+third answer.
+
+Every job logs which build ran and the step summary repeats it, so you can check
+rather than assume.
+
+`version` is the one input that breaks the pair, for a caller who wants to know
+whether the next release holds before pinning it:
+
+```yaml
+    with:
+      version: main       # or a tag, or a commit
+```
+
+That is the only case where the harness is fetched over the network. Leave it
+blank and the answer cannot drift from the ref you pinned.
+
+Upgrading is that one line. A skill's dataset holds prompts, not a version.
 
 ## Hand tools
 

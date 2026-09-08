@@ -3,24 +3,26 @@
 # SPDX-License-Identifier: MIT
 
 name: skillscope
-description: >-
-  Run one skillscope command against the calling repository, at the harness
-  version that repository pins.
+description: Run one skillscope command against the calling repository.
 
-# The launcher, and nothing else.
+# One skillscope command, at the version you referenced this action at.
 #
-# Reference it as `amd/skillscope@bootstrap` and leave it there: `bootstrap` is
-# a contract, not a release. All it does is set up Python and uv, work out
-# which build of the harness should grade this repo (an input, then
-# $SKILLSCOPE_VERSION, then the skill's evals.json, then its own ref), and exec
-# that build. Nothing here imports skillscope, so the launcher cannot break on
-# a payload version it predates -- which is what makes pinning it forever safe.
+#   - uses: amd/skillscope@v0.1.1
+#     with:
+#       command: structural
 #
-# Everything about the repo being tested is passed in: `version` and `skills`
+# The ref is the version. Actions downloads this repository at `v0.1.1` to run
+# the action, and that checkout is the harness, so the step installs it from
+# there rather than fetching a build named somewhere else. There is no second
+# place holding a version that could disagree with the ref, and nothing to keep
+# in step at release time.
+#
+# `version` is the one way to run a different build than the ref pins -- a
+# caller trying next month's harness against today's workflow -- and the only
+# case that reaches the network.
+#
+# Everything about the repo being tested is passed in: `skills` and `repo`
 # here, and the rest through `args`, composed by the workflow that calls this.
-# A skill may pin its own harness build with `skillscope_version` in its
-# evals.json, which is a one-line reviewable diff next to the prompts it
-# affects.
 
 inputs:
   command:
@@ -32,34 +34,21 @@ inputs:
     default: ""
   version:
     description: >-
-      Harness version to run. Wins over every other source. Leave empty to use
-      the skill's own pin, else this action's ref.
-    required: false
-    default: ""
-  skill:
-    description: >-
-      The skill being graded, so its evals.json `skillscope_version` is honored.
-      `skillscope select` emits this per matrix leg.
+      A harness build to fetch instead of the one this action's ref points at:
+      a tag, a branch, or a commit. Blank is the usual answer, and the one that
+      cannot drift from the ref you pinned.
     required: false
     default: ""
   skills:
     description: >-
-      Globs naming the directories that are skills, comma-separated. The
-      launcher needs these to find a skill's version pin before it has fetched
-      anything, and passes them on to the harness. Default: ./*, every
-      directory at the repo root.
+      Globs naming the directories that are skills, comma-separated, relative
+      to the repository root. Default: ./*, every directory at the root.
     required: false
     default: ""
   repo:
     description: "Root of the repo to test. Default: the workspace."
     required: false
     default: "."
-  source:
-    description: >-
-      Where to install the harness from: owner/repo, or a local path holding a
-      pyproject.toml. Defaults to this action's own repository.
-    required: false
-    default: ""
   stdin:
     description: "A file to feed the command on stdin (`select --changed` reads one)."
     required: false
@@ -85,7 +74,7 @@ inputs:
 
 outputs:
   version:
-    description: "The harness version that ran."
+    description: "The harness build that ran."
     value: ${{ steps.skillscope.outputs.version }}
   stdout:
     description: >-
@@ -126,19 +115,18 @@ runs:
         SKILLSCOPE_ARGS: ${{ inputs.args }}
         SKILLSCOPE_REPO: ${{ inputs.repo }}
         SKILLSCOPE_SKILLS: ${{ inputs.skills }}
-        SKILLSCOPE_SOURCE: ${{ inputs.source || github.action_repository }}
-        SKILLSCOPE_REQUESTED: ${{ inputs.version }}
-        SKILLSCOPE_SKILL: ${{ inputs.skill }}
-        # Last resort: a repo that pins nothing runs whatever this launcher's
-        # own ref points at, so it works with no configuration at all.
-        SKILLSCOPE_DEFAULT: ${{ github.action_ref || 'main' }}
         SKILLSCOPE_STDIN: ${{ inputs.stdin }}
+        SKILLSCOPE_VERSION: ${{ inputs.version }}
+        # Only read when `version` asks for a build from git. Falls back to the
+        # repository running the workflow, which is what `uses: ./` means.
+        SKILLSCOPE_REPOSITORY: ${{ github.action_repository || github.repository }}
+        # The harness itself: this repository, at the ref the caller pinned.
         SKILLSCOPE_ACTION_PATH: ${{ github.action_path }}
       run: |
         import os
         import runpy
         import sys
 
-        launcher = os.path.join(os.environ["SKILLSCOPE_ACTION_PATH"], "bootstrap", "launch.py")
+        launcher = os.path.join(os.environ["SKILLSCOPE_ACTION_PATH"], "action", "launch.py")
         sys.argv = [launcher]
         runpy.run_path(launcher, run_name="__main__")

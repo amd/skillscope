@@ -48,12 +48,15 @@ Simply add an `evals.json` file to your skill and a workflow that points to our 
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
       skills: skills/*
 ```
+
+The ref is the version: `@v0.1.1` grades your skills with skillscope v0.1.1, and
+keeps doing so until you change that one line.
 
 You may also choose to customize or even disable some tests if you prefer it. See [docs/usage.md](docs/usage.md) for details.
 
