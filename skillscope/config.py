@@ -43,17 +43,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# The environment contract with the launcher, checked before anything is
-# inferred. `SKILLSCOPE_REPO` points at the repo under test (CI runs from its
-# checkout, so this is rarely needed). `SKILLSCOPE_VERSION` is the build of the
-# harness that is running, so a plan can tell CI to keep using it.
-#
+# The environment contract with the composite action. `SKILLSCOPE_REPO` points
+# at the repo under test (CI runs from its checkout, so this is rarely needed).
 # `SKILLSCOPE_SKILLS` is where the skills are, and it is an environment
-# variable rather than only a flag because the launcher needs the same answer
-# this does: it looks in a skill's dataset for the version pin before it has
-# fetched the harness that could parse a flag. `--skills-dir` still wins.
+# variable rather than only a flag because the action passes the same globs
+# the CLI would take as `--skills-dir`. The flag still wins.
 REPO_ENV = "SKILLSCOPE_REPO"
-VERSION_ENV = "SKILLSCOPE_VERSION"
 SKILLS_ENV = "SKILLSCOPE_SKILLS"
 
 # Every directory in the one the command was run from, and no deeper. See
@@ -127,10 +122,6 @@ class Config:
     # a skill says what hardware it needs, not who pays for it.
     scoped_gate: str = ""
     scoped_environment: str = ""
-
-    # The build of the harness this run is. Echoed into a CI plan so every leg
-    # keeps using it unless the skill's own dataset pins another.
-    version: str = ""
 
     @property
     def skills(self) -> dict[str, Path]:
@@ -229,7 +220,7 @@ def default_skill_globs(root: Path) -> tuple[str, ...]:
     root-relative markdown link can all agree on. A glob nobody passed is
     relative to the directory the command was typed in, because standing in a
     tree of skills and running ``skillscope structural`` can only mean these
-    ones. Under CI the two are the same: the launcher runs from the repo root.
+    ones. Under CI the two are the same: the action runs from the repo root.
 
     The answer is still expressed against `root`, so everything downstream has
     one base to reason about rather than two.
@@ -310,7 +301,6 @@ def build(
     scoped_runner: object = None,
     scoped_gate: str = "",
     scoped_environment: str = "",
-    version: str | None = None,
     dataset_skills: list[str] | None = None,
 ) -> Config:
     """A Config from loose values: what the CLI hands over after parsing.
@@ -357,9 +347,6 @@ def build(
         scoped_runner=_items(scoped_runner, "--scoped-runner"),
         scoped_gate=(scoped_gate or "").strip(),
         scoped_environment=(scoped_environment or "").strip(),
-        version=(
-            version if version is not None else os.environ.get(VERSION_ENV, "")
-        ).strip(),
     )
 
 

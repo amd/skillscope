@@ -20,7 +20,7 @@ CLI flag, and every workflow input. For writing a skill's dataset, see
 * [Hardware a skill needs](#hardware-a-skill-needs)
 * [In CI: one job](#in-ci-one-job)
 * [In CI: the full pipeline](#in-ci-the-full-pipeline)
-* [Versions and pinning](#versions-and-pinning)
+* [Versions](#versions)
 * [Hand tools](#hand-tools)
 
 ## evals.json
@@ -71,7 +71,7 @@ The one thing measured from somewhere else is `--skills-dir` when you do not
 pass it: then it is every directory in the one you ran the command from.
 Standing in a tree of skills and typing `skillscope structural` can only mean
 these ones, and a repo that keeps them a level down works with a `cd` rather
-than a flag. Under CI the two bases coincide, because the launcher runs from
+than a flag. Under CI the two bases coincide, because the action runs from
 the repo root — so a run with no `--skills-dir` grades the directories at the
 root, and a repo whose skills live anywhere else names them.
 
@@ -216,7 +216,7 @@ one runner per skill:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@main
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
@@ -252,7 +252,6 @@ Naming several, and holding them to different bars:
 | `behavioral` | `required` | `required`, `optional`, or `off`. |
 | `runner` | `ubuntu-latest` | `runs-on` for every job: one label, or a JSON array of them. |
 | `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
-| `version` | the skills' own pins | The build of the harness that grades this repo. |
 | `api_key` | (none) | The model API key, mapped from the caller's vault. One secret, not the whole set. |
 | `api_key_secret` | `ANTHROPIC_API_KEY` | Name to look up under `secrets: inherit`, if you would rather pass the vault than map one key. |
 
@@ -281,7 +280,7 @@ pays for.
 ```yaml
 jobs:
   skill-evals:
-    uses: amd/skillscope/.github/workflows/skill-evals.yml@main
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.1
     secrets: inherit
     with:
       routing_room: my-skill,its-neighbour
@@ -296,7 +295,7 @@ workflow file documents every one.
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
-- uses: amd/skillscope@main
+- uses: amd/skillscope@v0.1.1
   with:
     command: structural
 ```
@@ -308,23 +307,24 @@ change as JSON.
 git diff --name-only main HEAD | skillscope select --changed
 ```
 
-## Versions and pinning
+## Versions
 
-The action's ref is a contract, not a release: it only resolves a version and
-execs it, and it imports nothing from the harness, so it cannot break on a
-payload version it predates. The version that actually grades your skills is
-data:
+The `uses:` ref is the harness. Pin the reusable workflow (or the action) at
+the tag you want to run:
 
-| Where | Scope |
-| --- | --- |
-| the `version` input on the action or workflow | the repo, and everything that is not one skill's behavioral run |
-| `skillscope_version` in a skill's `evals/evals.json` | that skill's behavioral run, overriding the input |
+```yaml
+jobs:
+  evals:
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
+```
 
-Both are one-line diffs a reviewer can see, which a `uses:` ref spread across
-every caller is not. How a skill sets the dataset pin is in
-[authoring-evals.md](authoring-evals.md#pinning-the-harness). Routing always
-runs at the workflow's version: it installs several skills in one session and
-so cannot honor several pins at once.
+That tag's checkout is what grades your skills. Bump the ref in that one line
+when you want a newer harness. There is no separate `version` input and no pin
+inside `evals.json`.
+
+`v0.1.1` is the first tag where this holds. At `v0.1.0` every job inside the
+reusable workflow said `uses: amd/skillscope@main`, so pinning that tag ran
+whatever `main` happened to be that morning.
 
 ## Hand tools
 

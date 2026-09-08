@@ -9,10 +9,9 @@ name: selftest
 # Two halves. The unit suite guards the parts that decide whether a paid run is
 # trustworthy -- routing verdicts, activation detection, dataset rejection --
 # and runs on every platform a behavioral leg can be scheduled on, because that
-# is where the path handling breaks. The smoke test drives the real launcher
+# is where the path handling breaks. The smoke test drives the real action
 # against a throwaway repo built in the job, which is the only way to find out
-# that action.yml, the version resolver, and the CLI still agree on their
-# interface.
+# that action.yml and the CLI still agree on their interface.
 
 on:
   push:
@@ -45,8 +44,8 @@ jobs:
       - name: Run the suite
         run: python -m unittest discover -s tests -t . --verbose
 
-  launcher:
-    name: Launcher against a throwaway repo
+  action:
+    name: Action against a throwaway repo
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,11 +91,10 @@ jobs:
           }
           EOF
 
-      # `source: .` installs this checkout rather than a published ref, so a
-      # pull request tests the launcher and the payload it is about to change.
-      # No `version`: the fixture pins nothing, which exercises the bottom rung
-      # of the resolution ladder.
+      # `uses: ./` runs this checkout, so a pull request tests the action and
+      # the harness it is about to change.
       - name: Check the fixture structurally
+        id: structural
         uses: ./
         with:
           command: structural
@@ -104,7 +102,25 @@ jobs:
           # asks for them the way a repo with a governance card would.
           args: --skill-files skill-card.md --skill-sections Description,Owner,License
           repo: fixture
-          source: .
+
+      # The version story, end to end. Nothing here can fetch another build, so
+      # the harness that just ran has to be the one in this checkout -- and the
+      # action has to be able to say which one that was. It reports the version
+      # rather than its own ref precisely because the reusable workflows reach
+      # it through a nested checkout, where the ref is empty.
+      - name: Check it ran the harness from this checkout
+        shell: python
+        env:
+          REPORTED: ${{ steps.structural.outputs.version }}
+        run: |
+          import os
+          import re
+
+          pyproject = open("pyproject.toml", encoding="utf-8").read()
+          declared = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject).group(1)
+          reported = os.environ["REPORTED"]
+          assert reported == declared, f"ran {reported!r}, but this checkout is {declared!r}"
+          print(f"skillscope {reported}, from this checkout.")
 
       # This repo has no skills, so what is left is its own prose -- which is
       # exactly the half a harness for checking references should not be
@@ -116,7 +132,6 @@ jobs:
         with:
           command: structural
           args: --docs '*.md,docs/**/*.md'
-          source: .
 
       - name: Select runs for a change
         id: select
@@ -125,7 +140,6 @@ jobs:
           command: select
           args: --all --routing-room demo-skill
           repo: fixture
-          source: .
 
       - name: Select runs without naming the routing set
         id: inferred
@@ -134,7 +148,6 @@ jobs:
           command: select
           args: --all
           repo: fixture
-          source: .
 
       - name: Select runs with routing turned off
         id: unrouted
@@ -143,7 +156,6 @@ jobs:
           command: select
           args: --all --routing-room none
           repo: fixture
-          source: .
 
       - name: Check the plan
         shell: python
