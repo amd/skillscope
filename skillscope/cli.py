@@ -779,7 +779,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Files that change the harness rather than one skill; touching one "
             "re-runs every skill. The workflow that calls skillscope belongs "
-            "here: it holds the routing set and the version pin."
+            "here: it holds the routing set."
         ),
     )
     select_parser.add_argument(
@@ -830,15 +830,6 @@ def build_parser() -> argparse.ArgumentParser:
             "credentials are fixed before its matrix expands."
         ),
     )
-    select_parser.add_argument(
-        "--version",
-        default=None,
-        metavar="REF",
-        help=(
-            "The build of skillscope this run is, echoed into the plan so every "
-            f"leg keeps using it. Default: ${config.VERSION_ENV}."
-        ),
-    )
     select_parser.set_defaults(handler=cmd_select)
 
     list_parser = commands.add_parser(
@@ -886,7 +877,6 @@ def _configure(args: argparse.Namespace) -> None:
     }
     settings["scoped_gate"] = getattr(args, "scoped_gate", "") or ""
     settings["scoped_environment"] = getattr(args, "scoped_environment", "") or ""
-    settings["version"] = getattr(args, "version", None)
 
     config.use(config.build(root, **settings))
     if settings["routing_room"] is not None:

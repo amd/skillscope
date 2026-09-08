@@ -8,7 +8,7 @@ Porting `.github/scripts/select_evals.py` into `skillscope select` changed where
 every input comes from: skills globs, runner labels, infra paths, and the
 routing set are now flags the caller's workflow passes. The output is supposed
 to be unchanged. This runs both planners over the same sample diffs and prints
-any difference, ignoring the per-leg `version` that only the new one emits.
+any difference.
 
     git -C /path/to/amd-skills worktree add --detach /tmp/pre-split <commit>
     python tools/verify_selection_parity.py /tmp/pre-split /path/to/amd-skills
@@ -72,8 +72,8 @@ SAMPLES: dict[str, list[str]] = {
 # Cases where the plans are supposed to differ, and why.
 EXPECTED_DIFFERENCES = {
     "the harness itself (gone from this repo)": (
-        "eval/** used to be an infra path; the harness is a version pin now, "
-        "so touching a file that no longer exists selects nothing."
+        "eval/** used to be an infra path; the harness lives in its own repo "
+        "now, so touching a file that no longer exists selects nothing."
     ),
     "the marketplace bundle": (
         "publishing a skill used to change what routing installed. The routing "

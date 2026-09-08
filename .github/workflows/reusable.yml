@@ -8,7 +8,7 @@ name: reusable
 #
 #   jobs:
 #     evals:
-#       uses: amd/skillscope/.github/workflows/reusable.yml@main
+#       uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.0
 #       secrets:
 #         api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 #       with:
@@ -58,6 +58,12 @@ name: reusable
 # your provider, your gateway, or anything else in the vault. `secrets: inherit`
 # still works if you would rather pass the vault and name the key with
 # `api_key_secret`; it is more than this workflow needs.
+#
+# The `uses:` pin on this workflow is the harness that runs. GitHub does not
+# let a reusable workflow interpolate that pin into `uses: amd/skillscope@...`,
+# so each job checks out this repository at `job.workflow_sha` (the commit the
+# caller referenced) and runs the composite action from that tree. Pinning
+# `@v0.1.0` grades with v0.1.0; pinning `@v0.1.1` grades with v0.1.1.
 
 on:
   workflow_call:
@@ -99,12 +105,6 @@ on:
           wrong routing decision; `0` reports the score without gating on it.
         type: string
         default: "1"
-      version:
-        description: >-
-          Harness version to run, overriding the pin in each skill's evals.json.
-          Blank runs those pins, and this workflow's own ref where there is none.
-        type: string
-        default: ""
       api_key_secret:
         description: >-
           Name of the secret holding the model API key when the caller uses
@@ -144,6 +144,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
+
       # One glob per line is how a list wants to be written in YAML, and commas
       # are what every skillscope flag takes. Accept both, pass on one.
       - name: Read the skill list
@@ -166,11 +173,10 @@ jobs:
       # everything else that runs against it.
       - name: List the skills
         id: found
-        uses: amd/skillscope@main
+        uses: ./.skillscope-action
         with:
           command: list-skills
           skills: ${{ steps.globs.outputs.globs }}
-          version: ${{ inputs.version }}
 
       - name: Build the matrix
         id: matrix
@@ -240,12 +246,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
+
       - name: Check every skill's structure
-        uses: amd/skillscope@main
+        uses: ./.skillscope-action
         with:
           command: structural
           skills: ${{ needs.discover.outputs.globs }}
-          version: ${{ inputs.version }}
 
   routing:
     name: Routing Tests (${{ matrix.skill }})
@@ -272,6 +284,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
+
       - name: Check the model credentials
         shell: bash
         env:
@@ -290,7 +309,7 @@ jobs:
           fi
 
       - name: Run the routing eval for ${{ matrix.skill }}
-        uses: amd/skillscope@main
+        uses: ./.skillscope-action
         with:
           command: routing
           # One skill in the room, named, so the score is about this skill alone
@@ -303,8 +322,6 @@ jobs:
             --output routing-report.json
             --keep-logs routing-logs
           skills: ${{ needs.discover.outputs.globs }}
-          skill: ${{ matrix.skill }}
-          version: ${{ inputs.version }}
           install-claude: "true"
 
       - name: Upload the routing report
@@ -338,6 +355,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
+
       - name: Check the model credentials
         shell: bash
         env:
@@ -356,17 +380,13 @@ jobs:
           fi
 
       - name: Run the behavioral cases for ${{ matrix.skill }}
-        uses: amd/skillscope@main
+        uses: ./.skillscope-action
         with:
           command: behavioral
           args: >-
             --skill '${{ matrix.skill }}'
             --output behavioral-report.json
           skills: ${{ needs.discover.outputs.globs }}
-          # This skill's own evals.json may pin the harness version its cases
-          # were written for, and this is the leg that runs them.
-          skill: ${{ matrix.skill }}
-          version: ${{ inputs.version }}
           install-claude: "true"
 
       - name: Upload the behavioral report

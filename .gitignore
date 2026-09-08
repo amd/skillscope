@@ -10,3 +10,6 @@ dist/
 
 # Reports and kept transcripts, written into the repo under test
 .skillscope/
+
+# Nested checkout of this repo, used by the reusable workflows in CI
+.skillscope-action/

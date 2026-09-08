@@ -4,23 +4,15 @@
 
 name: skillscope
 description: >-
-  Run one skillscope command against the calling repository, at the harness
-  version that repository pins.
+  Run one skillscope command against the calling repository, from this
+  action's own checkout.
 
-# The launcher, and nothing else.
+# Pin the tag you want to run, the same way you pin the reusable workflow:
 #
-# Reference it as `amd/skillscope@bootstrap` and leave it there: `bootstrap` is
-# a contract, not a release. All it does is set up Python and uv, work out
-# which build of the harness should grade this repo (an input, then
-# $SKILLSCOPE_VERSION, then the skill's evals.json, then its own ref), and exec
-# that build. Nothing here imports skillscope, so the launcher cannot break on
-# a payload version it predates -- which is what makes pinning it forever safe.
+#   - uses: amd/skillscope@v0.1.0
 #
-# Everything about the repo being tested is passed in: `version` and `skills`
-# here, and the rest through `args`, composed by the workflow that calls this.
-# A skill may pin its own harness build with `skillscope_version` in its
-# evals.json, which is a one-line reviewable diff next to the prompts it
-# affects.
+# The Python in that checkout is the harness. There is no second version to
+# resolve, and nothing here fetches a different ref.
 
 inputs:
   command:
@@ -30,36 +22,17 @@ inputs:
     description: "Further arguments for the subcommand, shell-quoted."
     required: false
     default: ""
-  version:
-    description: >-
-      Harness version to run. Wins over every other source. Leave empty to use
-      the skill's own pin, else this action's ref.
-    required: false
-    default: ""
-  skill:
-    description: >-
-      The skill being graded, so its evals.json `skillscope_version` is honored.
-      `skillscope select` emits this per matrix leg.
-    required: false
-    default: ""
   skills:
     description: >-
-      Globs naming the directories that are skills, comma-separated. The
-      launcher needs these to find a skill's version pin before it has fetched
-      anything, and passes them on to the harness. Default: ./*, every
-      directory at the repo root.
+      Globs naming the directories that are skills, comma-separated. Passed
+      through to the harness as --skills-dir. Default: ./*, every directory
+      at the repo root.
     required: false
     default: ""
   repo:
     description: "Root of the repo to test. Default: the workspace."
     required: false
     default: "."
-  source:
-    description: >-
-      Where to install the harness from: owner/repo, or a local path holding a
-      pyproject.toml. Defaults to this action's own repository.
-    required: false
-    default: ""
   stdin:
     description: "A file to feed the command on stdin (`select --changed` reads one)."
     required: false
@@ -85,7 +58,7 @@ inputs:
 
 outputs:
   version:
-    description: "The harness version that ran."
+    description: "The action ref that ran, when GitHub provides one."
     value: ${{ steps.skillscope.outputs.version }}
   stdout:
     description: >-
@@ -126,12 +99,6 @@ runs:
         SKILLSCOPE_ARGS: ${{ inputs.args }}
         SKILLSCOPE_REPO: ${{ inputs.repo }}
         SKILLSCOPE_SKILLS: ${{ inputs.skills }}
-        SKILLSCOPE_SOURCE: ${{ inputs.source || github.action_repository }}
-        SKILLSCOPE_REQUESTED: ${{ inputs.version }}
-        SKILLSCOPE_SKILL: ${{ inputs.skill }}
-        # Last resort: a repo that pins nothing runs whatever this launcher's
-        # own ref points at, so it works with no configuration at all.
-        SKILLSCOPE_DEFAULT: ${{ github.action_ref || 'main' }}
         SKILLSCOPE_STDIN: ${{ inputs.stdin }}
         SKILLSCOPE_ACTION_PATH: ${{ github.action_path }}
       run: |

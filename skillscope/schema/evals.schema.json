@@ -14,11 +14,6 @@
         { "type": "array", "items": { "type": "string" } }
       ]
     },
-    "skillscope_version": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Which build of skillscope grades this dataset: a tag, a branch, or a commit. Optional, and the skill owner's call -- pinning it here means the harness version that runs these prompts is bumped in the same file, and the same review, as the prompts themselves. It governs this skill's behavioral run. Routing installs several skills in one session and so cannot honor several pins at once; it runs at whatever version CI launched, which is also the fallback when this key is absent."
-    },
     "evaluations": {
       "type": "array",
       "minItems": 1,

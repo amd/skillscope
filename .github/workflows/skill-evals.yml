@@ -16,7 +16,7 @@ name: skill-evals
 #
 #   jobs:
 #     skill-evals:
-#       uses: amd/skillscope/.github/workflows/skill-evals.yml@bootstrap
+#       uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.0
 #       secrets: inherit
 #       with:
 #         skill_globs: skills/*
@@ -57,6 +57,12 @@ name: skill-evals
 # including the ones scoped to an environment -- which is the only way the
 # gated-hardware job can work, since an environment's secrets are readable only
 # inside the job that declares it.
+#
+# The `uses:` pin on this workflow is the harness that runs. GitHub does not
+# let a reusable workflow interpolate that pin into `uses: amd/skillscope@...`,
+# so each job checks out this repository at `job.workflow_sha` (the commit the
+# caller referenced) and runs the composite action from that tree. Pinning
+# `@v0.1.0` grades with v0.1.0; pinning `@v0.1.1` grades with v0.1.1.
 
 on:
   workflow_call:
@@ -187,12 +193,6 @@ on:
           hold a merge.
         type: boolean
         default: false
-      version:
-        description: >-
-          Harness version to run, overriding the pin in each skill's evals.json.
-          Blank runs the ref the caller referenced this workflow at.
-        type: string
-        default: ""
       coordinator_runner:
         description: >-
           JSON runs-on for the jobs that only run git and the CLI (discovery and
@@ -268,7 +268,6 @@ jobs:
       scoped: ${{ steps.plan.outputs.scoped }}
       scoped_any: ${{ steps.plan.outputs.scoped_any }}
       skipped: ${{ steps.plan.outputs.skipped }}
-      version: ${{ steps.plan.outputs.version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -276,12 +275,19 @@ jobs:
           # Need the merge base so `git diff` can see what the pull request changed.
           fetch-depth: 0
 
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
+
       # Repeated wherever a repo also gates on the structural checks, because
       # the two workflows can be scheduled in either order and an expensive run
       # should never start against a broken dataset. External URLs are left to
       # the job below; everything here is offline and deterministic.
       - name: Check every skill's structure
-        uses: amd/skillscope@bootstrap
+        uses: ./.skillscope-action
         with:
           command: structural
           args: >-
@@ -289,7 +295,6 @@ jobs:
             ${{ inputs.skill_files && format('--skill-files ''{0}''', inputs.skill_files) || '' }}
             ${{ inputs.skill_sections && format('--skill-sections ''{0}''', inputs.skill_sections) || '' }}
           skills: ${{ inputs.skill_globs }}
-          version: ${{ inputs.version }}
           python-version: ${{ inputs.python_version }}
 
       # A pull request is graded on what it changed; anything else grades what
@@ -343,7 +348,7 @@ jobs:
 
           # What this repo looks like. Planning is the only step that needs all
           # of it, so this is the one place that spells it out; `--skills-dir`
-          # goes to the action instead, because the launcher needs it too.
+          # goes to the action instead, because the action passes it through.
           for flag, name in (
               ("--routing-room", "ROUTING_ROOM"),
               ("--infra-paths", "INFRA_PATHS"),
@@ -370,13 +375,12 @@ jobs:
 
       - name: Select what to run
         id: select
-        uses: amd/skillscope@bootstrap
+        uses: ./.skillscope-action
         with:
           command: select
           args: ${{ steps.how.outputs.args }}
           skills: ${{ inputs.skill_globs }}
           stdin: changed-files.txt
-          version: ${{ inputs.version }}
           python-version: ${{ inputs.python_version }}
 
       - name: Emit the plan
@@ -405,7 +409,6 @@ jobs:
               # Emitted as the flag itself: every run job passes it through
               # verbatim rather than re-deriving the same boolean.
               "extended=" + ("--extended" if plan["extended"] else "--no-extended"),
-              "version=" + plan.get("version", ""),
           ]
           for key in ("default", "scoped", "skipped"):
               lines.append(key + "=" + json.dumps(plan[key]))
@@ -430,8 +433,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
+
       - name: Fetch every external reference
-        uses: amd/skillscope@bootstrap
+        uses: ./.skillscope-action
         with:
           command: structural
           args: >-
@@ -439,7 +449,6 @@ jobs:
             ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
             ${{ inputs.excluded_urls && format('--exclude-url ''{0}''', inputs.excluded_urls) || '' }}
           skills: ${{ inputs.skill_globs }}
-          version: ${{ inputs.version }}
           python-version: ${{ inputs.python_version }}
 
   # A routing decision is made from skill descriptions alone, so this needs no
@@ -453,6 +462,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -497,7 +513,7 @@ jobs:
           print("Exported: " + ", ".join(exported))
 
       - name: Run the routing eval
-        uses: amd/skillscope@bootstrap
+        uses: ./.skillscope-action
         with:
           command: routing
           # By default a wrong routing decision fails this job, the same way a
@@ -506,7 +522,7 @@ jobs:
           # fails on infrastructure problems (no case produced a decision, or
           # no skill activated anywhere).
           #
-          # The interpolated values are quoted because the launcher splits this
+          # The interpolated values are quoted because the action splits this
           # the way a shell would, and a comma-separated list a caller wrote
           # with spaces in it would otherwise arrive as several arguments.
           args: >-
@@ -517,7 +533,6 @@ jobs:
             --output routing-report.json
             --keep-logs routing-logs
           skills: ${{ inputs.skill_globs }}
-          version: ${{ inputs.version || needs.discover.outputs.version }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
           install-claude: "true"
@@ -548,6 +563,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -590,14 +612,11 @@ jobs:
           print("Exported: " + ", ".join(exported))
 
       - name: Run behavioral cases for ${{ matrix.skill }}
-        uses: amd/skillscope@bootstrap
+        uses: ./.skillscope-action
         with:
           command: behavioral
           args: --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
-          skill: ${{ matrix.skill }}
           skills: ${{ inputs.skill_globs }}
-          # The skill's own pin, resolved during selection.
-          version: ${{ inputs.version || matrix.version }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
           install-claude: "true"
@@ -621,6 +640,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Check out skillscope
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .skillscope-action
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -665,13 +691,11 @@ jobs:
           print("Exported: " + ", ".join(exported))
 
       - name: Run behavioral cases for ${{ matrix.skill }}
-        uses: amd/skillscope@bootstrap
+        uses: ./.skillscope-action
         with:
           command: behavioral
           args: --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
-          skill: ${{ matrix.skill }}
           skills: ${{ inputs.skill_globs }}
-          version: ${{ inputs.version || matrix.version }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
           install-claude: "true"
@@ -701,9 +725,9 @@ jobs:
           BEHAVIOR_WANTED: ${{ needs.discover.outputs.default_any }}
           SCOPED_WANTED: ${{ needs.discover.outputs.scoped_any }}
           SKIPPED: ${{ needs.discover.outputs.skipped }}
-          VERSION: ${{ needs.discover.outputs.version }}
+          HARNESS: ${{ job.workflow_ref }}
         run: |
-          echo "harness:         ${VERSION:-(the launcher's own ref)}"
+          echo "harness:         $HARNESS"
           echo "discover:        $DISCOVER"
           echo "routing:         $ROUTING (requested: $ROUTING_WANTED)"
           echo "behavioral:        $BEHAVIOR (requested: $BEHAVIOR_WANTED)"

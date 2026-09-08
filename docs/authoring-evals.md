@@ -123,26 +123,6 @@ decision: `--extended` (the default) includes it, `--no-extended` grades
 This is where a product repo keeps the prompts it wants graded in its own CI
 without every consumer of its skills paying for them.
 
-## Pinning the harness
-
-A dataset may name the build of skillscope that grades it:
-
-```json
-{
-  "skillscope_version": "v1.2.0",
-  "evaluations": ["..."]
-}
-```
-
-Anything git can resolve — a tag, a branch, a commit. It governs **this skill's
-behavioral run**, and it exists so the version that runs your prompts is bumped
-in the same file, and the same review, as the prompts themselves.
-
-It does not govern routing. Leave the key out and your behavioral run uses the
-workflow's `version` too, which is the right answer for most skills. The two
-places a version can live are in
-[usage.md](usage.md#versions-and-pinning).
-
 ## When JSON is not enough
 
 Two optional files sit beside the dataset.
