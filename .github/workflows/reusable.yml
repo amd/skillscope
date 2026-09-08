@@ -156,17 +156,23 @@ jobs:
       # are what every skillscope flag takes. Accept both, pass on one.
       - name: Read the skill list
         id: globs
-        shell: bash
+        shell: python
         env:
           SKILLS: ${{ inputs.skills }}
         run: |
-          globs=$(printf '%s' "$SKILLS" | tr '\n' ',' | tr -s ',' | sed 's/^,//; s/,$//')
-          if [ -z "$globs" ]; then
-            echo "error: 'skills' is empty, so there is nothing to grade." >&2
-            exit 1
-          fi
-          echo "skills: $globs"
-          echo "globs=$globs" >> "$GITHUB_OUTPUT"
+          import os
+          import sys
+
+          raw = os.environ.get("SKILLS", "")
+          globs = ",".join(
+              part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()
+          )
+          if not globs:
+              sys.exit("error: 'skills' is empty, so there is nothing to grade.")
+
+          print("skills: " + globs)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write("globs=" + globs + "\n")
 
       # The harness answers this, rather than a glob walk written here: which
       # directories are skills, and which of those ship a dataset, are questions
@@ -293,21 +299,23 @@ jobs:
           path: .skillscope-action
 
       - name: Check the model credentials
-        shell: bash
+        shell: python
         env:
           EXPECT_KEY: ${{ inputs.routing != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
         run: |
-          if [ "$EXPECT_KEY" != true ]; then
-            exit 0
-          fi
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "error: the model API key resolved to an empty value. GitHub" \
-                 "withholds secrets from pull requests opened from a fork, so" \
-                 "re-run this from a branch in the repository; otherwise check" \
-                 "that the secret is set and that the caller maps it onto" \
-                 "'api_key' (or passes 'secrets: inherit')." >&2
-            exit 1
-          fi
+          import os
+          import sys
+
+          if os.environ.get("EXPECT_KEY") != "true":
+              sys.exit(0)
+          if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+              sys.exit(
+                  "error: the model API key resolved to an empty value. GitHub "
+                  "withholds secrets from pull requests opened from a fork, so "
+                  "re-run this from a branch in the repository; otherwise check "
+                  "that the secret is set and that the caller maps it onto "
+                  "'api_key' (or passes 'secrets: inherit')."
+              )
 
       - name: Run the routing eval for ${{ matrix.skill }}
         uses: ./.skillscope-action
@@ -364,21 +372,23 @@ jobs:
           path: .skillscope-action
 
       - name: Check the model credentials
-        shell: bash
+        shell: python
         env:
           EXPECT_KEY: ${{ inputs.behavioral != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
         run: |
-          if [ "$EXPECT_KEY" != true ]; then
-            exit 0
-          fi
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "error: the model API key resolved to an empty value. GitHub" \
-                 "withholds secrets from pull requests opened from a fork, so" \
-                 "re-run this from a branch in the repository; otherwise check" \
-                 "that the secret is set and that the caller maps it onto" \
-                 "'api_key' (or passes 'secrets: inherit')." >&2
-            exit 1
-          fi
+          import os
+          import sys
+
+          if os.environ.get("EXPECT_KEY") != "true":
+              sys.exit(0)
+          if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+              sys.exit(
+                  "error: the model API key resolved to an empty value. GitHub "
+                  "withholds secrets from pull requests opened from a fork, so "
+                  "re-run this from a branch in the repository; otherwise check "
+                  "that the secret is set and that the caller maps it onto "
+                  "'api_key' (or passes 'secrets: inherit')."
+              )
 
       - name: Run the behavioral cases for ${{ matrix.skill }}
         uses: ./.skillscope-action
@@ -407,7 +417,7 @@ jobs:
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     steps:
       - name: Verify the results
-        shell: bash
+        shell: python
         env:
           DISCOVER: ${{ needs.discover.result }}
           SKILLS: ${{ needs.discover.outputs.count }}
@@ -418,33 +428,37 @@ jobs:
           ROUTING_MODE: ${{ inputs.routing }}
           BEHAVIORAL_MODE: ${{ inputs.behavioral }}
         run: |
-          if [ "$DISCOVER" != success ]; then
-            echo "The discover job did not succeed ($DISCOVER), so nothing was graded." >&2
-            exit 1
-          fi
+          import os
+          import sys
 
-          echo "skills graded: $SKILLS"
-          printf '%-12s %-10s %s\n' step mode result
-          printf '%-12s %-10s %s\n' structural "$STRUCTURAL_MODE" "$STRUCTURAL"
-          printf '%-12s %-10s %s\n' routing    "$ROUTING_MODE"    "$ROUTING"
-          printf '%-12s %-10s %s\n' behavioral "$BEHAVIORAL_MODE" "$BEHAVIORAL"
+          discover = os.environ["DISCOVER"]
+          if discover != "success":
+              sys.exit(
+                  f"The discover job did not succeed ({discover}), so nothing was graded."
+              )
+
+          steps = [
+              (name, os.environ[name.upper() + "_MODE"], os.environ[name.upper()])
+              for name in ("structural", "routing", "behavioral")
+          ]
+
+          print("skills graded: " + os.environ.get("SKILLS", ""))
+          print(f"{'step':<12} {'mode':<10} result")
+          for name, mode, result in steps:
+              print(f"{name:<12} {mode:<10} {result}")
 
           # A required step that failed fails the run here as well as on its own
           # job, so this one check is the whole answer. A skipped step is not
           # judged: either it is off, or the structural checks it waited on
           # failed and have already said so.
-          failed=0
-          check() {
-            if [ "$2" = required ] && [ "$3" != success ] && [ "$3" != skipped ]; then
-              echo "::error::$1 is required and did not pass ($3)."
-              failed=1
-            elif [ "$2" != required ] && [ "$3" = failure ]; then
-              echo "::warning::$1 failed, and is $2, so it does not fail the run."
-            fi
-          }
-          check structural "$STRUCTURAL_MODE" "$STRUCTURAL"
-          check routing "$ROUTING_MODE" "$ROUTING"
-          check behavioral "$BEHAVIORAL_MODE" "$BEHAVIORAL"
-          [ "$failed" -eq 0 ] || exit 1
+          failed = False
+          for name, mode, result in steps:
+              if mode == "required" and result not in ("success", "skipped"):
+                  print(f"::error::{name} is required and did not pass ({result}).")
+                  failed = True
+              elif mode != "required" and result == "failure":
+                  print(f"::warning::{name} failed, and is {mode}, so it does not fail the run.")
 
-          echo "Every required step passed."
+          if failed:
+              sys.exit(1)
+          print("Every required step passed.")

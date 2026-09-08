@@ -84,10 +84,29 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
+    # Python, not bash: a composite action must name a shell on every `run:`, so
+    # it cannot fall back to the runner's default the way a workflow step can.
+    # A leg lands on whatever platform its skill asked for, and a self-hosted
+    # Windows runner need not have bash -- naming it here is what turns that
+    # into `bash: command not found` on a step that is really about npm.
     - name: Install the claude CLI
       if: inputs.install-claude == 'true'
-      shell: bash
-      run: npm install -g @anthropic-ai/claude-code
+      shell: python
+      run: |
+        import shutil
+        import subprocess
+        import sys
+
+        # `npm` is `npm.cmd` on Windows, and only a PATH lookup finds it.
+        npm = shutil.which("npm")
+        if npm is None:
+            sys.exit(
+                "error: npm is not on PATH. The `Set up Node` step before this "
+                "one should have put it there."
+            )
+        sys.exit(
+            subprocess.run([npm, "install", "-g", "@anthropic-ai/claude-code"]).returncode
+        )
 
     # One step, in Python, because the same launcher runs on Linux, Windows,
     # and macOS runners and a shell script would need three of itself.
