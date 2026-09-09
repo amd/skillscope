@@ -54,6 +54,8 @@ deliberately did not request.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from . import config, datasets
@@ -63,6 +65,57 @@ from . import config, datasets
 # silent way to stop selecting runs for it.
 DATASET_SUFFIX = "/" + datasets.DATASET_RELPATH.as_posix()
 EXTENDED_SUFFIX = "/" + datasets.EXTENDED_DATASET_RELPATH.as_posix()
+
+
+def changed_paths(base: str, head: str) -> list[str]:
+    """What a branch changed, given the two commits a pull request names.
+
+    ``git diff base head`` answers a different question -- how those two trees
+    differ -- and the difference matters as soon as the base branch moves on
+    without the branch. Everything merged into the base since the branch left
+    it comes back in that diff, in reverse, as though this branch had touched
+    it. One skill's pull request then re-runs its neighbours, and a base commit
+    that happened to touch an infra path re-runs the entire catalog.
+
+    So diff from the merge base, which is the only commit both sides agree on
+    and so the only one that makes the answer "what did this branch do".
+
+    Falls back to the plain diff when there is no common ancestor to be found
+    -- a clone shallow enough not to contain one, or histories that really are
+    unrelated -- because selecting too much costs a slow run, and selecting too
+    little ships an untested change.
+    """
+    root = config.active().root
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    fork_point = git("merge-base", base, head)
+    if fork_point.returncode == 0 and fork_point.stdout.strip():
+        base = fork_point.stdout.strip()
+    else:
+        print(
+            f"warning: no merge base for {base} and {head}, so selection is "
+            "falling back to the plain diff between them. It may name files "
+            "this branch never touched.\n"
+            f"{fork_point.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+    diff = git("diff", "--name-only", base, head)
+    if diff.returncode != 0:
+        raise SystemExit(
+            f"error: could not diff {base}..{head} in {root}. CI needs the "
+            "history of both commits to work out what changed, so check out "
+            "with fetch-depth: 0.\n" + diff.stderr.strip()
+        )
+    return [line.strip() for line in diff.stdout.splitlines() if line.strip()]
 
 
 def infra_paths() -> set[str]:

@@ -216,7 +216,7 @@ one runner per skill:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.2
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
@@ -280,7 +280,7 @@ pays for.
 ```yaml
 jobs:
   skill-evals:
-    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.1
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.2
     secrets: inherit
     with:
       routing_room: my-skill,its-neighbour
@@ -295,7 +295,7 @@ workflow file documents every one.
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
-- uses: amd/skillscope@v0.1.1
+- uses: amd/skillscope@v0.1.2
   with:
     command: structural
 ```
@@ -304,7 +304,20 @@ Deciding what to run by hand is also possible: `select` emits the plan for a
 change as JSON.
 
 ```bash
-git diff --name-only main HEAD | skillscope select --changed
+skillscope select --since main HEAD
+```
+
+`--since` takes the two commits a pull request names and works the changed
+paths out from their merge base, so a branch is planned for what it changed
+rather than for how it differs from a base that has moved on without it.
+Without that, everything merged into the base since the branch left it comes
+back in the diff, and a base commit touching an [infra
+path](#configuring-the-repo-under-test) re-runs the whole catalog.
+
+Pass a list of paths instead when it was worked out some other way:
+
+```bash
+git diff --name-only main...HEAD | skillscope select --changed
 ```
 
 ## Versions
@@ -315,7 +328,7 @@ the tag you want to run:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.1
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.2
 ```
 
 That tag's checkout is what grades your skills. Bump the ref in that one line

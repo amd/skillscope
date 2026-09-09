@@ -25,6 +25,7 @@ import json
 import os
 import re
 import runpy
+import subprocess
 import tempfile
 import time
 import unittest
@@ -735,6 +736,15 @@ class TestCommands(unittest.TestCase):
         args = cli.build_parser().parse_args(["select", "--all"])
         self.assertFalse(hasattr(args, "timeout"))
 
+    def test_select_takes_a_commit_pair_or_a_list_of_paths_but_not_both(self) -> None:
+        args = cli.build_parser().parse_args(["select", "--since", "base", "head"])
+        self.assertEqual(args.since, ["base", "head"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(
+                    ["select", "--since", "base", "head", "--changed"]
+                )
+
 
 class TestDeadline(unittest.TestCase):
     """The command-level --timeout, distinct from a routing case's own cap."""
@@ -915,6 +925,109 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(
             json.loads(plan["default"][0]["runner"]), ["self-hosted", "gpu", "Linux"]
         )
+
+
+class TestWhatABranchChanged(unittest.TestCase):
+    """Selection is planned from the merge base, not from the base branch tip.
+
+    A pull request names two commits, and the difference between their trees is
+    not the same question as what the branch did. As soon as the base moves on
+    without the branch, everything merged into it comes back in that diff, in
+    reverse -- so a change to one skill re-runs its neighbours, and a base
+    commit that touched an infra path re-runs the whole catalog.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.skill("beta", dataset=tier0_dataset("beta"))
+        self.repo.activate(
+            routing_room="alpha,beta",
+            infra_paths=".github/workflows/evals.yml",
+        )
+        self.git("init", "--quiet", "--initial-branch", "main")
+        self.git("config", "user.email", "selftest@example.invalid")
+        self.git("config", "user.name", "skillscope selftest")
+        self.base = self.commit("everything so far")
+
+    def git(self, *args: str) -> str:
+        done = subprocess.run(
+            ["git", "-C", str(self.repo.root), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        return done.stdout.strip()
+
+    def commit(self, message: str) -> str:
+        self.git("add", "--all")
+        self.git("commit", "--quiet", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def write(self, relative: str, text: str) -> None:
+        path = self.repo.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def branch_behind_an_advanced_base(self) -> tuple[str, str]:
+        """A branch off `main`, with `main` moving on after it left.
+
+        Returns the base branch's new tip and the branch's head -- the pair a
+        pull request event hands CI.
+        """
+        self.git("checkout", "--quiet", "-b", "touches-alpha")
+        self.write("alpha/SKILL.md", "---\nname: alpha\ndescription: Does alpha things now.\n---\n")
+        head = self.commit("edit one skill")
+
+        self.git("checkout", "--quiet", "main")
+        self.write(".github/workflows/evals.yml", "name: evals\n")
+        base = self.commit("something else lands on the base branch")
+        return base, head
+
+    def test_a_branch_is_planned_for_its_own_commits(self) -> None:
+        base, head = self.branch_behind_an_advanced_base()
+        self.assertEqual(select_module.changed_paths(base, head), ["alpha/SKILL.md"])
+
+    def test_the_base_branchs_own_commits_are_not_this_branchs(self) -> None:
+        # The regression this pins: the plain diff between the two commits
+        # names a file only the base branch touched, and that file is an infra
+        # path, so planning from it re-runs every skill in the repo.
+        base, head = self.branch_behind_an_advanced_base()
+        self.assertIn(
+            ".github/workflows/evals.yml",
+            self.git("diff", "--name-only", base, head).splitlines(),
+        )
+        self.assertEqual(
+            select_module.select_from_changes(set(select_module.changed_paths(base, head))),
+            ["alpha"],
+        )
+
+    def test_a_branch_that_does_touch_an_infra_path_still_re_runs_everything(self) -> None:
+        self.git("checkout", "--quiet", "-b", "touches-the-harness")
+        self.write(".github/workflows/evals.yml", "name: evals\n")
+        head = self.commit("edit the harness")
+        self.assertEqual(
+            select_module.select_from_changes(
+                set(select_module.changed_paths(self.base, head))
+            ),
+            ["alpha", "beta"],
+        )
+
+    def test_unrelated_histories_fall_back_to_the_plain_diff(self) -> None:
+        # No common ancestor to diff from -- a clone too shallow to hold one,
+        # or histories that really are unrelated. Selecting too much costs a
+        # slow run; selecting too little ships an untested change.
+        self.git("checkout", "--quiet", "--orphan", "elsewhere")
+        self.git("rm", "-rq", "--cached", ".")
+        self.write("beta/SKILL.md", "---\nname: beta\ndescription: Does beta things now.\n---\n")
+        head = self.commit("a history of its own")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            changed = select_module.changed_paths(self.base, head)
+        self.assertIn("no merge base", stderr.getvalue())
+        self.assertIn("beta/SKILL.md", changed)
 
 
 class TestCaseExpectations(unittest.TestCase):
