@@ -16,7 +16,7 @@ name: skill-evals
 #
 #   jobs:
 #     skill-evals:
-#       uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.1
+#       uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.2
 #       secrets: inherit
 #       with:
 #         skill_globs: skills/*
@@ -62,7 +62,7 @@ name: skill-evals
 # let a reusable workflow interpolate that pin into `uses: amd/skillscope@...`,
 # so each job checks out this repository at `job.workflow_sha` (the commit the
 # caller referenced) and runs the composite action from that tree. Pinning
-# `@v0.1.1` grades with v0.1.1, `@main` grades with main, and a branch grades
+# `@v0.1.2` grades with v0.1.2, `@main` grades with main, and a branch grades
 # with that branch -- so there is no release ritual and nothing to keep in step.
 
 on:
@@ -273,7 +273,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          # Need the merge base so `git diff` can see what the pull request changed.
+          # Both commits' full history, so selection can find their merge base
+          # and diff what the pull request changed from there.
           fetch-depth: 0
 
       - name: Check out skillscope
@@ -302,6 +303,10 @@ jobs:
       # it was asked for. Written in Python so the arguments are quoted rather
       # than pasted -- a label like `don't merge` would otherwise arrive at the
       # CLI in pieces.
+      #
+      # Which commits changed what is left to `select --since`, along with
+      # every other decision: it diffs from the merge base, so a branch whose
+      # base has moved on is still planned for what the branch did.
       - name: Work out how to select
         id: how
         shell: python
@@ -323,22 +328,18 @@ jobs:
         run: |
           import os
           import shlex
-          import subprocess
 
           event = os.environ["EVENT"]
           skills = os.environ.get("SKILLS", "").strip()
           base, head = os.environ.get("BASE", ""), os.environ.get("HEAD", "")
           extended = os.environ["EXTENDED"]
 
-          changed = ""
           if event == "pull_request" and base:
-              changed = subprocess.run(
-                  ["git", "diff", "--name-only", base, head],
-                  check=True,
-                  capture_output=True,
-                  text=True,
-              ).stdout
-              args = ["--changed", "--labels", os.environ.get("LABELS", ""), extended]
+              args = [
+                  "--since", base, head,
+                  "--labels", os.environ.get("LABELS", ""),
+                  extended,
+              ]
               if os.environ.get("IGNORE_GATES"):
                   args.append("--ignore-gates")
           else:
@@ -363,10 +364,6 @@ jobs:
               if value:
                   args += [flag, value]
 
-          with open("changed-files.txt", "w", encoding="utf-8") as handle:
-              handle.write(changed)
-          print("Changed files:\n" + (changed or "(none)"))
-
           # Quoted rather than pasted: a JSON label array and a pull-request
           # label like `don't merge` both have to survive the trip intact.
           line = "args=" + " ".join(shlex.quote(a) for a in args)
@@ -381,7 +378,6 @@ jobs:
           command: select
           args: ${{ steps.how.outputs.args }}
           skills: ${{ inputs.skill_globs }}
-          stdin: changed-files.txt
           python-version: ${{ inputs.python_version }}
 
       - name: Emit the plan

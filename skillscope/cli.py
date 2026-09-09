@@ -53,7 +53,10 @@ Usage::
     skillscope routing --only qwen-on-mi300x --keep-logs eval-logs
 
     # what CI should run for a change
-    git diff --name-only BASE HEAD | skillscope select --changed
+    skillscope select --since BASE HEAD
+
+    # the same, from a list of paths worked out some other way
+    git diff --name-only BASE...HEAD | skillscope select --changed
 
 Reports go to stdout as markdown, to ``$GITHUB_STEP_SUMMARY`` under Actions,
 and to a JSON artifact under ``.skillscope/runs/`` in the repo under test.
@@ -228,6 +231,20 @@ def cmd_template(args: argparse.Namespace) -> int:
     return 0
 
 
+def _changed_for_select(args: argparse.Namespace) -> set[str]:
+    """The changed paths to plan from, however the caller chose to say them."""
+    if args.since:
+        lines = select_module.changed_paths(*args.since)
+        # The plan is the only thing on stdout, so what it was decided from
+        # goes to stderr, where a CI log still shows it.
+        print("Changed files:", file=sys.stderr)
+        for path in lines or ["(none)"]:
+            print(f"  {path}", file=sys.stderr)
+    else:
+        lines = sys.stdin.read().splitlines()
+    return {line.strip().replace("\\", "/") for line in lines if line.strip()}
+
+
 def cmd_select(args: argparse.Namespace) -> int:
     available = datasets.skills_with_datasets()
     if args.all:
@@ -240,11 +257,7 @@ def cmd_select(args: argparse.Namespace) -> int:
             return 1
         skills, needs_routing = requested, True
     else:
-        changed = {
-            line.strip().replace("\\", "/")
-            for line in sys.stdin.read().splitlines()
-            if line.strip()
-        }
+        changed = _changed_for_select(args)
         skills = select_module.select_from_changes(changed)
         needs_routing = select_module.routing_needed(changed, args.extended)
 
@@ -747,6 +760,17 @@ def build_parser() -> argparse.ArgumentParser:
     mode = select_parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--all", action="store_true", help="Every skill with a dataset.")
     mode.add_argument("--changed", action="store_true", help="Read changed paths from stdin.")
+    mode.add_argument(
+        "--since",
+        nargs=2,
+        metavar=("BASE", "HEAD"),
+        help=(
+            "The two commits a pull request names. Changed paths are worked "
+            "out from their merge base, so a branch is planned for what it "
+            "changed rather than for how it differs from a base that has moved "
+            "on. Both commits' history has to be in the checkout."
+        ),
+    )
     mode.add_argument(
         "--names", metavar="A,B,C", help="An explicit comma-separated skill list."
     )

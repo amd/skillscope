@@ -5,7 +5,7 @@
 """Run one skillscope command from the composite action's own checkout.
 
 Callers pin a tag on the action or on a reusable workflow in this repo
-(``amd/skillscope@v0.1.1``, ``.../reusable.yml@v0.1.1``). This script installs
+(``amd/skillscope@v0.1.2``, ``.../reusable.yml@v0.1.2``). This script installs
 *that* checkout with ``uvx`` and execs the command. It does not fetch some
 other ref: the ``uses:`` pin is the harness.
 
@@ -91,7 +91,7 @@ def main() -> int:
     if not (source / "pyproject.toml").is_file():
         raise SystemExit(
             f"error: {source} has no pyproject.toml. The action must run from "
-            "a skillscope checkout (for example amd/skillscope@v0.1.1)."
+            "a skillscope checkout (for example amd/skillscope@v0.1.2)."
         )
     version = packaged_version(source) or "unknown"
 
