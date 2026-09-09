@@ -316,22 +316,6 @@ jobs:
       federation_workspace_id: wrkspc_...   # only if the rule spans workspaces
 ```
 
-Those are identifiers rather than credentials — an exchange only succeeds
-alongside a JWT GitHub signed for your repository — so they belong in the
-workflow file. `scoped_federation_*` covers the gated pool, which has its own
-rule for the same reason it has its own key.
-
-Two limits: federation cannot be combined with `api_base_url` or
-`api_custom_headers`, because the minted token is only good at
-`api.anthropic.com`, and fork pull requests cannot federate at all, because
-GitHub withholds the OIDC token from them.
-
-Scope the rule to a subject prefix of `repo:my-org/my-repo:*` — the last segment
-of `sub` varies by event, and is `environment:<name>` for the gated pool — and
-pin `repository` and `repository_owner` under its claims. Give it a token
-lifetime that covers a whole behavioral leg, since the token is minted once per
-job.
-
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
