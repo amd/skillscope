@@ -216,7 +216,7 @@ one runner per skill:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.2
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
     secrets:
       api_key: ${{ secrets.ANTHROPIC_API_KEY }}
     with:
@@ -280,7 +280,7 @@ pays for.
 ```yaml
 jobs:
   skill-evals:
-    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.2
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.3
     secrets: inherit
     with:
       routing_room: my-skill,its-neighbour
@@ -292,10 +292,50 @@ another, or when a behavioral run needs a GPU. Its inputs are the table in
 [Configuring the repo under test](#configuring-the-repo-under-test), and the
 workflow file documents every one.
 
+### Authenticating without a key
+
+`skill-evals.yml` can authenticate by [workload identity
+federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation)
+instead of holding a model key: name a rule and each graded job trades its own
+GitHub OIDC token for a short-lived Anthropic one.
+
+```yaml
+jobs:
+  skill-evals:
+    permissions:
+      contents: read
+      # Required, and only grantable here: a called workflow can only lower
+      # what its caller passed down.
+      id-token: write
+    uses: amd/skillscope/.github/workflows/skill-evals.yml@v0.1.3
+    with:
+      api_key_secret: ""
+      federation_rule_id: fdrl_...
+      federation_organization_id: 00000000-0000-0000-0000-000000000000
+      federation_service_account_id: svac_...
+      federation_workspace_id: wrkspc_...   # only if the rule spans workspaces
+```
+
+Those are identifiers rather than credentials — an exchange only succeeds
+alongside a JWT GitHub signed for your repository — so they belong in the
+workflow file. `scoped_federation_*` covers the gated pool, which has its own
+rule for the same reason it has its own key.
+
+Two limits: federation cannot be combined with `api_base_url` or
+`api_custom_headers`, because the minted token is only good at
+`api.anthropic.com`, and fork pull requests cannot federate at all, because
+GitHub withholds the OIDC token from them.
+
+Scope the rule to a subject prefix of `repo:my-org/my-repo:*` — the last segment
+of `sub` varies by event, and is `environment:<name>` for the gated pool — and
+pin `repository` and `repository_owner` under its claims. Give it a token
+lifetime that covers a whole behavioral leg, since the token is minted once per
+job.
+
 To run a single command instead of a pipeline, use the action directly:
 
 ```yaml
-- uses: amd/skillscope@v0.1.2
+- uses: amd/skillscope@v0.1.3
   with:
     command: structural
 ```
@@ -328,7 +368,7 @@ the tag you want to run:
 ```yaml
 jobs:
   evals:
-    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.2
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
 ```
 
 That tag's checkout is what grades your skills. Bump the ref in that one line
