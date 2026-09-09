@@ -39,6 +39,7 @@ from skillscope import (
     behavior,
     cli,
     config,
+    credentials,
     datasets,
     deadline,
     references,
@@ -786,6 +787,144 @@ class TestDeadline(unittest.TestCase):
             deadline.use(previous)
         self.assertFalse(outcome.passed)
         self.assertIn("behavioral exceeded --timeout", outcome.error)
+
+
+class TestCredentialResolution(unittest.TestCase):
+    """Which credential a graded job runs with, and what it refuses to do."""
+
+    # What a runner exposes to a job that was granted `id-token: write`.
+    RUNNER = {
+        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://pipelines.example/idtoken?api-version=2.0",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "runner-token",
+    }
+    RULE = {
+        "FEDERATION_RULE_ID": "fdrl_rule",
+        "FEDERATION_ORGANIZATION_ID": "0000-org",
+        "FEDERATION_SERVICE_ACCOUNT_ID": "svac_account",
+    }
+
+    def recorder(self, calls: list[dict]):
+        """A stand-in for both HTTP calls the federation path makes."""
+
+        def fetch(url, *, data=None, headers=None):
+            calls.append({"url": url, "data": data, "headers": dict(headers or {})})
+            if "idtoken" in url:
+                return json.dumps({"value": "the.jwt.value"}).encode("utf-8")
+            return json.dumps(
+                {"access_token": "sk-ant-oat01-minted", "expires_in": 600}
+            ).encode("utf-8")
+
+        return fetch
+
+    def test_a_key_is_exported_as_the_key(self) -> None:
+        exported = credentials.resolve({"API_KEY": " sk-ant-a-key ", "SECRET_NAME": "K"})
+        self.assertEqual(exported, {"ANTHROPIC_API_KEY": "sk-ant-a-key"})
+
+    def test_a_gateway_key_carries_its_base_url_and_headers(self) -> None:
+        exported = credentials.resolve(
+            {
+                "API_KEY": "the-key",
+                "SECRET_NAME": "K",
+                "API_BASE_URL": "https://gateway.example/Anthropic",
+                "API_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: $API_KEY",
+            }
+        )
+        self.assertEqual(exported["ANTHROPIC_BASE_URL"], "https://gateway.example/Anthropic")
+        self.assertEqual(
+            exported["ANTHROPIC_CUSTOM_HEADERS"], "Ocp-Apim-Subscription-Key: the-key"
+        )
+
+    def test_an_empty_secret_names_the_secret_and_the_environment(self) -> None:
+        with self.assertRaises(credentials.CredentialError) as raised:
+            credentials.resolve(
+                {"API_KEY": "", "SECRET_NAME": "MY_KEY", "ENVIRONMENT": "behavioral-instinct"}
+            )
+        self.assertIn("MY_KEY", str(raised.exception))
+        self.assertIn("behavioral-instinct", str(raised.exception))
+
+    def test_federation_trades_an_oidc_token_for_a_bearer_token(self) -> None:
+        calls: list[dict] = []
+        exported = credentials.resolve(
+            # A caller that federates one leg keeps `api_key_secret` at its
+            # default, so the key is present and must still be ignored.
+            {**self.RUNNER, **self.RULE, "API_KEY": "a-key-that-must-not-win"},
+            fetch=self.recorder(calls),
+        )
+        self.assertEqual(exported, {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-minted"})
+
+        asked, traded = calls
+        self.assertIn("audience=https%3A%2F%2Fapi.anthropic.com", asked["url"])
+        self.assertEqual(asked["headers"]["Authorization"], "Bearer runner-token")
+        self.assertEqual(traded["url"], credentials.TOKEN_URL)
+        body = json.loads(traded["data"])
+        self.assertEqual(body["grant_type"], credentials.GRANT_TYPE)
+        self.assertEqual(body["assertion"], "the.jwt.value")
+        self.assertEqual(body["federation_rule_id"], "fdrl_rule")
+
+    def test_a_workspace_is_sent_only_when_the_caller_named_one(self) -> None:
+        calls: list[dict] = []
+        credentials.resolve({**self.RUNNER, **self.RULE}, fetch=self.recorder(calls))
+        self.assertNotIn("workspace_id", json.loads(calls[1]["data"]))
+
+        calls.clear()
+        credentials.resolve(
+            {**self.RUNNER, **self.RULE, "FEDERATION_WORKSPACE_ID": "wrkspc_one"},
+            fetch=self.recorder(calls),
+        )
+        self.assertEqual(json.loads(calls[1]["data"])["workspace_id"], "wrkspc_one")
+
+    def test_a_job_without_the_permission_is_told_which_one(self) -> None:
+        with self.assertRaises(credentials.CredentialError) as raised:
+            credentials.resolve(dict(self.RULE), fetch=self.recorder([]))
+        self.assertIn("id-token: write", str(raised.exception))
+
+    def test_federation_needs_the_whole_triple(self) -> None:
+        with self.assertRaises(credentials.CredentialError) as raised:
+            credentials.resolve(
+                {**self.RUNNER, "FEDERATION_RULE_ID": "fdrl_rule"}, fetch=self.recorder([])
+            )
+        self.assertIn("federation_organization_id", str(raised.exception))
+        self.assertIn("federation_service_account_id", str(raised.exception))
+
+    def test_federation_refuses_to_hand_a_gateway_an_anthropic_token(self) -> None:
+        for contradiction in ("API_BASE_URL", "API_CUSTOM_HEADERS"):
+            with self.subTest(contradiction=contradiction):
+                with self.assertRaises(credentials.CredentialError) as raised:
+                    credentials.resolve(
+                        {**self.RUNNER, **self.RULE, contradiction: "https://gateway.example"},
+                        fetch=self.recorder([]),
+                    )
+                self.assertIn("api.anthropic.com", str(raised.exception))
+
+    def test_a_refused_exchange_says_where_the_reason_is_recorded(self) -> None:
+        def refuse(url, *, data=None, headers=None):
+            if "idtoken" in url:
+                return json.dumps({"value": "the.jwt.value"}).encode("utf-8")
+            raise credentials.CredentialError(f"{url} returned 401: Authentication failed")
+
+        with self.assertRaises(credentials.CredentialError) as raised:
+            credentials.resolve({**self.RUNNER, **self.RULE}, fetch=refuse)
+        self.assertIn("authentication history", str(raised.exception))
+        self.assertIn("match_subject_prefix", str(raised.exception))
+
+    def test_the_minted_token_is_masked_before_anything_can_log_it(self) -> None:
+        calls: list[dict] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            github_env = Path(tmp) / "github.env"
+            github_env.touch()
+            environment = {**self.RUNNER, **self.RULE, "GITHUB_ENV": str(github_env)}
+            stdout = io.StringIO()
+            with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+                credentials, "_http", self.recorder(calls)
+            ), contextlib.redirect_stdout(stdout):
+                self.assertEqual(credentials.main(), 0)
+
+            printed = stdout.getvalue()
+            self.assertIn("::add-mask::sk-ant-oat01-minted", printed)
+            written = github_env.read_text(encoding="utf-8")
+            self.assertIn("ANTHROPIC_AUTH_TOKEN", written)
+            self.assertIn("sk-ant-oat01-minted", written)
+            self.assertNotIn("ANTHROPIC_API_KEY", written)
 
 
 class TestActionLauncher(unittest.TestCase):
