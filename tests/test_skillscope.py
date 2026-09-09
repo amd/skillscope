@@ -46,7 +46,7 @@ from skillscope import (
     routing,
     structure,
 )
-from skillscope import select as select_module
+from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -925,6 +925,33 @@ class TestCredentialResolution(unittest.TestCase):
             self.assertIn("ANTHROPIC_AUTH_TOKEN", written)
             self.assertIn("sk-ant-oat01-minted", written)
             self.assertNotIn("ANTHROPIC_API_KEY", written)
+
+    def test_running_credentials_as_a_script_does_not_shadow_stdlib_select(self) -> None:
+        # Graded jobs run this file by path, which puts the package directory on
+        # sys.path. A module named select.py would shadow the stdlib and this
+        # import would die.
+        import sys
+
+        script = Path(credentials.__file__).resolve()
+        with tempfile.TemporaryDirectory() as tmp:
+            github_env = Path(tmp) / "github.env"
+            github_env.touch()
+            completed = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env={
+                    **os.environ,
+                    "API_KEY": "sk-ant-a-key",
+                    "SECRET_NAME": "K",
+                    "GITHUB_ENV": str(github_env),
+                    "FEDERATION_RULE_ID": "",
+                },
+            )
+        self.assertEqual(
+            completed.returncode, 0, completed.stderr or completed.stdout
+        )
 
 
 class TestActionLauncher(unittest.TestCase):

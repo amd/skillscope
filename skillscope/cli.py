@@ -73,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import behavior, config, datasets, deadline, references, routing, structure
-from . import select as select_module
+from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
 # Where JSON reports land inside the repo under test. One gitignored directory
