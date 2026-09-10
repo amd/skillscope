@@ -835,13 +835,28 @@ def render_markdown(summary: dict) -> str:
         shown = ", ".join(f"`{name}`" for name in extras[:12])
         if len(extras) > 12:
             shown += f", and {len(extras) - 12} more"
+        # An isolated config dir has already taken the runner's own skills out
+        # of the session, so whatever still shows up ships with the agent CLI
+        # and no config change removes it. Naming the wrong source sends the
+        # reader after a fix they have already applied.
+        if meta.get("isolated_config_dir"):
+            source = (
+                "This run already used an isolated config dir, so they ship with "
+                "the agent CLI rather than coming from the runner's own config, "
+                "and no config change removes them. Read the scores below with "
+                "them in the room."
+            )
+        else:
+            source = (
+                "They come from the runner's own config (usually "
+                "`~/.claude/skills`). Set `ANTHROPIC_API_KEY` so the run can use "
+                "an isolated config dir, or remove them from the runner."
+            )
         lines += [
             "",
             f"> **Warning:** {len(extras)} skill(s) beyond the routing set were "
-            f"registered for these sessions ({shown}). They come from the "
-            f"runner's own config (usually `~/.claude/skills`) and compete for "
-            f"every prompt, so the room measured here is not the one that was "
-            f"asked for. Set `ANTHROPIC_API_KEY` so the run can use an isolated "
-            f"config dir, or remove them from the runner.",
+            f"registered for these sessions ({shown}) and competed for every "
+            f"prompt, so the room measured here is not the one that was asked "
+            f"for. {source}",
         ]
     return "\n".join(lines) + "\n"
