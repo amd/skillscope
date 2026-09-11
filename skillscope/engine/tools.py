@@ -77,13 +77,26 @@ def normalize_listing(stdout: str) -> list[str]:
     return sorted(paths)
 
 
+class ListingFailed(RuntimeError):
+    """The sandbox could not be listed, which is not the same as it being empty.
+
+    Returning an empty list here would make a broken sandbox look exactly like
+    an idle agent: `files_exist` fails, and the judge -- which builds its
+    evidence from the same listing -- reports that nothing was produced. Both
+    read as the skill's fault. Raising keeps the two apart.
+    """
+
+
 async def list_paths() -> list[str]:
     """Files in the sandbox working directory, as relative POSIX-style paths."""
     prefix = await shell_prefix()
     listing = WINDOWS_LIST if prefix == WINDOWS_SHELL else POSIX_LIST
     result = await run(listing)
     if not result.success:
-        return []
+        raise ListingFailed(
+            f"`{listing}` failed in the sandbox (exit {result.returncode}). "
+            f"stderr: {result.stderr.strip()[:200] or '(none)'}"
+        )
     return normalize_listing(result.stdout)
 
 
@@ -203,7 +216,10 @@ def list_files():
             Returns:
                 One relative path per line.
             """
-            paths = await list_paths()
+            try:
+                paths = await list_paths()
+            except ListingFailed as exc:
+                return f"could not list the directory: {exc}"
             return "\n".join(paths) if paths else "(no files)"
 
         return execute
