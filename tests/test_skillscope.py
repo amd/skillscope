@@ -336,6 +336,20 @@ class TestMachineSchema(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertNotIn("enum", self.schema["properties"][key]["items"])
 
+    def test_a_retired_key_says_what_replaced_it(self) -> None:
+        # "unknown key" alone sends the reader to the schema to work out that
+        # the key used to be valid and what took its place.
+        self.repo.skill(
+            "old-key-skill",
+            dataset=tier0_dataset("oldkey"),
+            machine="runner_type: instinct\n",
+        )
+        with self.assertRaises(SystemExit) as raised:
+            datasets.machine_plan("old-key-skill")
+        message = str(raised.exception)
+        self.assertIn("runner_type", message)
+        self.assertIn("`labels`", message)
+
     def test_every_machine_yml_in_the_repo_resolves(self) -> None:
         for skill in datasets.declared_skills():
             with self.subTest(skill=skill):

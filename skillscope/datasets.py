@@ -537,6 +537,21 @@ def tier0_errors(skill: str, cases: list[Case]) -> list[str]:
 
 MACHINE_KEYS = {"os", "labels"}
 
+# Keys this file used to hold, and what to do instead. `runner_type` named a
+# hardware class that a second file had to map onto runner labels; `labels`
+# names the labels directly, so there is no mapping to keep in step. That is a
+# change of model rather than a rename, so the old key cannot be translated
+# here -- only explained, because "unknown key" sends the reader to the schema
+# to work out on their own that the key was replaced and by what.
+RETIRED_MACHINE_KEYS = {
+    "runner_type": (
+        "replaced by `labels`, which names the runner labels the work needs "
+        "rather than a hardware class something else has to resolve. A skill "
+        "that asked for `runner_type: instinct` now says, for example, "
+        "`labels: [mi300x]`"
+    ),
+}
+
 
 def _read_machine(skill: str) -> dict:
     """The raw ``evals/machine.yml`` for `skill`, or ``{}`` when it has none.
@@ -597,9 +612,14 @@ def machine_plan(skill: str) -> dict:
 
     unknown = sorted(set(data) - MACHINE_KEYS)
     if unknown:
+        retired = [key for key in unknown if key in RETIRED_MACHINE_KEYS]
+        detail = "".join(
+            f"\n  `{key}` is {RETIRED_MACHINE_KEYS[key]}." for key in retired
+        )
         raise SystemExit(
             f"error: {path}: unknown key(s): {', '.join(unknown)}. "
             f"A machine.yml holds only {' and '.join(sorted(MACHINE_KEYS))}."
+            f"{detail}"
         )
 
     platforms = (
