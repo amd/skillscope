@@ -88,6 +88,33 @@ def parse_verdict(text: str) -> tuple[bool, str] | None:
     return bool(verdict.get("pass")), reason
 
 
+def final_message_of(state) -> str:
+    """What the agent last said to the user.
+
+    Kept apart from the transcript on purpose. Some expectations are about what
+    the agent *told* the user -- "output the curl commands they need" -- and are
+    unanswerable without it. Others are about what it *did*, and for those a
+    claim in the final message is not evidence: an agent writing "I won't call
+    the cloud API" must neither satisfy nor fail an expectation that it avoided
+    doing so. The prompt says which to use for which.
+    """
+    for message in reversed(state.messages):
+        if getattr(message, "role", None) != "assistant":
+            continue
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content.strip()[:MAX_TRANSCRIPT]
+        if isinstance(content, list):
+            texts = [
+                part.text
+                for part in content
+                if isinstance(getattr(part, "text", None), str)
+            ]
+            if any(t.strip() for t in texts):
+                return "\n".join(texts).strip()[:MAX_TRANSCRIPT]
+    return "(the agent said nothing)"
+
+
 def transcript_of(state) -> str:
     """What the agent did: tool calls and their results, never its prose."""
     parts: list[str] = []
@@ -108,13 +135,20 @@ async def artifacts(paths: list[str]) -> tuple[list[str], list[tuple[str, bytes]
     """Read what the agent produced: text inline, images as attachments."""
     from inspect_ai.util import sandbox
 
+    from . import tools
+
     described: list[str] = []
     images: list[tuple[str, bytes]] = []
 
     for path in paths[:MAX_FILES]:
+        # `list_paths` reports paths relative to the case's working directory,
+        # but `read_file` resolves against the sandbox's own -- which for a
+        # container is `/`. Without this the judge is told every artifact is
+        # unreadable and concludes the agent produced nothing.
+        target = await tools.resolve(path)
         if is_image(path):
             try:
-                images.append((path, await sandbox().read_file(path, text=False)))
+                images.append((path, await sandbox().read_file(target, text=False)))
             except Exception as exc:  # noqa: BLE001 -- an unreadable file is evidence too
                 described.append(f"--- {path} (image, unreadable: {exc}) ---")
             continue
@@ -122,7 +156,7 @@ async def artifacts(paths: list[str]) -> tuple[list[str], list[tuple[str, bytes]
             described.append(f"--- {path} (binary) ---")
             continue
         try:
-            body = await sandbox().read_file(path, text=True)
+            body = await sandbox().read_file(target, text=True)
         except Exception as exc:  # noqa: BLE001
             described.append(f"--- {path} (unreadable: {exc}) ---")
             continue
@@ -166,10 +200,13 @@ async def grade(
         [
             f"Files the agent left behind: {paths or 'none'}",
             "",
-            "--- what the agent did ---",
+            "--- what the agent DID (tool calls and their results) ---",
             transcript_of(state),
             "",
-            "--- artifacts ---",
+            "--- what the agent SAID to the user (its final message) ---",
+            final_message_of(state),
+            "",
+            "--- artifacts it produced ---",
             *described,
         ]
     )
@@ -179,6 +216,11 @@ async def grade(
             text=(
                 "You are grading whether a coding agent's run satisfied one "
                 "requirement. Judge only from the evidence below.\n\n"
+                "For a requirement about what the agent DID, use the tool "
+                "calls and the artifacts: the agent claiming in its message "
+                "that it did or avoided something is not evidence either way. "
+                "For a requirement about what the agent TOLD the user, its "
+                "final message is the evidence.\n\n"
                 f"REQUIREMENT:\n{requirement_text(statement, must_happen=must_happen)}\n\n"
                 f"EVIDENCE:\n{evidence}\n\n"
                 "Do not invert the verdict for any reason.\n"
