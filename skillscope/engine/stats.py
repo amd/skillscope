@@ -27,7 +27,15 @@ def record_log(log) -> None:
             calls=0,
         )
 
-    # One "call" per sample is the comparable unit across engines: the legacy
-    # engine reports once per case, and per-request counts are not visible on
-    # both sides.
-    usage.record(calls=len(getattr(log, "samples", None) or []))
+    # Count assistant messages, not samples. The legacy engine records one call
+    # per assistant event in its stream, so counting per sample here would be
+    # the same number only for routing -- where each case is a single turn --
+    # and a large undercount for behavioral, where the agent loops. The two
+    # columns sit side by side in the benchmark, so they have to mean the same
+    # thing.
+    responses = 0
+    for sample in getattr(log, "samples", None) or []:
+        for message in getattr(sample, "messages", None) or []:
+            if getattr(message, "role", None) == "assistant":
+                responses += 1
+    usage.record(calls=responses)
