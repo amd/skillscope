@@ -345,9 +345,17 @@ def _prepare_graded_run(
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
     if getattr(args, "engine", "legacy") in ("inspect", "claude-code"):
-        # The inspect engine never shells out to `claude`, so the CLI-based
-        # reachability probe would be testing something this run does not use.
+        # The CLI-based reachability probe tests something these engines do not
+        # use, but they still need one of their own: a graded run starts
+        # containers and installs skills before it first reaches a provider, so
+        # without this a bad key surfaces as a task that failed after all that.
         engine.require()
+        if not args.skip_preflight:
+            from .engine import models as engine_models
+
+            ok, detail = engine_models.check_reachable(engine_models.resolve(args.model))
+            if not ok:
+                raise SystemExit(f"error: model not reachable -- {detail}")
         return selected
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
