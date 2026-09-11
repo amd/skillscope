@@ -2833,6 +2833,22 @@ class TestEngineSandboxSelection(unittest.TestCase):
         self._skill(machine="sandbox: compose.yaml\n", compose=True)
         self.assertEqual(engine_sandbox.for_skill("boxed"), "local")
 
+    def test_an_unresolvable_provider_says_what_to_install(self) -> None:
+        # The binary being present proves nothing: inspect resolves a
+        # third-party provider through an entry point, so the Python package
+        # has to be installed too. Its own error names neither the variable
+        # nor the package.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+
+        def unresolvable(name: str):
+            raise ValueError(f"SandboxEnvironment type {name!r} not recognized.")
+
+        with self.assertRaises(SystemExit) as caught:
+            engine_sandbox.require_provider(resolve=unresolvable)
+        message = str(caught.exception)
+        self.assertIn(engine_sandbox.SANDBOX_ENV, message)
+        self.assertIn("skillscope[podman]", message)
+
     def test_a_named_compose_file_that_is_missing_is_an_error(self) -> None:
         self._skill(machine="sandbox: nope.yaml\n")
         with self.assertRaises(SystemExit) as caught:
