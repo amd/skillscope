@@ -48,6 +48,7 @@ from skillscope import (
 )
 from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
+from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import routing as engine_routing
@@ -2527,6 +2528,24 @@ class TestCiModelPin(unittest.TestCase):
     def test_nothing_is_pinned_outside_ci(self) -> None:
         with mock.patch.dict(os.environ, {"CI": "", "GITHUB_ACTIONS": ""}):
             self.assertEqual(agent.enforce_model_policy("sonnet"), "sonnet")
+
+
+class TestEngineMessageLimit(unittest.TestCase):
+    """A model that cannot finish should not be given a hundred turns to prove it."""
+
+    def test_a_real_model_gets_the_full_budget(self) -> None:
+        self.assertEqual(
+            engine_behavioral.message_limit_for("anthropic/claude-opus-5"),
+            engine_behavioral.MESSAGE_LIMIT,
+        )
+
+    def test_a_mock_gets_a_short_one(self) -> None:
+        # It never calls submit, so it loops to whatever cap it is given, and
+        # every turn is a real sandbox round trip.
+        self.assertEqual(
+            engine_behavioral.message_limit_for("mockllm/model"),
+            engine_behavioral.MOCK_MESSAGE_LIMIT,
+        )
 
 
 class TestEngineModelNames(unittest.TestCase):

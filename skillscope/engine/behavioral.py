@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import config, deadline, usage
+from .. import agent, config, deadline, usage
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
 from . import convert, models, sandbox as sandbox_spec, scorers, stats, tools
@@ -23,6 +23,19 @@ from . import convert, models, sandbox as sandbox_spec, scorers, stats, tools
 # declaratively, and a message cap catches the loop a wall-clock cap only ends
 # after paying for it.
 MESSAGE_LIMIT = 120
+
+# A model that reaches no provider never calls the submit tool, so it loops to
+# whatever cap it is given -- and every turn is a real sandbox round trip. The
+# wiring run proves the machinery in a handful of turns; the rest is the mock
+# failing to finish, slowly.
+MOCK_MESSAGE_LIMIT = 6
+
+
+def message_limit_for(model: str) -> int:
+    """How many turns this model should be allowed before the case is stopped."""
+    if model.lower().startswith(agent.NO_PROVIDER_PREFIXES):
+        return MOCK_MESSAGE_LIMIT
+    return MESSAGE_LIMIT
 
 
 def _tools(skill_dir: Path) -> list:
@@ -54,7 +67,7 @@ def _prompt() -> str | None:
     )
 
 
-def build_task(skill: str, cases: list[Case], ctx: dict | None = None):
+def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = None):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer."""
     from inspect_ai import Task
     from inspect_ai.agent import react
@@ -69,7 +82,7 @@ def build_task(skill: str, cases: list[Case], ctx: dict | None = None):
         solver=react(prompt=_prompt(), tools=_tools(skill_dir)),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
-        message_limit=MESSAGE_LIMIT,
+        message_limit=message_limit_for(model),
         time_limit=int(bound.remaining()) if bound is not None else None,
     )
 
@@ -139,7 +152,7 @@ def run(
 
         print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
         logs = inspect_eval(
-            build_task(skill, skill_cases),
+            build_task(skill, skill_cases, model),
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
