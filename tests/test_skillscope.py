@@ -2539,14 +2539,14 @@ class TestEngineGatewayHeaders(unittest.TestCase):
 
     def test_headers_are_parsed_into_default_headers(self) -> None:
         os.environ[engine_models.CUSTOM_HEADERS_ENV] = (
-            "Ocp-Apim-Subscription-Key: secret\nuser: a1_ucicd\n"
+            "X-Subscription-Key: secret\nuser: ci-runner\n"
         )
         self.assertEqual(
             engine_models.model_args("anthropic/claude-opus-5"),
             {
                 "default_headers": {
-                    "Ocp-Apim-Subscription-Key": "secret",
-                    "user": "a1_ucicd",
+                    "X-Subscription-Key": "secret",
+                    "user": "ci-runner",
                 }
             },
         )
