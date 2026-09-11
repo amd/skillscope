@@ -48,6 +48,10 @@ from skillscope import (
 )
 from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
+from skillscope.engine import judge as engine_judge
+from skillscope.engine import models as engine_models
+from skillscope.engine import routing as engine_routing
+from skillscope.engine import tools as engine_tools
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
 SCHEMA_DIR = datasets.PACKAGE_DIR / "schema"
@@ -328,13 +332,16 @@ class TestMachineSchema(unittest.TestCase):
     def test_documented_keys_match_the_parser(self) -> None:
         self.assertEqual(set(self.schema["properties"]), datasets.MACHINE_KEYS)
 
-    def test_neither_key_is_enumerated_in_the_schema(self) -> None:
-        # Neither can be: a label means whatever a repo registered its runners
-        # with, so the schema documents what the key is for and the workflow
-        # supplies the labels around it.
-        for key in datasets.MACHINE_KEYS:
+    def test_no_list_key_is_enumerated_in_the_schema(self) -> None:
+        # Neither `os` nor `labels` can be: a label means whatever a repo
+        # registered its runners with, so the schema documents what the key is
+        # for and the workflow supplies the labels around it. Scoped to the
+        # list-valued keys, since `sandbox` names a file rather than a set.
+        for key, spec in self.schema["properties"].items():
+            if spec.get("type") != "array":
+                continue
             with self.subTest(key=key):
-                self.assertNotIn("enum", self.schema["properties"][key]["items"])
+                self.assertNotIn("enum", spec["items"])
 
     def test_every_machine_yml_in_the_repo_resolves(self) -> None:
         for skill in datasets.declared_skills():
@@ -2499,6 +2506,199 @@ class TestRoutingCasePooling(unittest.TestCase):
         cases = datasets.routing_cases([])
         self.assertTrue(cases)
         self.assertTrue(all(case.skill is None for case in cases))
+
+
+class TestEngineModelNames(unittest.TestCase):
+    """`--model` speaks the claude CLI's aliases; inspect wants provider names."""
+
+    def test_an_alias_becomes_a_provider_qualified_name(self) -> None:
+        self.assertEqual(engine_models.resolve("opus"), "anthropic/claude-opus-5")
+
+    def test_an_alias_is_case_insensitive(self) -> None:
+        self.assertEqual(engine_models.resolve("Opus"), "anthropic/claude-opus-5")
+
+    def test_a_qualified_name_passes_through(self) -> None:
+        # What makes `--model mockllm/model` work for the no-cost wiring runs.
+        self.assertEqual(engine_models.resolve("mockllm/model"), "mockllm/model")
+
+    def test_an_unknown_bare_name_is_assumed_to_be_anthropic(self) -> None:
+        self.assertEqual(engine_models.resolve("claude-x"), "anthropic/claude-x")
+
+
+class TestEngineGatewayHeaders(unittest.TestCase):
+    """`ANTHROPIC_CUSTOM_HEADERS` is a claude CLI variable; inspect ignores it."""
+
+    def setUp(self) -> None:
+        for var in (engine_models.CUSTOM_HEADERS_ENV, engine_models.AUTH_TOKEN_ENV):
+            self.addCleanup(os.environ.pop, var, None)
+            os.environ.pop(var, None)
+
+    def test_no_headers_configured_means_no_provider_arguments(self) -> None:
+        self.assertEqual(engine_models.model_args(), {})
+
+    def test_headers_are_parsed_into_default_headers(self) -> None:
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = (
+            "Ocp-Apim-Subscription-Key: secret\nuser: a1_ucicd\n"
+        )
+        self.assertEqual(
+            engine_models.model_args(),
+            {
+                "default_headers": {
+                    "Ocp-Apim-Subscription-Key": "secret",
+                    "user": "a1_ucicd",
+                }
+            },
+        )
+
+    def test_a_value_containing_a_colon_survives(self) -> None:
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "Referer: https://example.com/x"
+        self.assertEqual(
+            engine_models.custom_headers(), {"Referer": "https://example.com/x"}
+        )
+
+    def test_blank_and_malformed_lines_are_skipped(self) -> None:
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "\nnot-a-header\n\nk: v\n"
+        self.assertEqual(engine_models.custom_headers(), {"k": "v"})
+
+    def test_oauth_and_gateway_headers_together_are_refused(self) -> None:
+        # inspect's OAuth path sets `default_headers` itself, so ours would be a
+        # duplicate keyword argument deep inside the SDK. Fail with the reason.
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "k: v"
+        os.environ[engine_models.AUTH_TOKEN_ENV] = "token"
+        with self.assertRaises(SystemExit) as caught:
+            engine_models.model_args()
+        self.assertIn(engine_models.AUTH_TOKEN_ENV, str(caught.exception))
+
+
+class TestEngineListingNormalisation(unittest.TestCase):
+    """`find` and `Get-ChildItem` disagree about separators and prefixes."""
+
+    def test_posix_output(self) -> None:
+        listing = "./out.png\n./docs/plan.md\n"
+        self.assertEqual(
+            engine_tools.normalize_listing(listing), ["docs/plan.md", "out.png"]
+        )
+
+    def test_windows_output(self) -> None:
+        listing = ".\\out.png\r\n.\\docs\\plan.md\r\n"
+        self.assertEqual(
+            engine_tools.normalize_listing(listing), ["docs/plan.md", "out.png"]
+        )
+
+    def test_the_installed_skill_does_not_satisfy_files_exist(self) -> None:
+        # The harness put it there, so a case asserting SKILL.md was produced
+        # would otherwise pass without the agent doing anything.
+        listing = "./skills/demo/SKILL.md\n./.claude/settings.json\n./out.png\n"
+        self.assertEqual(engine_tools.normalize_listing(listing), ["out.png"])
+
+    def test_blank_lines_are_dropped(self) -> None:
+        self.assertEqual(engine_tools.normalize_listing("\n\n  \n"), [])
+
+
+class TestEngineJudgeVerdicts(unittest.TestCase):
+    """A grader is chatty and its reasons contain punctuation."""
+
+    def test_a_bare_verdict(self) -> None:
+        self.assertEqual(
+            engine_judge.parse_verdict('{"pass": true, "reason": "it did"}'),
+            (True, "it did"),
+        )
+
+    def test_a_verdict_wrapped_in_prose(self) -> None:
+        text = 'Looking at the evidence...\n{"pass": false, "reason": "no file"}\nDone.'
+        self.assertEqual(engine_judge.parse_verdict(text), (False, "no file"))
+
+    def test_a_reason_containing_braces(self) -> None:
+        # A regex quantifier or a quoted snippet in the reason must not confuse
+        # the scan, which is why boundaries are decoded rather than matched.
+        text = '{"pass": true, "reason": "matched a{2,3} in the output"}'
+        self.assertEqual(
+            engine_judge.parse_verdict(text), (True, "matched a{2,3} in the output")
+        )
+
+    def test_the_last_verdict_wins(self) -> None:
+        text = '{"pass": true, "reason": "first"}\n{"pass": false, "reason": "second"}'
+        self.assertEqual(engine_judge.parse_verdict(text), (False, "second"))
+
+    def test_no_verdict_at_all(self) -> None:
+        self.assertIsNone(engine_judge.parse_verdict("I could not decide."))
+
+    def test_a_missing_reason_still_yields_a_verdict(self) -> None:
+        self.assertEqual(
+            engine_judge.parse_verdict('{"pass": true}'), (True, "(no reason given)")
+        )
+
+
+class TestEngineJudgePolarity(unittest.TestCase):
+    """The judge grades the requirement; callers must never negate the verdict."""
+
+    def test_a_must_requirement_asks_whether_it_happened(self) -> None:
+        text = engine_judge.requirement_text("generate an image", must_happen=True)
+        self.assertIn("MUST have done this", text)
+        self.assertIn("true if the agent did it", text)
+
+    def test_a_must_not_requirement_asks_whether_it_was_avoided(self) -> None:
+        # Read as a pass when the agent avoided it: negating this verdict is
+        # what turns a correct run into a failure.
+        text = engine_judge.requirement_text("call a cloud API", must_happen=False)
+        self.assertIn("MUST NOT have done this", text)
+        self.assertIn("true if the agent avoided it", text)
+        self.assertIn("default verdict is true", text)
+
+
+class TestEngineJudgeArtifacts(unittest.TestCase):
+    def test_images_are_recognised_by_suffix(self) -> None:
+        self.assertTrue(engine_judge.is_image("out.PNG"))
+        self.assertTrue(engine_judge.is_image("art/cat.jpeg"))
+        self.assertFalse(engine_judge.is_image("notes.md"))
+
+    def test_known_binaries_are_not_read_as_text(self) -> None:
+        self.assertTrue(engine_judge.is_probably_binary("model.safetensors"))
+        self.assertFalse(engine_judge.is_probably_binary("report.md"))
+
+
+class _Call:
+    def __init__(self, function: str, arguments: dict) -> None:
+        self.function = function
+        self.arguments = arguments
+
+
+class _Message:
+    def __init__(self, tool_calls: list | None = None) -> None:
+        self.tool_calls = tool_calls
+
+
+class TestEngineRoutingActivation(unittest.TestCase):
+    """Naming a skill through the tool *is* the activation, so it is observed."""
+
+    def test_a_skill_call_is_the_decision(self) -> None:
+        messages = [_Message([_Call("skill", {"command": "local-ai-use"})])]
+        self.assertEqual(engine_routing.activation_of(messages), "local-ai-use")
+
+    def test_no_tool_call_means_nothing_activated(self) -> None:
+        self.assertIsNone(engine_routing.activation_of([_Message(), _Message([])]))
+
+    def test_another_tool_is_not_an_activation(self) -> None:
+        messages = [_Message([_Call("think", {"thought": "skill demo-skill?"})])]
+        self.assertIsNone(engine_routing.activation_of(messages))
+
+    def test_the_first_skill_named_wins(self) -> None:
+        messages = [
+            _Message([_Call("skill", {"command": "first"})]),
+            _Message([_Call("skill", {"command": "second"})]),
+        ]
+        self.assertEqual(engine_routing.activation_of(messages), "first")
+
+    def test_a_blank_command_is_not_an_activation(self) -> None:
+        messages = [_Message([_Call("skill", {"command": "  "})])]
+        self.assertIsNone(engine_routing.activation_of(messages))
+
+    def test_tool_calls_are_counted_across_messages(self) -> None:
+        messages = [
+            _Message([_Call("think", {}), _Call("skill", {"command": "x"})]),
+            _Message(),
+        ]
+        self.assertEqual(engine_routing.tool_call_count(messages), 2)
 
 
 if __name__ == "__main__":
