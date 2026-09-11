@@ -387,18 +387,11 @@ class Run:
 
         result_text = ""
         for ev in events:
-            if ev.get("type") != "result":
-                continue
-            if isinstance(ev.get("result"), str):
+            # Recording what the run spent is what lets it be compared against
+            # the same cases on the other engine.
+            usage.record_stream_event(ev)
+            if ev.get("type") == "result" and isinstance(ev.get("result"), str):
                 result_text = ev["result"]
-            # The CLI reports what the turn cost; recording it is what lets a
-            # run be compared against the same cases on the other engine.
-            tokens = ev.get("usage") or {}
-            usage.record(
-                input_tokens=tokens.get("input_tokens", 0),
-                output_tokens=tokens.get("output_tokens", 0),
-                cost_usd=ev.get("total_cost_usd"),
-            )
 
         self.workspace = workspace
         self.judge_model = judge_model
