@@ -208,6 +208,41 @@ Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
 environment gets one matrix, labels and all.
 
+## Which engine grades a run
+
+`--engine` chooses what actually runs the cases. The dataset, the CLI and the
+reports are identical whichever you pick; only the thing driving the agent
+changes.
+
+| `--engine` | What runs | Needs |
+| --- | --- | --- |
+| `legacy` (default) | The `claude` CLI, driven directly | the CLI on `PATH` |
+| `inspect` | A harness-independent agent through `inspect_ai` | `pip install 'skillscope[inspect]'` |
+| `claude-code` | Real Claude Code inside the sandbox, to cross-check the other two | `skillscope[verify]`, Linux only |
+
+`inspect` grades a skill on whether its *instructions* work rather than on how
+one product reads them, which is the stronger claim and the one a product repo
+can adopt. It is also much cheaper: a routing case is a single model call,
+because the decision is visible in the first reply and nothing needs executing.
+
+`claude-code` is a reporting leg, never a gate. Harness runs are
+nondeterministic and the harness is not what is being graded, so a divergence
+there is a question about the skill rather than a build failure.
+
+Under `inspect`, behavioral cases run in a Docker container on Linux and
+unsandboxed on Windows -- inspect's sandbox layer assumes a POSIX guest, so the
+Windows legs trade isolation for running on the platform they are meant to
+test. A skill that needs network egress or a device names a compose file with
+`sandbox:` in its `evals/machine.yml`. `SKILLSCOPE_SANDBOX=local` skips the
+container entirely, which is for working locally rather than for CI: a graded
+run that quietly dropped its sandbox would report the same numbers with none of
+the isolation.
+
+To see what changing engine would do to your own datasets before changing it,
+[`tools/benchmark_engines.py`](../tools/benchmark_engines.py) runs the same
+cases through two engines and reports per-case agreement, measured against how
+much one engine already disagrees with itself.
+
 ## In CI: one job
 
 [`reusable.yml`](../.github/workflows/reusable.yml) grades a repo's skills with
