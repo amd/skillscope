@@ -144,6 +144,8 @@ def run(
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
     from inspect_ai import eval as inspect_eval
 
+    sandbox_spec.require_provider()
+
     outcomes: list[BehaviorOutcome] = []
     for skill in skills:
         skill_cases = [c for c in cases if c.skill == skill and c.has_behavior]

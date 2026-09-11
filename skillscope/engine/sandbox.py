@@ -59,8 +59,39 @@ def describe() -> dict:
     return {"sandbox": name, "sandbox_isolated": name not in NOT_ISOLATED}
 
 
+# Providers that live in another package. inspect resolves these through an
+# entry point, so the binary being installed proves nothing -- the Python
+# package has to be there too, and the failure otherwise is a ValueError from
+# inspect's registry that says nothing about how to fix it.
+PROVIDER_PACKAGES = {"podman": "skillscope[podman]"}
+
+
 def is_windows() -> bool:
     return sys.platform.startswith("win")
+
+
+def require_provider(resolve=None) -> None:
+    """Fail early, and legibly, when the chosen provider cannot be resolved.
+
+    `resolve` is injectable so this can be tested without the inspect extra
+    installed, which the unit suite deliberately runs without.
+    """
+    name = provider()
+    if resolve is None:
+        from inspect_ai.util._sandbox.registry import registry_find_sandboxenv
+
+        resolve = registry_find_sandboxenv
+
+    try:
+        resolve(name)
+    except Exception as exc:  # noqa: BLE001 -- inspect raises a bare ValueError
+        hint = PROVIDER_PACKAGES.get(name)
+        install = f"\n    pip install '{hint}'" if hint else ""
+        raise SystemExit(
+            f"error: {SANDBOX_ENV}={name!r} but inspect cannot resolve that "
+            f"sandbox provider.{install}\n"
+            f"    ({exc})"
+        ) from exc
 
 
 def provider() -> str:
