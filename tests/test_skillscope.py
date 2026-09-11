@@ -2734,6 +2734,20 @@ class TestEngineSandboxSelection(unittest.TestCase):
         self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
         os.environ.pop(engine_sandbox.SANDBOX_ENV, None)
         self.repo = Repo(self)
+        # Pinned, because the answer depends on the platform and the suite runs
+        # on both. Without this these assertions quietly mean something
+        # different on a Windows runner than on a Linux one.
+        self._posix_host()
+
+    def _posix_host(self) -> None:
+        patch = mock.patch.object(engine_sandbox, "is_windows", lambda: False)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _windows_host(self) -> None:
+        patch = mock.patch.object(engine_sandbox, "is_windows", lambda: True)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def _skill(self, machine: str | None = None, compose: bool = False) -> None:
         folder = self.repo.skill(
@@ -2770,6 +2784,14 @@ class TestEngineSandboxSelection(unittest.TestCase):
     def test_local_takes_no_configuration(self) -> None:
         self._skill(machine="sandbox: compose.yaml\n", compose=True)
         os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "local")
+
+    def test_windows_has_no_sandbox_available(self) -> None:
+        # inspect's sandbox layer assumes a POSIX guest, so those legs run
+        # unsandboxed -- and a compose file the skill declared cannot apply,
+        # because there is no container to apply it to.
+        self._windows_host()
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
         self.assertEqual(engine_sandbox.for_skill("boxed"), "local")
 
     def test_a_named_compose_file_that_is_missing_is_an_error(self) -> None:

@@ -96,15 +96,22 @@ jobs:
           }
           EOF
 
+      # `SKILLSCOPE_REPO` rather than `working-directory`, because a `--skills-dir`
+      # glob that was passed is resolved against the repo root and `find_root`
+      # takes that from the nearest `.git`. Running from a subdirectory of a
+      # checkout would therefore still glob the checkout. Same thing `repo:`
+      # does for the action.
+      #
       # Exits non-zero because the mock satisfies nothing; the report is the
       # artifact under test, not the exit code.
       - name: Grade the fixture on the inspect engine
         continue-on-error: true
-        working-directory: fixture
+        env:
+          SKILLSCOPE_REPO: fixture
         run: >
           python -m skillscope behavioral --engine inspect
           --model mockllm/model --skills-dir '*' --skill demo-skill
-          --output ../engine-report.json
+          --output engine-report.json
 
       - name: Check the machinery held
         shell: python
