@@ -71,3 +71,27 @@ def record(
     _current.calls += int(calls or 0)
     if cost_usd is not None:
         _current.cost_usd = (_current.cost_usd or 0.0) + float(cost_usd)
+
+
+def record_stream_event(event: dict) -> None:
+    """Record what one `claude` stream-json event says the run has spent.
+
+    Shared by both legacy commands, because they read the same stream and a
+    column that means "responses" in one and "cases" in the other is worse than
+    no column at all.
+
+    Tokens and responses come from assistant events, one per model reply. Cost
+    comes only from the result event, where it is a run total -- and a routing
+    case is normally killed before that event arrives, so it reports responses
+    with no cost. That is what the legacy engine can actually observe.
+    """
+    kind = event.get("type")
+    if kind == "assistant":
+        message = event.get("message")
+        counts = (message or {}).get("usage") if isinstance(message, dict) else None
+        record(
+            input_tokens=(counts or {}).get("input_tokens", 0),
+            output_tokens=(counts or {}).get("output_tokens", 0),
+        )
+    elif kind == "result":
+        record(cost_usd=event.get("total_cost_usd"), calls=0)

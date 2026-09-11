@@ -308,29 +308,6 @@ def _init_skills(event: dict, skills: list[str]) -> list[str] | None:
     return seen
 
 
-def _record_usage(event: dict) -> None:
-    """Record what one stream event says the run has spent.
-
-    Tokens come from assistant events, one per model response, because a
-    routing case is normally killed the moment its decision is visible and the
-    result event that would total them up never arrives. Cost comes only from
-    the result event, where it is a run total -- so a case that was killed
-    reports its tokens and no cost, which is the truth about what the legacy
-    engine can observe rather than an omission.
-    """
-    kind = event.get("type")
-    if kind == "assistant":
-        message = event.get("message")
-        counts = (message or {}).get("usage") if isinstance(message, dict) else None
-        if isinstance(counts, dict):
-            usage.record(
-                input_tokens=counts.get("input_tokens", 0),
-                output_tokens=counts.get("output_tokens", 0),
-            )
-    elif kind == "result":
-        usage.record(cost_usd=event.get("total_cost_usd"), calls=0)
-
-
 def _init_tools(event: dict) -> set[str] | None:
     """Tool names the CLI reported at session init, if this is that event.
 
@@ -547,7 +524,7 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
             except json.JSONDecodeError:
                 continue
             events.append(event)
-            _record_usage(event)
+            usage.record_stream_event(event)
 
             reported = _init_skills(event, skills)
             if reported is not None:
@@ -567,7 +544,7 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
 
             if event.get("type") == "result":
                 stop_reason = "result"
-                _record_usage(event)
+                usage.record_stream_event(event)
                 if event.get("is_error"):
                     error = str(event.get("result") or "result event reported an error")[:400]
                 break
