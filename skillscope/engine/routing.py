@@ -40,7 +40,7 @@ from pathlib import Path
 from .. import config, deadline
 from ..datasets import Case
 from ..routing import PASSING_VERDICTS, Outcome, classify
-from . import convert, models
+from . import convert, models, stats
 
 SKILL_TOOL = "skill"
 
@@ -169,6 +169,7 @@ def run(cases: list[Case], routing_set: dict[str, Path], model: str) -> list[Out
     by_id = {case.id: case for case in cases}
     outcomes: list[Outcome] = []
     for log in logs:
+        stats.record_log(log)
         if log.status == "error" or not log.samples:
             detail = getattr(log.error, "message", None) or "no samples"
             raise SystemExit(f"error: routing task failed: {detail}")

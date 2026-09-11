@@ -41,7 +41,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import datasets, deadline
+from . import datasets, deadline, usage
 
 DEFAULT_MODEL = os.environ.get("SKILLSCOPE_MODEL", "opus")
 DEFAULT_EFFORT = os.environ.get("SKILLSCOPE_EFFORT", "high")
@@ -387,8 +387,18 @@ class Run:
 
         result_text = ""
         for ev in events:
-            if ev.get("type") == "result" and isinstance(ev.get("result"), str):
+            if ev.get("type") != "result":
+                continue
+            if isinstance(ev.get("result"), str):
                 result_text = ev["result"]
+            # The CLI reports what the turn cost; recording it is what lets a
+            # run be compared against the same cases on the other engine.
+            tokens = ev.get("usage") or {}
+            usage.record(
+                input_tokens=tokens.get("input_tokens", 0),
+                output_tokens=tokens.get("output_tokens", 0),
+                cost_usd=ev.get("total_cost_usd"),
+            )
 
         self.workspace = workspace
         self.judge_model = judge_model

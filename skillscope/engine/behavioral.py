@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import config, deadline
+from .. import config, deadline, usage
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
-from . import convert, models, sandbox as sandbox_spec, scorers, tools
+from . import convert, models, sandbox as sandbox_spec, scorers, stats, tools
 
 # An agent that never decides it is finished must still stop. The legacy engine
 # bounded this with `--case-timeout` and a process kill; inspect expresses it
@@ -132,6 +132,7 @@ def run(
             display="plain",
         )
         for log in logs:
+            stats.record_log(log)
             outcomes.extend(_outcomes(log, skill, skill_cases))
 
     for outcome in outcomes:
