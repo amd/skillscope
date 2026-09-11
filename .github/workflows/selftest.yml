@@ -44,6 +44,104 @@ jobs:
       - name: Run the suite
         run: python -m unittest discover -s tests -t . --verbose
 
+  engine:
+    name: Inspect engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both sandboxes a run can get. Ubuntu has Docker, which is the default
+        # and what CI uses; Windows has none, which is the other supported
+        # shape. The Windows leg is the only place the cross-platform tools are
+        # exercised at all -- inspect's own assume a POSIX guest.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install with the inspect extra
+        run: python -m pip install --upgrade pip && python -m pip install ".[inspect]"
+
+      # `mockllm` reaches no provider, so this needs no key and runs on a pull
+      # request from a fork. It cannot tell us whether a skill is any good --
+      # the mock does no work and every judged expectation fails. What it does
+      # tell us is whether the machinery around the model still holds together
+      # on both platforms, which is where every bug so far has been.
+      - name: Build a repo to test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fixture/demo-skill/evals fixture/demo-skill/fixtures
+          cat > fixture/demo-skill/SKILL.md <<'EOF'
+          ---
+          name: demo-skill
+          description: Does demonstrable things, for a test that needs a skill.
+          ---
+          EOF
+          echo "seeded by the case, not produced by the agent" \
+            > fixture/demo-skill/fixtures/seeded.txt
+          cat > fixture/demo-skill/evals/evals.json <<'EOF'
+          {
+            "evaluations": [
+              {"id": "demo-a", "skill_should_trigger": true, "prompt": "do the demo thing",
+               "workspace": "fixtures", "files_exist": ["seeded.txt"]},
+              {"id": "demo-b", "skill_should_trigger": true, "prompt": "another way to ask"},
+              {"id": "demo-c", "skill_should_trigger": true, "prompt": "a third phrasing"},
+              {"id": "demo-d", "skill_should_trigger": false, "prompt": "something adjacent"},
+              {"id": "demo-e", "skill_should_trigger": false, "prompt": "something else entirely"}
+            ]
+          }
+          EOF
+
+      # Exits non-zero because the mock satisfies nothing; the report is the
+      # artifact under test, not the exit code.
+      - name: Grade the fixture on the inspect engine
+        continue-on-error: true
+        working-directory: fixture
+        run: >
+          python -m skillscope behavioral --engine inspect
+          --model mockllm/model --skills-dir '*' --skill demo-skill
+          --output ../engine-report.json
+
+      - name: Check the machinery held
+        shell: python
+        env:
+          EXPECTED_SANDBOX: ${{ matrix.os == 'windows-latest' && 'local' || 'docker' }}
+        run: |
+          import json
+          import os
+
+          report = json.load(open("engine-report.json", encoding="utf-8"))
+          meta, totals = report["meta"], report["totals"]
+          print(json.dumps(meta, indent=2))
+
+          # An infrastructure failure is not a graded result. This is what
+          # catches a sandbox that would not start.
+          assert totals["errors"] == 0, report["cases"]
+
+          expected = os.environ["EXPECTED_SANDBOX"]
+          assert meta["sandbox"] == expected, f"ran in {meta['sandbox']!r}, wanted {expected!r}"
+
+          checks = [c for case in report["cases"] for c in case["checks"]]
+          assert checks, "nothing was graded, so nothing was proven"
+
+          # A sandbox that cannot be listed reports the same shape as an agent
+          # that produced nothing, so the difference is asserted explicitly.
+          broken = [c for c in checks if "could not list the sandbox" in (c["detail"] or "")]
+          assert not broken, broken
+
+          # The seeded file exists because the case put it there, not because
+          # the mock did anything. It passing proves the whole path: the fixture
+          # was staged into the working directory, the directory was listed, and
+          # the listing was matched against what the case asked for.
+          seeded = [c for c in checks if c["kind"] == "files_exist"]
+          assert seeded, "the seeded-file check did not run"
+          assert all(c["passed"] for c in seeded), seeded
+          print(f"{len(checks)} checks graded, seeded fixture found, sandbox {expected}.")
+
   action:
     name: Action against a throwaway repo
     runs-on: ubuntu-latest
