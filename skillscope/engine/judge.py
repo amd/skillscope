@@ -104,6 +104,15 @@ def final_message_of(state) -> str:
     the cloud API" must neither satisfy nor fail an expectation that it avoided
     doing so. The prompt says which to use for which.
     """
+    # A `react` agent delivers its answer through the submit tool, and that is
+    # what lands in `output.completion`. The last assistant *message* can be
+    # the preamble that introduces it -- "the commands are below" -- so reading
+    # only that can show the judge a description of an answer instead of the
+    # answer.
+    completion = getattr(getattr(state, "output", None), "completion", None)
+    if isinstance(completion, str) and completion.strip():
+        return completion.strip()[:MAX_TRANSCRIPT]
+
     for message in reversed(state.messages):
         if getattr(message, "role", None) != "assistant":
             continue

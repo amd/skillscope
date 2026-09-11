@@ -2711,6 +2711,49 @@ class TestEngineJudgeTruncation(unittest.TestCase):
         self.assertLess(len(trimmed), 600)
 
 
+class _State:
+    def __init__(self, messages, output=None) -> None:
+        self.messages = messages
+        self.output = output
+
+
+class _Output:
+    def __init__(self, completion: str) -> None:
+        self.completion = completion
+
+
+class _Assistant:
+    role = "assistant"
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class TestEngineJudgeFinalMessage(unittest.TestCase):
+    """A `react` agent answers through submit, not through a chat message."""
+
+    def test_the_submitted_answer_wins(self) -> None:
+        # The last assistant message is often the preamble that introduces the
+        # answer. Grading that instead shows the judge a description of the
+        # work rather than the work.
+        state = _State(
+            [_Assistant("Here are the commands you need:")],
+            _Output("curl -X POST /api/v1/pull -d '{...}'"),
+        )
+        self.assertIn("curl -X POST", engine_judge.final_message_of(state))
+
+    def test_it_falls_back_to_the_last_assistant_message(self) -> None:
+        state = _State([_Assistant("no submit tool in this agent")], None)
+        self.assertEqual(
+            engine_judge.final_message_of(state), "no submit tool in this agent"
+        )
+
+    def test_silence_is_reported_rather_than_guessed_at(self) -> None:
+        self.assertEqual(
+            engine_judge.final_message_of(_State([], None)), "(the agent said nothing)"
+        )
+
+
 class TestEngineJudgeArtifacts(unittest.TestCase):
     def test_images_are_recognised_by_suffix(self) -> None:
         self.assertTrue(engine_judge.is_image("out.PNG"))
