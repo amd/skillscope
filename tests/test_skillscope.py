@@ -2509,6 +2509,26 @@ class TestRoutingCasePooling(unittest.TestCase):
         self.assertTrue(all(case.skill is None for case in cases))
 
 
+class TestCiModelPin(unittest.TestCase):
+    """The pin keeps paid runs comparable; a mock is neither paid nor graded."""
+
+    def test_a_real_model_is_pinned_under_ci(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            self.assertEqual(agent.enforce_model_policy("sonnet"), "opus")
+
+    def test_a_mock_is_left_alone_under_ci(self) -> None:
+        # Otherwise the free wiring run becomes a run that needs a key, in the
+        # one place where not needing a key is the whole point.
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            self.assertEqual(
+                agent.enforce_model_policy("mockllm/model"), "mockllm/model"
+            )
+
+    def test_nothing_is_pinned_outside_ci(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "", "GITHUB_ACTIONS": ""}):
+            self.assertEqual(agent.enforce_model_policy("sonnet"), "sonnet")
+
+
 class TestEngineModelNames(unittest.TestCase):
     """`--model` speaks the claude CLI's aliases; inspect wants provider names."""
 
