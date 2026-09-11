@@ -75,17 +75,27 @@ def expectations():
 
             wanted = meta.get(convert.FILES_EXIST, [])
             if wanted:
-                files = await tools.list_paths()
-                for path in wanted:
-                    found = _find_file(files, path)
-                    detail = ""
-                    if found is None:
-                        detail = f"sandbox holds: {files or 'nothing'}"
-                    elif found != path:
-                        detail = f"found at {found}"
-                    checks.append(
-                        _check("files_exist", path, found is not None, detail)
-                    )
+                try:
+                    files = await tools.list_paths()
+                except tools.ListingFailed as exc:
+                    # Report the sandbox, not the skill. "Nothing was produced"
+                    # would blame the agent for the harness's failure.
+                    for path in wanted:
+                        checks.append(
+                            _check("files_exist", path, False, f"could not list the sandbox: {exc}")
+                        )
+                    files = None
+                else:
+                    for path in wanted:
+                        found = _find_file(files, path)
+                        detail = ""
+                        if found is None:
+                            detail = f"sandbox holds: {files or 'nothing'}"
+                        elif found != path:
+                            detail = f"found at {found}"
+                        checks.append(
+                            _check("files_exist", path, found is not None, detail)
+                        )
 
             # Judged expectations last: the deterministic results are on screen
             # before the grader calls, which take a few seconds each, begin.

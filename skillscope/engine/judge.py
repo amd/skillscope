@@ -150,7 +150,16 @@ async def grade(
         get_model,
     )
 
-    paths = await tools_list_paths()
+    from . import tools
+
+    try:
+        paths = await tools_list_paths()
+    except tools.ListingFailed as exc:
+        # Say so rather than presenting an empty workspace as fact. A judge told
+        # "no files" will confidently report the agent did nothing, which reads
+        # as the skill failing when the sandbox is what failed.
+        return False, f"judge skipped: could not list the sandbox -- {exc}"
+
     described, images = await artifacts(paths)
 
     evidence = "\n".join(
