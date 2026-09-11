@@ -37,6 +37,36 @@ def resolve(model: str) -> str:
     return ALIASES.get(model.lower(), f"anthropic/{model}")
 
 
+async def _probe(model: str):
+    from inspect_ai.model import get_model
+
+    resolved = get_model(model, **model_args(model))
+    return await resolved.generate("Reply with the single word: ok")
+
+
+def check_reachable(model: str) -> tuple[bool, str]:
+    """Confirm the model answers before anything expensive starts.
+
+    A graded run starts containers and installs skills before it ever reaches a
+    provider, so a misconfigured gateway surfaces as a task that failed after
+    all that work rather than as a credentials problem. One tiny call up front
+    turns a 401 buried in a sample error into a message on the first line.
+
+    Costs a handful of tokens. `mockllm` reaches no provider, so it is skipped
+    rather than charged for a round trip that proves nothing.
+    """
+    if model.startswith("mockllm"):
+        return True, "mockllm (no provider)"
+
+    import anyio
+
+    try:
+        output = anyio.run(_probe, model)
+    except Exception as exc:  # noqa: BLE001 -- the reason is the return value
+        return False, f"{type(exc).__name__}: {exc}"[:400]
+    return True, (output.completion or "").strip()[:40]
+
+
 def custom_headers() -> dict[str, str]:
     """Parse ``ANTHROPIC_CUSTOM_HEADERS`` (newline-separated ``Key: value``)."""
     headers: dict[str, str] = {}
