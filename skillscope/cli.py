@@ -344,7 +344,7 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
-    if getattr(args, "engine", "legacy") == "inspect":
+    if getattr(args, "engine", "legacy") in ("inspect", "claude-code"):
         # The inspect engine never shells out to `claude`, so the CLI-based
         # reachability probe would be testing something this run does not use.
         engine.require()
@@ -490,11 +490,15 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    if args.engine == "inspect":
-        from .engine import behavioral as inspect_behavioral
+    if args.engine in ("inspect", "claude-code"):
         from .engine import models as engine_models
 
-        outcomes = inspect_behavioral.run(
+        if args.engine == "inspect":
+            from .engine import behavioral as runner
+        else:
+            from .engine import verify as runner
+
+        outcomes = runner.run(
             skills, gradable, engine_models.resolve(args.model), args.effort
         )
     else:
@@ -627,7 +631,7 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--engine",
         default=os.environ.get("SKILLSCOPE_ENGINE", "legacy"),
-        choices=["legacy", "inspect"],
+        choices=["legacy", "inspect", "claude-code"],
         help=(
             "Which eval engine runs the cases. `legacy` drives the claude CLI "
             "directly; `inspect` runs a harness-independent agent through "

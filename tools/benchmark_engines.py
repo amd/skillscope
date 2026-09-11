@@ -136,7 +136,9 @@ def _spend_caveats(spend: dict) -> list[str]:
         notes.append(
             "> One engine reported no cost -- inspect only has one when the "
             "model provider supplies pricing, which a gateway generally does "
-            "not. Wall time is the comparable column here."
+            "not. Wall time and model calls are comparable on both sides; "
+            "model calls in particular is the like-for-like measure of how "
+            "much work each engine asks of the model per case."
         )
     return notes
 
