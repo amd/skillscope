@@ -2655,6 +2655,23 @@ class TestEngineJudgePolarity(unittest.TestCase):
         self.assertIn("default verdict is true", text)
 
 
+class TestEngineJudgeTruncation(unittest.TestCase):
+    """What settles a check is usually the last thing the agent did."""
+
+    def test_short_transcripts_are_untouched(self) -> None:
+        self.assertEqual(engine_judge._elide_middle("abc", 100), "abc")
+
+    def test_the_end_survives(self) -> None:
+        # Cutting the tail would drop the validator run that a "did it verify
+        # its work" expectation turns on, making the agent look like it lied.
+        text = "START" + ("x" * 5000) + "VALIDATED"
+        trimmed = engine_judge._elide_middle(text, 400)
+        self.assertTrue(trimmed.startswith("START"))
+        self.assertTrue(trimmed.endswith("VALIDATED"))
+        self.assertIn("elided", trimmed)
+        self.assertLess(len(trimmed), 600)
+
+
 class TestEngineJudgeArtifacts(unittest.TestCase):
     def test_images_are_recognised_by_suffix(self) -> None:
         self.assertTrue(engine_judge.is_image("out.PNG"))

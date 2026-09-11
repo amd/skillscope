@@ -28,7 +28,13 @@ from pathlib import PurePosixPath
 # about, not everything on disk.
 MAX_FILES = 20
 MAX_FILE_BYTES = 20_000
-MAX_TRANSCRIPT = 6_000
+MAX_TRANSCRIPT = 12_000
+
+# Tool *calls* are short and every one of them matters -- they are the record of
+# what the agent did. Tool *results* are what grow without bound (a directory
+# listing, a validator's output, a file echoed back), so they are capped
+# individually and the calls are always kept whole.
+MAX_RESULT = 800
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 BINARY_SUFFIXES = {".zip", ".gz", ".tar", ".bin", ".safetensors", ".onnx", ".pt"}
@@ -115,6 +121,21 @@ def final_message_of(state) -> str:
     return "(the agent said nothing)"
 
 
+def _elide_middle(text: str, limit: int) -> str:
+    """Trim the middle, never the end.
+
+    Cutting the tail drops the most recent actions, and those are usually the
+    ones a check turns on -- an agent writes a file, then validates it, and the
+    validation is what the expectation is about. Losing it makes the run look
+    like the agent claimed something it never did.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[: limit // 2]
+    tail = text[-(limit // 2) :]
+    return f"{head}\n...[middle of transcript elided]...\n{tail}"
+
+
 def transcript_of(state) -> str:
     """What the agent did: tool calls and their results, never its prose."""
     parts: list[str] = []
@@ -124,11 +145,11 @@ def transcript_of(state) -> str:
         if getattr(message, "role", "") == "tool":
             content = getattr(message, "content", None)
             if isinstance(content, str):
-                parts.append(content)
-    text = "\n".join(parts)
-    if len(text) > MAX_TRANSCRIPT:
-        text = text[:MAX_TRANSCRIPT] + "\n...[truncated]..."
-    return text
+                body = content.strip()
+                if len(body) > MAX_RESULT:
+                    body = body[:MAX_RESULT] + " ...[output truncated]"
+                parts.append(body)
+    return _elide_middle("\n".join(parts), MAX_TRANSCRIPT)
 
 
 async def artifacts(paths: list[str]) -> tuple[list[str], list[tuple[str, bytes]]]:
