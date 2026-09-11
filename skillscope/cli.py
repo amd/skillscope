@@ -72,7 +72,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, deadline, references, routing, structure
+from . import behavior, config, datasets, deadline, engine, references, routing, structure
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -334,11 +334,53 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
+    if getattr(args, "engine", "legacy") == "inspect":
+        # The inspect engine never shells out to `claude`, so the CLI-based
+        # reachability probe would be testing something this run does not use.
+        engine.require()
+        return selected
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
     return selected
+
+
+def _finish_routing(
+    args: argparse.Namespace,
+    outcomes: list,
+    routing_set: dict,
+    started: float,
+    *,
+    isolated: bool,
+    extra: dict | None = None,
+) -> int:
+    """Summarize, report, and gate a routing run. Shared by both engines."""
+    summary = routing.summarize(
+        outcomes,
+        list(routing_set),
+        {
+            "model": args.model,
+            "engine": args.engine,
+            "effort": args.effort,
+            "skills": list(routing_set),
+            "extended": args.extended,
+            "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
+            "isolated_config_dir": isolated,
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **(extra or {}),
+        },
+    )
+    _write_report(summary, routing.render_markdown(summary), args, "routing")
+
+    if (code := _fail_if_expired()) is not None:
+        return code
+    reason = routing_gate(summary["totals"], args.min_accuracy)
+    if reason:
+        print(f"[routing] {reason}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_routing(args: argparse.Namespace) -> int:
@@ -361,6 +403,15 @@ def cmd_routing(args: argparse.Namespace) -> int:
         cases = datasets.filter_cases(cases, args.only)
     elif args.skill:
         cases = datasets.filter_cases(cases, args.skill)
+
+    if args.engine == "inspect":
+        from .engine import models as engine_models
+        from .engine import routing as inspect_routing
+
+        outcomes = inspect_routing.run(
+            cases, routing_set, engine_models.resolve(args.model)
+        )
+        return _finish_routing(args, outcomes, routing_set, started, isolated=True)
 
     routing_config = routing.RoutingConfig(
         model=args.model,
@@ -392,34 +443,20 @@ def cmd_routing(args: argparse.Namespace) -> int:
     else:
         outcomes = [routing.run_case(case, routing_set, routing_config) for case in cases]
 
-    summary = routing.summarize(
+    return _finish_routing(
+        args,
         outcomes,
-        list(routing_set),
-        {
-            "model": args.model,
-            "effort": args.effort,
-            "skills": list(routing_set),
-            "extended": args.extended,
-            "wall_time_s": round(time.time() - started, 1),
-            "timeout": args.timeout,
+        routing_set,
+        started,
+        isolated=routing_config.isolate_config,
+        extra={
             "case_timeout": args.case_timeout,
             "max_tool_calls": args.max_tool_calls,
             "max_inspection_calls": args.max_inspection_calls,
-            "isolated_config_dir": routing_config.isolate_config,
             "max_budget_usd": args.max_budget_usd,
             "optional_cli_flags_used": sorted(routing_config.available_flags),
-            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
         },
     )
-    _write_report(summary, routing.render_markdown(summary), args, "routing")
-
-    if (code := _fail_if_expired()) is not None:
-        return code
-    reason = routing_gate(summary["totals"], args.min_accuracy)
-    if reason:
-        print(f"[routing] {reason}", file=sys.stderr)
-        return 1
-    return 0
 
 
 def cmd_behavioral(args: argparse.Namespace) -> int:
@@ -442,11 +479,21 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    outcomes = behavior.run(skills, gradable, args.model, args.effort)
+    if args.engine == "inspect":
+        from .engine import behavioral as inspect_behavioral
+        from .engine import models as engine_models
+
+        outcomes = inspect_behavioral.run(
+            skills, gradable, engine_models.resolve(args.model), args.effort
+        )
+    else:
+        outcomes = behavior.run(skills, gradable, args.model, args.effort)
+
     summary = behavior.summarize(
         outcomes,
         {
             "model": args.model,
+            "engine": args.engine,
             "effort": args.effort,
             "skills": skills,
             "extended": args.extended,
@@ -564,6 +611,17 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip the API reachability check."
+    )
+    parser.add_argument(
+        "--engine",
+        default=os.environ.get("SKILLSCOPE_ENGINE", "legacy"),
+        choices=["legacy", "inspect"],
+        help=(
+            "Which eval engine runs the cases. `legacy` drives the claude CLI "
+            "directly; `inspect` runs a harness-independent agent through "
+            "inspect_ai (needs `pip install 'skillscope[inspect]'`). Default: "
+            "legacy, or $SKILLSCOPE_ENGINE."
+        ),
     )
     _add_timeout_argument(parser)
 

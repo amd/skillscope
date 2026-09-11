@@ -19,6 +19,12 @@
       "items": { "type": "string", "minLength": 1 },
       "description": "Extra `runs-on` labels the behavioral cases need, added to the base labels the workflow supplies. Name the hardware, not the pool: `mi300x` says what the skill requires and lands it on any runner registered with that label. A leg that asks for labels is treated as scoped, so it is also what the repo may hold behind a gate label and pay for from a separate environment. Keep the list as short as the runners allow -- every label is a condition a pool has to satisfy, and a label no runner carries is a job that queues forever rather than an error.",
       "examples": [["mi300x"]]
+    },
+    "sandbox": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Compose file, relative to the skill directory, describing the sandbox the behavioral cases need under the inspect engine. Absent means the default container with no network, which is what a skill that only reads and writes files should want. Name one to opt into network egress -- a skill that installs a server or pulls a model cannot run without it -- or to bind a device in. Ignored on Windows, where inspect's sandbox layer assumes a POSIX guest and cases run unsandboxed on the host instead.",
+      "examples": ["compose.yaml"]
     }
   }
 }
