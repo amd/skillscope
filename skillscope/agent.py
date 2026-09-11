@@ -41,7 +41,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import datasets, deadline
+from . import datasets, deadline, usage
 
 DEFAULT_MODEL = os.environ.get("SKILLSCOPE_MODEL", "opus")
 DEFAULT_EFFORT = os.environ.get("SKILLSCOPE_EFFORT", "high")
@@ -70,9 +70,17 @@ def is_automated_env() -> bool:
     )
 
 
+# Model providers that reach no cloud service. The CI pin exists to keep paid
+# runs comparable between runs; one of these grades nothing and costs nothing,
+# so pinning it only turns a free wiring check into a run that needs a key.
+NO_PROVIDER_PREFIXES = ("mockllm",)
+
+
 def enforce_model_policy(model: str | None) -> str | None:
     """Coerce non-opus models to opus in CI; pass through otherwise."""
     if model is None or not is_automated_env() or "opus" in model.lower():
+        return model
+    if model.lower().startswith(NO_PROVIDER_PREFIXES):
         return model
     _safe_print(
         f"[skillscope] automated run: coercing model '{model}' -> "
@@ -387,6 +395,9 @@ class Run:
 
         result_text = ""
         for ev in events:
+            # Recording what the run spent is what lets it be compared against
+            # the same cases on the other engine.
+            usage.record_stream_event(ev)
             if ev.get("type") == "result" and isinstance(ev.get("result"), str):
                 result_text = ev["result"]
 

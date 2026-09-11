@@ -72,7 +72,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, deadline, references, routing, structure
+from . import (
+    behavior,
+    config,
+    datasets,
+    deadline,
+    engine,
+    references,
+    routing,
+    structure,
+    usage,
+)
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -334,11 +344,85 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
+    if getattr(args, "engine", "legacy") in ("inspect", "claude-code"):
+        # The CLI-based reachability probe tests something these engines do not
+        # use, but they still need one of their own: a graded run starts
+        # containers and installs skills before it first reaches a provider, so
+        # without this a bad key surfaces as a task that failed after all that.
+        engine.require()
+        if not args.skip_preflight:
+            from .engine import models as engine_models
+
+            ok, detail = engine_models.check_reachable(engine_models.resolve(args.model))
+            if not ok:
+                raise SystemExit(f"error: model not reachable -- {detail}")
+        return selected
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
     return selected
+
+
+def _sandbox_meta(args: argparse.Namespace) -> dict:
+    """What contained this run, recorded so the report does not have to imply it.
+
+    The legacy engine runs the agent on the host with permissions bypassed, and
+    saying so in the artifact is the point: the same numbers mean different
+    things depending on whether anything was isolated.
+    """
+    if getattr(args, "engine", "legacy") == "legacy":
+        return {"sandbox": "host", "sandbox_isolated": False}
+    from .engine import sandbox as engine_sandbox
+
+    return engine_sandbox.describe()
+
+
+def _finish_routing(
+    args: argparse.Namespace,
+    outcomes: list,
+    routing_set: dict,
+    started: float,
+    *,
+    isolated: bool,
+    extra: dict | None = None,
+) -> int:
+    """Summarize, report, and gate a routing run. Shared by both engines."""
+    summary = routing.summarize(
+        outcomes,
+        list(routing_set),
+        {
+            "model": args.model,
+            "engine": args.engine,
+            "effort": args.effort,
+            "skills": list(routing_set),
+            "extended": args.extended,
+            "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
+            "isolated_config_dir": isolated,
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
+            # Routing under the inspect engine executes nothing -- the skill
+            # tool is offered and never called -- so there is no sandbox and
+            # nothing to isolate. Saying "none" is not the same as saying the
+            # run was unprotected.
+            **(
+                {"sandbox": "none", "sandbox_isolated": None}
+                if args.engine == "inspect"
+                else _sandbox_meta(args)
+            ),
+            **(extra or {}),
+        },
+    )
+    _write_report(summary, routing.render_markdown(summary), args, "routing")
+
+    if (code := _fail_if_expired()) is not None:
+        return code
+    reason = routing_gate(summary["totals"], args.min_accuracy)
+    if reason:
+        print(f"[routing] {reason}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_routing(args: argparse.Namespace) -> int:
@@ -361,6 +445,15 @@ def cmd_routing(args: argparse.Namespace) -> int:
         cases = datasets.filter_cases(cases, args.only)
     elif args.skill:
         cases = datasets.filter_cases(cases, args.skill)
+
+    if args.engine == "inspect":
+        from .engine import models as engine_models
+        from .engine import routing as inspect_routing
+
+        outcomes = inspect_routing.run(
+            cases, routing_set, engine_models.resolve(args.model)
+        )
+        return _finish_routing(args, outcomes, routing_set, started, isolated=True)
 
     routing_config = routing.RoutingConfig(
         model=args.model,
@@ -392,34 +485,20 @@ def cmd_routing(args: argparse.Namespace) -> int:
     else:
         outcomes = [routing.run_case(case, routing_set, routing_config) for case in cases]
 
-    summary = routing.summarize(
+    return _finish_routing(
+        args,
         outcomes,
-        list(routing_set),
-        {
-            "model": args.model,
-            "effort": args.effort,
-            "skills": list(routing_set),
-            "extended": args.extended,
-            "wall_time_s": round(time.time() - started, 1),
-            "timeout": args.timeout,
+        routing_set,
+        started,
+        isolated=routing_config.isolate_config,
+        extra={
             "case_timeout": args.case_timeout,
             "max_tool_calls": args.max_tool_calls,
             "max_inspection_calls": args.max_inspection_calls,
-            "isolated_config_dir": routing_config.isolate_config,
             "max_budget_usd": args.max_budget_usd,
             "optional_cli_flags_used": sorted(routing_config.available_flags),
-            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
         },
     )
-    _write_report(summary, routing.render_markdown(summary), args, "routing")
-
-    if (code := _fail_if_expired()) is not None:
-        return code
-    reason = routing_gate(summary["totals"], args.min_accuracy)
-    if reason:
-        print(f"[routing] {reason}", file=sys.stderr)
-        return 1
-    return 0
 
 
 def cmd_behavioral(args: argparse.Namespace) -> int:
@@ -442,17 +521,33 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    outcomes = behavior.run(skills, gradable, args.model, args.effort)
+    if args.engine in ("inspect", "claude-code"):
+        from .engine import models as engine_models
+
+        if args.engine == "inspect":
+            from .engine import behavioral as runner
+        else:
+            from .engine import verify as runner
+
+        outcomes = runner.run(
+            skills, gradable, engine_models.resolve(args.model), args.effort
+        )
+    else:
+        outcomes = behavior.run(skills, gradable, args.model, args.effort)
+
     summary = behavior.summarize(
         outcomes,
         {
             "model": args.model,
+            "engine": args.engine,
             "effort": args.effort,
             "skills": skills,
             "extended": args.extended,
             "wall_time_s": round(time.time() - started, 1),
             "timeout": args.timeout,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
+            **_sandbox_meta(args),
         },
     )
     _write_report(summary, behavior.render_markdown(summary), args, "behavioral")
@@ -564,6 +659,17 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip the API reachability check."
+    )
+    parser.add_argument(
+        "--engine",
+        default=os.environ.get("SKILLSCOPE_ENGINE", "legacy"),
+        choices=["legacy", "inspect", "claude-code"],
+        help=(
+            "Which eval engine runs the cases. `legacy` drives the claude CLI "
+            "directly; `inspect` runs a harness-independent agent through "
+            "inspect_ai (needs `pip install 'skillscope[inspect]'`). Default: "
+            "legacy, or $SKILLSCOPE_ENGINE."
+        ),
     )
     _add_timeout_argument(parser)
 

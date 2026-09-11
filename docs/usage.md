@@ -208,6 +208,69 @@ Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
 environment gets one matrix, labels and all.
 
+## Which engine grades a run
+
+`--engine` chooses what actually runs the cases. The dataset, the CLI and the
+reports are identical whichever you pick; only the thing driving the agent
+changes.
+
+| `--engine` | What runs | Needs |
+| --- | --- | --- |
+| `legacy` (default) | The `claude` CLI, driven directly | the CLI on `PATH` |
+| `inspect` | A harness-independent agent through `inspect_ai` | `pip install 'skillscope[inspect]'` |
+| `claude-code` | Real Claude Code inside the sandbox, to cross-check the other two | `skillscope[verify]`, Linux only |
+
+`inspect` grades a skill on whether its *instructions* work rather than on how
+one product reads them, which is the stronger claim and the one a product repo
+can adopt. It is also much cheaper: a routing case is a single model call,
+because the decision is visible in the first reply and nothing needs executing.
+
+`claude-code` is a reporting leg, never a gate. Harness runs are
+nondeterministic and the harness is not what is being graded, so a divergence
+there is a question about the skill rather than a build failure.
+
+### Where an `inspect` run is sandboxed
+
+Two separate decisions, made by different people.
+
+**Which provider** is a property of the runner, chosen with
+`SKILLSCOPE_SANDBOX`. Docker by default; `podman` on a host that has that
+instead; `local` to skip the container. `local` is for working locally rather
+than for CI, because a graded run that quietly dropped its sandbox would report
+the same numbers with none of the isolation.
+
+Podman needs three things, and each was discovered by the next one failing:
+
+* `pip install 'skillscope[podman]'`. The provider is registered by a separate
+  package through an entry point, so the podman binary alone is not enough.
+* `podman-compose`, and `INSPECT_PODMAN_COMPOSE=podman-compose`. Bare
+  `podman compose` is a shim that delegates to whichever compose provider it
+  finds, which on a host that also has Docker is Docker's -- and that then
+  talks to a daemon podman was chosen to avoid.
+* A search registry, because podman will not guess one. Docker assumes Docker
+  Hub for an image name with no registry; podman refuses, and the default
+  sandbox image is named without one. `unqualified-search-registries =
+  ["docker.io"]` in `/etc/containers/registries.conf`.
+
+Podman is worth the setup where the runner's user cannot reach the Docker
+socket, since it is daemonless and rootless and needs neither that nor group
+membership.
+
+**What the sandbox must provide** is a property of the skill, declared as
+`sandbox: compose.yaml` in its `evals/machine.yml`. Skills get a container with
+no network by default; one that installs a server or pulls a model cannot run
+that way and says so. Selecting a provider does not discard what a skill asked
+for -- the compose file rides along.
+
+Windows is the exception to both: inspect's sandbox layer and every tool built
+on it assume a POSIX guest, so those legs run unsandboxed and trade isolation
+for running on the platform they are meant to test.
+
+To see what changing engine would do to your own datasets before changing it,
+[`tools/benchmark_engines.py`](../tools/benchmark_engines.py) runs the same
+cases through two engines and reports per-case agreement, measured against how
+much one engine already disagrees with itself.
+
 ## In CI: one job
 
 [`reusable.yml`](../.github/workflows/reusable.yml) grades a repo's skills with

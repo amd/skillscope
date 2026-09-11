@@ -49,7 +49,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import deadline
+from . import deadline, usage
 from .agent import claude_env
 from .datasets import Case
 
@@ -524,6 +524,7 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
             except json.JSONDecodeError:
                 continue
             events.append(event)
+            usage.record_stream_event(event)
 
             reported = _init_skills(event, skills)
             if reported is not None:
@@ -543,6 +544,7 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
 
             if event.get("type") == "result":
                 stop_reason = "result"
+                usage.record_stream_event(event)
                 if event.get("is_error"):
                     error = str(event.get("result") or "result event reported an error")[:400]
                 break

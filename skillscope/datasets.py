@@ -535,7 +535,7 @@ def tier0_errors(skill: str, cases: list[Case]) -> list[str]:
     return errors
 
 
-MACHINE_KEYS = {"os", "labels"}
+MACHINE_KEYS = {"os", "labels", "sandbox"}
 
 
 def _read_machine(skill: str) -> dict:
@@ -573,11 +573,17 @@ def machine_plan(skill: str) -> dict:
 
     An absent ``evals/machine.yml`` is the common case: the everyday runners,
     on the platforms the repo runs on by default. A skill ships one to drop a
-    platform it cannot support (``os``) or to ask for a runner label its work
-    requires (``labels``)::
+    platform it cannot support (``os``), to ask for a runner label its work
+    requires (``labels``), or to name a compose file for the sandbox its cases
+    need (``sandbox``, read by the inspect engine)::
 
         os: [Linux]
         labels: [mi300x]
+        sandbox: compose.yaml
+
+    ``sandbox`` is how a skill that must reach the network to pull a model, or
+    that needs a device bound in, opts out of the default no-network container
+    instead of every skill paying for what one of them needs.
 
     Labels rather than a class name, because a class name has to be defined
     somewhere and that somewhere is a second file to keep in step. A label is
