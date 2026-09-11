@@ -72,7 +72,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, deadline, engine, references, routing, structure
+from . import (
+    behavior,
+    config,
+    datasets,
+    deadline,
+    engine,
+    references,
+    routing,
+    structure,
+    usage,
+)
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -369,6 +379,7 @@ def _finish_routing(
             "timeout": args.timeout,
             "isolated_config_dir": isolated,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
             **(extra or {}),
         },
     )
@@ -500,6 +511,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
             "wall_time_s": round(time.time() - started, 1),
             "timeout": args.timeout,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
         },
     )
     _write_report(summary, behavior.render_markdown(summary), args, "behavioral")
