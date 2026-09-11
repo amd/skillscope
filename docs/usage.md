@@ -229,14 +229,26 @@ because the decision is visible in the first reply and nothing needs executing.
 nondeterministic and the harness is not what is being graded, so a divergence
 there is a question about the skill rather than a build failure.
 
-Under `inspect`, behavioral cases run in a Docker container on Linux and
-unsandboxed on Windows -- inspect's sandbox layer assumes a POSIX guest, so the
-Windows legs trade isolation for running on the platform they are meant to
-test. A skill that needs network egress or a device names a compose file with
-`sandbox:` in its `evals/machine.yml`. `SKILLSCOPE_SANDBOX=local` skips the
-container entirely, which is for working locally rather than for CI: a graded
-run that quietly dropped its sandbox would report the same numbers with none of
-the isolation.
+### Where an `inspect` run is sandboxed
+
+Two separate decisions, made by different people.
+
+**Which provider** is a property of the runner, chosen with
+`SKILLSCOPE_SANDBOX`. Docker by default; `podman` on a host that has that
+instead (`pip install 'skillscope[podman]'` -- the provider registers itself, so
+installing it is the whole setup); `local` to skip the container. `local` is for
+working locally rather than for CI, because a graded run that quietly dropped
+its sandbox would report the same numbers with none of the isolation.
+
+**What the sandbox must provide** is a property of the skill, declared as
+`sandbox: compose.yaml` in its `evals/machine.yml`. Skills get a container with
+no network by default; one that installs a server or pulls a model cannot run
+that way and says so. Selecting a provider does not discard what a skill asked
+for -- the compose file rides along.
+
+Windows is the exception to both: inspect's sandbox layer and every tool built
+on it assume a POSIX guest, so those legs run unsandboxed and trade isolation
+for running on the platform they are meant to test.
 
 To see what changing engine would do to your own datasets before changing it,
 [`tools/benchmark_engines.py`](../tools/benchmark_engines.py) runs the same

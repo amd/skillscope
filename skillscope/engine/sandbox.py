@@ -4,15 +4,24 @@
 
 """Which sandbox a skill's cases run in.
 
-Docker on Linux, `local` on Windows. inspect's sandbox layer -- and every tool
-built on it -- assumes a POSIX guest, so there is no Windows container option
-here; the Windows legs trade isolation for running on the platform they are
-meant to test. DevLab's ephemeral, off-network runners are what covers that gap.
+Two decisions, kept apart because they are made by different people.
 
-A skill declares its needs in `evals/machine.yml`, which already exists to say
-what class of machine a skill wants. An optional `sandbox:` key names a compose
-file relative to the skill directory, so a skill that must reach the network to
-pull a model, or needs `/dev/dri`, says so instead of every skill paying for it.
+**Which provider** is a property of the machine: Docker by default, `podman` on
+a host that has that instead, `local` where there is no container at all.
+`SKILLSCOPE_SANDBOX` selects it, because whoever runs the job knows what the
+runner has and a skill does not. Any provider inspect can resolve works --
+`podman` comes from `inspect-podman`, which registers itself through an
+`inspect_ai` entry point, so installing it is the whole setup.
+
+**What the sandbox has to provide** is a property of the skill, declared in
+`evals/machine.yml` with a `sandbox:` key naming a compose file. A skill that
+must reach the network to pull a model, or that needs a device bound in, says
+so there instead of every skill paying for what one of them needs.
+
+Windows is the exception to both: inspect's sandbox layer, and every tool built
+on it, assumes a POSIX guest, so the Windows legs run `local` and trade
+isolation for running on the platform they are meant to test. Ephemeral,
+off-network runners are what covers that gap.
 """
 
 from __future__ import annotations
@@ -22,37 +31,49 @@ import sys
 
 from .. import datasets
 
-# Escape hatch for local development and wiring runs: `SKILLSCOPE_SANDBOX=local`
-# skips the container entirely. Not for CI -- a graded run that quietly dropped
-# its sandbox would report the same numbers with none of the isolation.
+# Which provider to use. Set it to what the runner actually has: `podman` on a
+# host without Docker, `local` to skip the container entirely. `local` is for
+# working locally, not for CI -- a graded run that quietly dropped its sandbox
+# would report the same numbers with none of the isolation.
 SANDBOX_ENV = "SKILLSCOPE_SANDBOX"
 
-# Hardware-free skills get no network. Skills that need egress ship their own
-# compose file and opt out of this default.
-DEFAULT_COMPOSE = "compose.yaml"
+DEFAULT_PROVIDER = "docker"
+
+# Providers that take no configuration, so a skill's compose file cannot apply.
+UNCONFIGURED = {"local"}
 
 
 def is_windows() -> bool:
     return sys.platform.startswith("win")
 
 
-def for_skill(skill: str):
-    """The `sandbox` spec for a skill's task, or None to use inspect's default.
-
-    Returns a `(type, config)` tuple when a compose file is declared, a bare
-    type name otherwise -- both are accepted as `Task(sandbox=...)`.
-    """
+def provider() -> str:
+    """The sandbox provider for this run."""
     override = os.environ.get(SANDBOX_ENV, "").strip()
     if override:
         return override
-
     if is_windows():
         return "local"
+    return DEFAULT_PROVIDER
 
+
+def for_skill(skill: str):
+    """The `sandbox` spec for a skill's task.
+
+    Returns a `(provider, config)` tuple when the skill declares a compose file
+    and the provider can take one, a bare provider name otherwise -- both are
+    accepted as `Task(sandbox=...)`.
+    """
+    name = provider()
+    if name in UNCONFIGURED:
+        return name
+
+    # The provider is the machine's choice and the compose file is the skill's,
+    # so selecting a provider must not silently discard what the skill asked
+    # for: a skill that needs network egress would otherwise run without it and
+    # fail for a reason nothing in the report explains.
     compose = _declared_compose(skill)
-    if compose is not None:
-        return ("docker", str(compose))
-    return "docker"
+    return (name, str(compose)) if compose is not None else name
 
 
 def _declared_compose(skill: str):

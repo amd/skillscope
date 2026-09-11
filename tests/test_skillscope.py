@@ -51,6 +51,7 @@ from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import routing as engine_routing
+from skillscope.engine import sandbox as engine_sandbox
 from skillscope.engine import tools as engine_tools
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -2699,6 +2700,58 @@ class TestEngineRoutingActivation(unittest.TestCase):
             _Message(),
         ]
         self.assertEqual(engine_routing.tool_call_count(messages), 2)
+
+
+class TestEngineSandboxSelection(unittest.TestCase):
+    """The provider is the machine's choice; the compose file is the skill's."""
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+        os.environ.pop(engine_sandbox.SANDBOX_ENV, None)
+        self.repo = Repo(self)
+
+    def _skill(self, machine: str | None = None, compose: bool = False) -> None:
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"), machine=machine
+        )
+        if compose:
+            (folder / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        self.repo.activate()
+
+    def test_docker_by_default(self) -> None:
+        self._skill()
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "docker")
+
+    def test_the_env_var_selects_the_provider(self) -> None:
+        self._skill()
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "podman")
+
+    def test_a_declared_compose_file_rides_along(self) -> None:
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        provider, config = engine_sandbox.for_skill("boxed")
+        self.assertEqual(provider, "docker")
+        self.assertTrue(config.endswith("compose.yaml"))
+
+    def test_selecting_a_provider_keeps_the_skill_s_compose_file(self) -> None:
+        # The skill asked for network egress; choosing podman must not drop it,
+        # or the case runs without what it needs and fails unexplainably.
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        provider, config = engine_sandbox.for_skill("boxed")
+        self.assertEqual(provider, "podman")
+        self.assertTrue(config.endswith("compose.yaml"))
+
+    def test_local_takes_no_configuration(self) -> None:
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "local")
+
+    def test_a_named_compose_file_that_is_missing_is_an_error(self) -> None:
+        self._skill(machine="sandbox: nope.yaml\n")
+        with self.assertRaises(SystemExit) as caught:
+            engine_sandbox.for_skill("boxed")
+        self.assertIn("nope.yaml", str(caught.exception))
 
 
 if __name__ == "__main__":
