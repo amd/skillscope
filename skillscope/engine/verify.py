@@ -94,7 +94,7 @@ def run(
         logs = inspect_eval(
             build_task(skill, skill_cases),
             model=model,
-            model_args=models.model_args(),
+            model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
             display="plain",
         )

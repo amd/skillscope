@@ -210,6 +210,25 @@ def summarize(outcomes: list[BehaviorOutcome], meta: dict) -> dict:
     }
 
 
+def _isolation_note(meta: dict) -> str:
+    """One line saying whether the agent was contained while it worked.
+
+    Behavioral runs the agent to completion with permissions bypassed, so
+    whether it was isolated changes what the numbers cost to obtain. A report
+    that omits it reads as though it were, and the answer differs per platform:
+    the Windows legs have no sandbox available at all.
+    """
+    where = meta.get("sandbox")
+    if where is None:
+        return ""
+    if meta.get("sandbox_isolated"):
+        return f"Cases ran isolated, in `{where}`."
+    return (
+        f"**Cases ran unsandboxed** (`{where}`): the agent worked directly in "
+        "the harness's own filesystem, with permissions bypassed."
+    )
+
+
 def render_markdown(summary: dict) -> str:
     totals = summary["totals"]
     meta = summary["meta"]
@@ -219,6 +238,8 @@ def render_markdown(summary: dict) -> str:
         f"**{totals['passed']}/{totals['cases']} cases passed** "
         f"({totals['checks_passed']}/{totals['checks']} individual expectations) "
         f"on `{meta['model']}` (effort `{meta['effort']}`).",
+        "",
+        _isolation_note(meta),
         "",
         "| Skill | Cases | Passed | Expectations | Met |",
         "| --- | --- | --- | --- | --- |",

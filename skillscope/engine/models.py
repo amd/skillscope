@@ -49,13 +49,21 @@ def custom_headers() -> dict[str, str]:
     return headers
 
 
-def model_args() -> dict:
+def model_args(model: str) -> dict:
     """Provider arguments for the configured gateway, if any.
 
     inspect passes these straight to `AsyncAnthropic`, so custom headers ride in
     as `default_headers`. Empty when no gateway headers are configured, which is
     the ordinary api.anthropic.com case.
+
+    Scoped to Anthropic models on purpose. The free `mockllm/model` wiring run
+    reaches no provider at all, and refusing it because the shell happens to
+    hold both Anthropic variables would break the one check that costs nothing
+    -- on exactly the machines most likely to have an OAuth token lying around.
     """
+    if not model.startswith("anthropic/"):
+        return {}
+
     headers = custom_headers()
     if not headers:
         return {}

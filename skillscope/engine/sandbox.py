@@ -42,6 +42,22 @@ DEFAULT_PROVIDER = "docker"
 # Providers that take no configuration, so a skill's compose file cannot apply.
 UNCONFIGURED = {"local"}
 
+# `local` runs in the same filesystem as the harness: the sandbox API works, but
+# nothing is isolated. Named so a report can say which it was.
+NOT_ISOLATED = {"local"}
+
+
+def describe() -> dict:
+    """What the report should say about isolation.
+
+    A report that shows the same numbers whether or not a case was contained
+    invites the reader to assume it was. Both engines say it outright instead,
+    so "these ran isolated and those did not" is answerable from the artifact
+    rather than from whoever remembers how the job was configured.
+    """
+    name = provider()
+    return {"sandbox": name, "sandbox_isolated": name not in NOT_ISOLATED}
+
 
 def is_windows() -> bool:
     return sys.platform.startswith("win")

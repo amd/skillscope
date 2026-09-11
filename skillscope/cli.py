@@ -356,6 +356,20 @@ def _prepare_graded_run(
     return selected
 
 
+def _sandbox_meta(args: argparse.Namespace) -> dict:
+    """What contained this run, recorded so the report does not have to imply it.
+
+    The legacy engine runs the agent on the host with permissions bypassed, and
+    saying so in the artifact is the point: the same numbers mean different
+    things depending on whether anything was isolated.
+    """
+    if getattr(args, "engine", "legacy") == "legacy":
+        return {"sandbox": "host", "sandbox_isolated": False}
+    from .engine import sandbox as engine_sandbox
+
+    return engine_sandbox.describe()
+
+
 def _finish_routing(
     args: argparse.Namespace,
     outcomes: list,
@@ -380,6 +394,15 @@ def _finish_routing(
             "isolated_config_dir": isolated,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
             **usage.snapshot().as_meta(),
+            # Routing under the inspect engine executes nothing -- the skill
+            # tool is offered and never called -- so there is no sandbox and
+            # nothing to isolate. Saying "none" is not the same as saying the
+            # run was unprotected.
+            **(
+                {"sandbox": "none", "sandbox_isolated": None}
+                if args.engine == "inspect"
+                else _sandbox_meta(args)
+            ),
             **(extra or {}),
         },
     )
@@ -516,6 +539,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
             "timeout": args.timeout,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
             **usage.snapshot().as_meta(),
+            **_sandbox_meta(args),
         },
     )
     _write_report(summary, behavior.render_markdown(summary), args, "behavioral")
