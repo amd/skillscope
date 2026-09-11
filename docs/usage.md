@@ -235,10 +235,26 @@ Two separate decisions, made by different people.
 
 **Which provider** is a property of the runner, chosen with
 `SKILLSCOPE_SANDBOX`. Docker by default; `podman` on a host that has that
-instead (`pip install 'skillscope[podman]'` -- the provider registers itself, so
-installing it is the whole setup); `local` to skip the container. `local` is for
-working locally rather than for CI, because a graded run that quietly dropped
-its sandbox would report the same numbers with none of the isolation.
+instead; `local` to skip the container. `local` is for working locally rather
+than for CI, because a graded run that quietly dropped its sandbox would report
+the same numbers with none of the isolation.
+
+Podman needs three things, and each was discovered by the next one failing:
+
+* `pip install 'skillscope[podman]'`. The provider is registered by a separate
+  package through an entry point, so the podman binary alone is not enough.
+* `podman-compose`, and `INSPECT_PODMAN_COMPOSE=podman-compose`. Bare
+  `podman compose` is a shim that delegates to whichever compose provider it
+  finds, which on a host that also has Docker is Docker's -- and that then
+  talks to a daemon podman was chosen to avoid.
+* A search registry, because podman will not guess one. Docker assumes Docker
+  Hub for an image name with no registry; podman refuses, and the default
+  sandbox image is named without one. `unqualified-search-registries =
+  ["docker.io"]` in `/etc/containers/registries.conf`.
+
+Podman is worth the setup where the runner's user cannot reach the Docker
+socket, since it is daemonless and rootless and needs neither that nor group
+membership.
 
 **What the sandbox must provide** is a property of the skill, declared as
 `sandbox: compose.yaml` in its `evals/machine.yml`. Skills get a container with
