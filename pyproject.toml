@@ -28,6 +28,11 @@ dependencies = ["pyyaml>=6.0"]
 # optional, so installing it alone gets you a harness that cannot reach a model.
 inspect = ["inspect-ai>=0.3.263", "anthropic>=0.40"]
 
+# For a runner that has podman rather than docker. The provider registers
+# itself through an `inspect_ai` entry point, so installing it is the whole
+# setup; `SKILLSCOPE_SANDBOX=podman` then selects it.
+podman = ["skillscope[inspect]", "inspect-podman"]
+
 # The Claude Code verification leg (`--engine claude-code`). Separate from
 # `inspect` because it is a reporting-only cross-check, not something a graded
 # run needs -- and because it only works on a POSIX guest.
