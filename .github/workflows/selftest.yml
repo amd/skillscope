@@ -61,6 +61,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # inspect-ai pulls in the order of eighty packages, so the download
+          # is most of this step. Keyed on pyproject, which is where the extra
+          # is declared and the only thing that changes what gets installed.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install with the inspect extra
         run: python -m pip install --upgrade pip && python -m pip install ".[inspect]"

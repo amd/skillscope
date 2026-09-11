@@ -53,7 +53,7 @@ def require() -> None:
         raise SystemExit(INSTALL_HINT) from exc
 
 
-def build_task(skill: str, cases: list[Case], ctx: dict | None = None):
+def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = None):
     """One task per skill, solved by real Claude Code rather than our agent."""
     from inspect_ai import Task
     from inspect_swe import claude_code
@@ -71,7 +71,7 @@ def build_task(skill: str, cases: list[Case], ctx: dict | None = None):
         solver=claude_code(skills=[skill_dir]),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
-        message_limit=behavioral.MESSAGE_LIMIT,
+        message_limit=behavioral.message_limit_for(model),
         time_limit=int(bound.remaining()) if bound is not None else None,
     )
 
@@ -92,7 +92,7 @@ def run(
 
         print(f"[claude-code] {skill}: {len(skill_cases)} case(s)", flush=True)
         logs = inspect_eval(
-            build_task(skill, skill_cases),
+            build_task(skill, skill_cases, model),
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
