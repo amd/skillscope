@@ -44,11 +44,19 @@ def seed_files(seed: Path) -> dict[str, str]:
     if not seed.is_dir():
         raise FileNotFoundError(f"workspace fixture directory not found: {seed}")
 
+    from . import tools
+
+    # Seeded under the same directory the tools resolve against. inspect writes
+    # these relative to the sandbox's own working directory, which for a
+    # container is `/` -- so without this a case's fixture would land beside
+    # `/etc` while the agent worked somewhere else.
+    prefix = f"{tools.WORKDIR.lstrip('/')}/" if tools.containerized() else ""
+
     files: dict[str, str] = {}
     for path in sorted(seed.rglob("*")):
         if path.is_file():
             target = path.relative_to(seed).as_posix()
-            files[target] = str(path)
+            files[prefix + target] = str(path)
     return files
 
 
