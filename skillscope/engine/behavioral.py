@@ -37,6 +37,23 @@ def _tools(skill_dir: Path) -> list:
     return [skill([skill_dir]), *tools.toolset()]
 
 
+def _prompt() -> str | None:
+    """Tell the agent where its work belongs, when that is not obvious.
+
+    A container sandbox starts at `/`, and an agent left to guess reasonably
+    tries `/app`, then `~`, and scatters its output. What a case produced then
+    depends on where the agent happened to `cd`, which is not something the
+    dataset should have to predict.
+    """
+    if not tools.containerized():
+        return None
+    return (
+        f"Your working directory is {tools.WORKDIR}. Create and edit files "
+        "there, using paths relative to it, so the work you produce can be "
+        "found afterwards."
+    )
+
+
 def build_task(skill: str, cases: list[Case], ctx: dict | None = None):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer."""
     from inspect_ai import Task
@@ -49,7 +66,7 @@ def build_task(skill: str, cases: list[Case], ctx: dict | None = None):
     return Task(
         name=f"behavioral-{skill}",
         dataset=samples,
-        solver=react(tools=_tools(skill_dir)),
+        solver=react(prompt=_prompt(), tools=_tools(skill_dir)),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=MESSAGE_LIMIT,

@@ -20,6 +20,15 @@ platform is not the answer.
 from __future__ import annotations
 
 SHELL_KEY = "skillscope_shell"
+WORKDIR_KEY = "skillscope_workdir"
+
+# A container sandbox starts at `/`, so a relative path lands beside `/proc` and
+# `/etc` and a recursive listing walks the whole image. Everything the case does
+# happens here instead: fixtures are seeded into it, tools resolve against it,
+# and it is what gets listed. inspect_swe resolves the same problem the same way
+# -- its agent cwd falls back to the home directory when the sandbox default is
+# `/`.
+WORKDIR = "/workspace"
 
 POSIX_SHELL = ["bash", "-lc"]
 WINDOWS_SHELL = ["powershell", "-NoProfile", "-Command"]
@@ -49,12 +58,50 @@ async def shell_prefix() -> list[str]:
     return list(prefix)
 
 
+def containerized() -> bool:
+    """Whether this run has a sandbox of its own to work in."""
+    from . import sandbox as sandbox_spec
+
+    return sandbox_spec.provider() not in sandbox_spec.NOT_ISOLATED
+
+
+async def workdir() -> str | None:
+    """The directory a case works in, or None to use the sandbox's own.
+
+    `local` needs none: the harness's working directory is already a sensible
+    place and creating `/workspace` on someone's machine would not be.
+    """
+    if not containerized():
+        return None
+
+    from inspect_ai.util import sandbox, store
+
+    cached = store().get(WORKDIR_KEY)
+    if cached:
+        return cached
+
+    prefix = await shell_prefix()
+    await sandbox().exec(prefix + [f"mkdir -p {WORKDIR}"], concurrency=False)
+    store().set(WORKDIR_KEY, WORKDIR)
+    return WORKDIR
+
+
+async def resolve(path: str) -> str:
+    """A case-relative path, as the sandbox should see it."""
+    base = await workdir()
+    if base is None or path.startswith("/"):
+        return path
+    return f"{base}/{path.lstrip('./')}"
+
+
 async def run(command: str, timeout: int | None = None):
-    """Run `command` through whichever shell the sandbox has."""
+    """Run `command` through whichever shell the sandbox has, in the workdir."""
     from inspect_ai.util import sandbox
 
     prefix = await shell_prefix()
-    return await sandbox().exec(prefix + [command], timeout=timeout)
+    return await sandbox().exec(
+        prefix + [command], cwd=await workdir(), timeout=timeout
+    )
 
 
 def normalize_listing(stdout: str) -> list[str]:
@@ -157,7 +204,7 @@ def write_file():
             """
             from inspect_ai.util import sandbox
 
-            await sandbox().write_file(path, content)
+            await sandbox().write_file(await resolve(path), content)
             return f"wrote {len(content)} characters to {path}"
 
         return execute
@@ -187,7 +234,8 @@ def edit_file():
             """
             from inspect_ai.util import sandbox
 
-            current = await sandbox().read_file(path, text=True)
+            target = await resolve(path)
+            current = await sandbox().read_file(target, text=True)
             found = current.count(old_text)
             if found == 0:
                 return f"no edit made: {path} does not contain that text"
@@ -196,7 +244,7 @@ def edit_file():
                     f"no edit made: that text appears {found} times in {path}. "
                     "Include more surrounding context so it matches once."
                 )
-            await sandbox().write_file(path, current.replace(old_text, new_text, 1))
+            await sandbox().write_file(target, current.replace(old_text, new_text, 1))
             return f"edited {path}"
 
         return execute
