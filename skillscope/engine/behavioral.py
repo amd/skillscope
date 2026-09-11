@@ -124,7 +124,7 @@ def run(
         logs = inspect_eval(
             build_task(skill, skill_cases),
             model=model,
-            model_args=models.model_args(),
+            model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
             # skillscope's own progress lines are the report; inspect's rich
             # display takes over the terminal and produces nothing useful when

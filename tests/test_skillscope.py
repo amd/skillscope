@@ -2535,14 +2535,14 @@ class TestEngineGatewayHeaders(unittest.TestCase):
             os.environ.pop(var, None)
 
     def test_no_headers_configured_means_no_provider_arguments(self) -> None:
-        self.assertEqual(engine_models.model_args(), {})
+        self.assertEqual(engine_models.model_args("anthropic/claude-opus-5"), {})
 
     def test_headers_are_parsed_into_default_headers(self) -> None:
         os.environ[engine_models.CUSTOM_HEADERS_ENV] = (
             "Ocp-Apim-Subscription-Key: secret\nuser: a1_ucicd\n"
         )
         self.assertEqual(
-            engine_models.model_args(),
+            engine_models.model_args("anthropic/claude-opus-5"),
             {
                 "default_headers": {
                     "Ocp-Apim-Subscription-Key": "secret",
@@ -2561,13 +2561,21 @@ class TestEngineGatewayHeaders(unittest.TestCase):
         os.environ[engine_models.CUSTOM_HEADERS_ENV] = "\nnot-a-header\n\nk: v\n"
         self.assertEqual(engine_models.custom_headers(), {"k": "v"})
 
+    def test_a_non_anthropic_model_needs_no_gateway_arguments(self) -> None:
+        # The free wiring run reaches no provider, so a shell that happens to
+        # hold both Anthropic variables must not break the one check that costs
+        # nothing -- and those are exactly the machines that have an OAuth token.
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "k: v"
+        os.environ[engine_models.AUTH_TOKEN_ENV] = "token"
+        self.assertEqual(engine_models.model_args("mockllm/model"), {})
+
     def test_oauth_and_gateway_headers_together_are_refused(self) -> None:
         # inspect's OAuth path sets `default_headers` itself, so ours would be a
         # duplicate keyword argument deep inside the SDK. Fail with the reason.
         os.environ[engine_models.CUSTOM_HEADERS_ENV] = "k: v"
         os.environ[engine_models.AUTH_TOKEN_ENV] = "token"
         with self.assertRaises(SystemExit) as caught:
-            engine_models.model_args()
+            engine_models.model_args("anthropic/claude-opus-5")
         self.assertIn(engine_models.AUTH_TOKEN_ENV, str(caught.exception))
 
 

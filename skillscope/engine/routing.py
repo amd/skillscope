@@ -161,7 +161,7 @@ def run(cases: list[Case], routing_set: dict[str, Path], model: str) -> list[Out
     logs = inspect_eval(
         build_task(cases, routing_set),
         model=model,
-        model_args=models.model_args(),
+        model_args=models.model_args(model),
         log_dir=str(Path(".skillscope") / "logs"),
         display="plain",
     )
