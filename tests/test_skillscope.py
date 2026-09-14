@@ -2501,5 +2501,119 @@ class TestRoutingCasePooling(unittest.TestCase):
         self.assertTrue(all(case.skill is None for case in cases))
 
 
+class TestARunRecordsWhatProducedIt(unittest.TestCase):
+    """A score is only comparable to another if the same things produced both.
+
+    `model` in a report is the alias the caller asked for, and what `opus`
+    points at moves. The CLI that discovers and activates a skill updates on
+    its own schedule. Without those written down, two runs that disagree hold
+    nothing that separates a skill getting worse from a dependency that
+    changed, so these fields are the report's own provenance and the tests
+    here are about them being right rather than merely present.
+    """
+
+    def setUp(self) -> None:
+        self.addCleanup(agent.cli_version.cache_clear)
+        agent.cli_version.cache_clear()
+        # The resolved model is module state, set by whichever preflight ran
+        # last. Put back whatever the process already had.
+        previous = agent._RESOLVED_MODEL
+        self.addCleanup(setattr, agent, "_RESOLVED_MODEL", previous)
+
+    @staticmethod
+    def usage(*models: tuple[str, int]) -> str:
+        return json.dumps(
+            {"modelUsage": {name: {"outputTokens": out} for name, out in models}}
+        )
+
+    def test_the_alias_picks_its_own_entry_out_of_a_shared_usage_block(self) -> None:
+        # The CLI bills auxiliary work to a model the run never asked for: a
+        # preflight for `sonnet` comes back with a session-title model listed
+        # beside it. Taking the first entry reports that one.
+        blob = self.usage(("gpt-5.5", 9), ("claude-sonnet-5", 4))
+        self.assertEqual(agent._model_from_result(blob, "sonnet"), "claude-sonnet-5")
+
+    def test_the_canonical_name_wins_over_the_key_it_was_billed_under(self) -> None:
+        blob = json.dumps(
+            {
+                "modelUsage": {
+                    "opus": {"canonicalModel": "claude-opus-5-20260722", "outputTokens": 4}
+                }
+            }
+        )
+        self.assertEqual(
+            agent._model_from_result(blob, "opus"), "claude-opus-5-20260722"
+        )
+
+    def test_with_no_alias_the_entry_that_did_the_work_is_the_answer(self) -> None:
+        blob = self.usage(("a-title-model", 2), ("the-one-that-answered", 400))
+        self.assertEqual(
+            agent._model_from_result(blob, None), "the-one-that-answered"
+        )
+
+    def test_output_that_says_nothing_about_a_model_resolves_to_nothing(self) -> None:
+        for stdout in ("", "not json at all", "{}", '{"modelUsage": []}',
+                       '{"modelUsage": {}}'):
+            with self.subTest(stdout=stdout):
+                self.assertIsNone(agent._model_from_result(stdout, "opus"))
+
+    def test_a_reachable_api_leaves_behind_the_model_it_served(self) -> None:
+        served = self.usage(("claude-opus-5-20260722", 4))
+        with mock.patch.object(agent.shutil, "which", return_value="/usr/bin/claude"), \
+            mock.patch.object(
+                agent.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, served, ""),
+            ):
+            agent._RESOLVED_MODEL = None
+            self.assertEqual(agent.check_api_reachable("opus"), (True, "ok"))
+        self.assertEqual(agent.resolved_model(), "claude-opus-5-20260722")
+
+    def test_a_preflight_nobody_ran_reports_no_model_rather_than_a_guess(self) -> None:
+        # `--skip-preflight` means nothing has spoken to the API. Reporting the
+        # alias here would state as fact something no call confirmed.
+        agent._RESOLVED_MODEL = None
+        self.assertIsNone(agent.resolved_model())
+
+    def test_the_cli_version_is_the_number_not_the_product_name(self) -> None:
+        with mock.patch.object(agent.shutil, "which", return_value="/usr/bin/claude"), \
+            mock.patch.object(
+                agent.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "2.1.270 (Claude Code)\n", ""
+                ),
+            ):
+            self.assertEqual(agent.cli_version(), "2.1.270")
+
+    def test_no_cli_on_the_path_is_reported_as_unknown_not_as_a_crash(self) -> None:
+        # Structural runs never touch an agent, so an absent CLI must not be
+        # what stops a report being written.
+        with mock.patch.object(agent.shutil, "which", return_value=None):
+            self.assertIsNone(agent.cli_version())
+
+    def test_a_cli_that_fails_to_answer_is_also_unknown(self) -> None:
+        with mock.patch.object(agent.shutil, "which", return_value="/usr/bin/claude"), \
+            mock.patch.object(
+                agent.subprocess, "run", side_effect=OSError("boom")
+            ):
+            self.assertIsNone(agent.cli_version())
+
+    def test_every_report_carries_the_three_provenance_fields(self) -> None:
+        with mock.patch.object(agent, "cli_version", return_value="2.1.270"), \
+            mock.patch.object(agent, "resolved_model", return_value="claude-opus-5"):
+            self.assertEqual(
+                cli._provenance(),
+                {
+                    "engine": cli.ENGINE,
+                    "agent_cli_version": "2.1.270",
+                    "model_resolved": "claude-opus-5",
+                },
+            )
+
+    def test_the_engine_is_named_so_a_reader_never_has_to_date_the_report(self) -> None:
+        self.assertEqual(cli.ENGINE, "legacy")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
