@@ -2601,6 +2601,23 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
         self.assertTrue(all(o.checks == [] for o in outcomes))
 
 
+class TestEngineWorkdirPath(unittest.TestCase):
+    """The working directory has to be knowable before a sandbox exists."""
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+
+    def test_a_container_run_names_the_workdir_without_creating_it(self) -> None:
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        self.assertEqual(engine_tools.workdir_path(), engine_tools.WORKDIR)
+
+    def test_a_local_run_has_none_so_the_agent_keeps_its_own(self) -> None:
+        # Creating /workspace on somebody's laptop is not ours to do, and the
+        # harness's own directory is already where the scorers look.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        self.assertIsNone(engine_tools.workdir_path())
+
+
 class TestEngineCliAgentGuard(unittest.TestCase):
     """The CLI runs on the host, so the sandbox has to be the host."""
 

@@ -31,7 +31,15 @@ from pathlib import Path
 from .. import config, deadline
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
-from . import behavioral, convert, models, sandbox as sandbox_spec, scorers, stats
+from . import (
+    behavioral,
+    convert,
+    models,
+    sandbox as sandbox_spec,
+    scorers,
+    stats,
+    tools,
+)
 
 INSTALL_HINT = (
     "error: --engine claude-code needs the verify extra. Install it with:\n"
@@ -53,14 +61,42 @@ def require() -> None:
         raise SystemExit(INSTALL_HINT) from exc
 
 
+def _ensure_workdir():
+    """Create the directory the scorers read, before the agent runs in it.
+
+    The other engines reach it lazily, the first time one of our own tools is
+    used. This leg's agent brings its own tools and never calls ours, so
+    nothing would create it -- and `cwd` below has to name a directory that
+    exists.
+    """
+    from inspect_ai.solver import solver
+
+    @solver
+    def _ensure():
+        async def solve(state, generate):
+            await tools.workdir()
+            return state
+
+        return solve
+
+    return _ensure()
+
+
 def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = None):
     """One task per skill, solved by real Claude Code rather than our agent."""
     from inspect_ai import Task
+    from inspect_ai.solver import chain
     from inspect_swe import claude_code
 
     skill_dir = config.active().skill_path(skill)
     samples = [convert.sample_from_case(c, skill_dir, ctx) for c in cases]
 
+    # Where the agent works has to be where the scorers look. A container
+    # starts at `/`, and left to itself the agent scattered its output there:
+    # every `files_exist` check in the first trial run reported an empty
+    # sandbox, which reads as "the agent did nothing" rather than "the agent
+    # worked somewhere else". The other engines say this in a prompt, because
+    # their agent takes instructions; this one takes a working directory.
     bound = deadline.active()
     return Task(
         name=f"claude-code-{skill}",
@@ -68,7 +104,10 @@ def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = Non
         # `skills=` installs into .claude/skills inside the sandbox, which is
         # where the real harness looks -- the point of this leg is that its
         # discovery machinery, not ours, decides what happens.
-        solver=claude_code(skills=[skill_dir]),
+        solver=chain(
+            _ensure_workdir(),
+            claude_code(skills=[skill_dir], cwd=tools.workdir_path()),
+        ),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=behavioral.message_limit_for(model),

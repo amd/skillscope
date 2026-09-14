@@ -65,6 +65,16 @@ def containerized() -> bool:
     return sandbox_spec.provider() not in sandbox_spec.NOT_ISOLATED
 
 
+def workdir_path() -> str | None:
+    """The same answer as `workdir()`, without creating anything.
+
+    A task is built before any sandbox exists, so a solver that needs to be
+    *told* the working directory at construction time cannot await the version
+    that makes it.
+    """
+    return WORKDIR if containerized() else None
+
+
 async def workdir() -> str | None:
     """The directory a case works in, or None to use the sandbox's own.
 
