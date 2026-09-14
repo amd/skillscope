@@ -87,6 +87,21 @@ def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = Non
     )
 
 
+def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]:
+    """One failed outcome per case, for a skill that could not be run at all."""
+    return [
+        BehaviorOutcome(
+            id=case.id,
+            skill=skill,
+            prompt=case.prompt,
+            passed=False,
+            elapsed_s=0.0,
+            error=detail,
+        )
+        for case in cases
+    ]
+
+
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     """Map one inspect `EvalLog` back onto skillscope's outcome objects.
 
@@ -99,17 +114,7 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
 
     if log.status == "error" or not log.samples:
         detail = getattr(log.error, "message", None) or "the task produced no samples"
-        return [
-            BehaviorOutcome(
-                id=case.id,
-                skill=skill,
-                prompt=case.prompt,
-                passed=False,
-                elapsed_s=0.0,
-                error=f"inspect task failed: {detail}",
-            )
-            for case in cases
-        ]
+        return _failed(skill, cases, f"inspect task failed: {detail}")
 
     for sample in log.samples:
         case_id = str(sample.id)
@@ -153,16 +158,26 @@ def run(
             continue
 
         print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
-        logs = inspect_eval(
-            build_task(skill, skill_cases, model),
-            model=model,
-            model_args=models.model_args(model),
-            log_dir=str(Path(".skillscope") / "logs"),
-            # skillscope's own progress lines are the report; inspect's rich
-            # display takes over the terminal and produces nothing useful when
-            # a CI job pipes stdout to a file.
-            display="plain",
-        )
+        try:
+            logs = inspect_eval(
+                build_task(skill, skill_cases, model),
+                model=model,
+                model_args=models.model_args(model),
+                log_dir=str(Path(".skillscope") / "logs"),
+                # skillscope's own progress lines are the report; inspect's rich
+                # display takes over the terminal and produces nothing useful
+                # when a CI job pipes stdout to a file.
+                display="plain",
+            )
+        except SystemExit as exc:
+            # One skill's broken setup is that skill's failure, not everybody's.
+            # A malformed sandbox declaration used to abort the whole command,
+            # throwing away results for skills already graded and paid for --
+            # the same reason the structural gate reads only the skills a run
+            # is about.
+            outcomes.extend(_failed(skill, skill_cases, str(exc)))
+            continue
+
         for log in logs:
             stats.record_log(log)
             outcomes.extend(_outcomes(log, skill, skill_cases))

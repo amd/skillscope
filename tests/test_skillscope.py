@@ -2583,6 +2583,23 @@ class TestEngineMessageLimit(unittest.TestCase):
         )
 
 
+class TestEngineSkillFailureIsContained(unittest.TestCase):
+    """One skill's broken setup is that skill's failure, not everybody's."""
+
+    def test_a_skill_that_cannot_run_becomes_failed_outcomes(self) -> None:
+        cases = [
+            datasets.Case(id="a", prompt="p", skill="broken", skill_should_trigger=True),
+            datasets.Case(id="b", prompt="q", skill="broken", skill_should_trigger=True),
+        ]
+        outcomes = engine_behavioral._failed(cases[0].skill, cases, "no compose file")
+        self.assertEqual([o.id for o in outcomes], ["a", "b"])
+        self.assertTrue(all(not o.passed for o in outcomes))
+        self.assertTrue(all("no compose file" in (o.error or "") for o in outcomes))
+        # Not silence: an unreported skill would let a run that graded nothing
+        # call itself green.
+        self.assertTrue(all(o.checks == [] for o in outcomes))
+
+
 class TestEngineModelNames(unittest.TestCase):
     """`--model` speaks the claude CLI's aliases; inspect wants provider names."""
 
