@@ -104,30 +104,40 @@ def final_message_of(state) -> str:
     the cloud API" must neither satisfy nor fail an expectation that it avoided
     doing so. The prompt says which to use for which.
     """
-    # A `react` agent delivers its answer through the submit tool, and that is
-    # what lands in `output.completion`. The last assistant *message* can be
-    # the preamble that introduces it -- "the commands are below" -- so reading
-    # only that can show the judge a description of an answer instead of the
-    # answer.
-    completion = getattr(getattr(state, "output", None), "completion", None)
-    if isinstance(completion, str) and completion.strip():
-        return completion.strip()[:MAX_TRANSCRIPT]
-
-    for message in reversed(state.messages):
+    # Everything the agent said, not just the last thing. In an agent loop the
+    # user sees every assistant turn, so an expectation about what the agent
+    # told them is satisfied by any of those -- an agent that prints the
+    # commands mid-run and then submits a summary did tell the user. Reading
+    # only the final turn credited it with the summary and called the commands
+    # missing.
+    #
+    # The submitted answer comes last and is marked, because that is the
+    # agent's actual answer where the rest is working.
+    said: list[str] = []
+    for message in state.messages:
         if getattr(message, "role", None) != "assistant":
             continue
         content = getattr(message, "content", None)
         if isinstance(content, str) and content.strip():
-            return content.strip()[:MAX_TRANSCRIPT]
-        if isinstance(content, list):
+            said.append(content.strip())
+        elif isinstance(content, list):
             texts = [
                 part.text
                 for part in content
-                if isinstance(getattr(part, "text", None), str)
+                if isinstance(getattr(part, "text", None), str) and part.text.strip()
             ]
-            if any(t.strip() for t in texts):
-                return "\n".join(texts).strip()[:MAX_TRANSCRIPT]
-    return "(the agent said nothing)"
+            if texts:
+                said.append("\n".join(texts).strip())
+
+    completion = getattr(getattr(state, "output", None), "completion", None)
+    if isinstance(completion, str) and completion.strip():
+        answer = completion.strip()
+        if answer not in said:
+            said.append(f"[submitted answer]\n{answer}")
+
+    if not said:
+        return "(the agent said nothing)"
+    return _elide_middle("\n\n".join(said), MAX_TRANSCRIPT)
 
 
 def _elide_middle(text: str, limit: int) -> str:

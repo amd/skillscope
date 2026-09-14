@@ -2784,17 +2784,30 @@ class _Assistant:
 class TestEngineJudgeFinalMessage(unittest.TestCase):
     """A `react` agent answers through submit, not through a chat message."""
 
-    def test_the_submitted_answer_wins(self) -> None:
-        # The last assistant message is often the preamble that introduces the
-        # answer. Grading that instead shows the judge a description of the
-        # work rather than the work.
+    def test_the_submitted_answer_is_included_and_marked(self) -> None:
         state = _State(
             [_Assistant("Here are the commands you need:")],
             _Output("curl -X POST /api/v1/pull -d '{...}'"),
         )
+        said = engine_judge.final_message_of(state)
+        self.assertIn("curl -X POST", said)
+        self.assertIn("[submitted answer]", said)
+
+    def test_an_earlier_turn_still_counts_as_having_told_the_user(self) -> None:
+        # The user sees every assistant turn, so an agent that prints the
+        # commands mid-run and then submits a summary did tell them. Reading
+        # only the last turn credited the summary and called the commands
+        # missing.
+        state = _State(
+            [
+                _Assistant("Run: curl -X POST /api/v1/pull"),
+                _Assistant("Done -- commands delivered above."),
+            ],
+            _Output("Done -- commands delivered above."),
+        )
         self.assertIn("curl -X POST", engine_judge.final_message_of(state))
 
-    def test_it_falls_back_to_the_last_assistant_message(self) -> None:
+    def test_it_works_without_a_submit_tool(self) -> None:
         state = _State([_Assistant("no submit tool in this agent")], None)
         self.assertEqual(
             engine_judge.final_message_of(state), "no submit tool in this agent"
