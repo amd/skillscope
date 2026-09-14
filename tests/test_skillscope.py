@@ -1693,6 +1693,84 @@ class TestSkillStructure(unittest.TestCase):
             cli._structural_or_exit()
 
 
+class TestPathsASkillWritesAboutItself(unittest.TestCase):
+    """A skill names its own scripts and data in prose and in code spans.
+
+    Those are not markdown links, so the reference checks never see them. A
+    path that reaches outside the folder is dead in every install: vendored
+    into a catalog, copied into an agent's skills directory, or fetched with
+    the CLI. It resolves only for someone standing in the repo it was written
+    in, which is the one place it is never needed.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.folder = self.repo.skill(
+            "demo-skill",
+            dataset=tier0_dataset("demo"),
+            workspace={
+                "scripts/detect.py": "print('detecting')\n",
+                "templates/spec.md": "# Spec\n",
+            },
+        )
+        self.repo.activate()
+
+    def body(self, text: str, where: str = "SKILL.md") -> None:
+        """Give the skill a body, in SKILL.md or in a file beside it."""
+        path = self.folder / where
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if where == "SKILL.md":
+            text = f"---\nname: demo-skill\ndescription: Does demo things.\n---\n{text}"
+        path.write_text(text, encoding="utf-8")
+
+    def test_a_path_that_resolves_from_the_skill_root_is_left_alone(self) -> None:
+        self.body("Run `scripts/detect.py` before anything else.\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_path_that_resolves_from_the_file_it_sits_in_is_left_alone(self) -> None:
+        self.body("Follow `../templates/spec.md`.\n", where="agents/helper.md")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_path_carrying_the_source_repos_layout_is_reported(self) -> None:
+        self.body("Read `Upstream/Repo/skills/demo-skill/scripts/detect.py` first.\n")
+        errors = structure.errors()
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("Upstream/Repo/skills/demo-skill/scripts/detect.py", errors[0])
+        self.assertIn("`scripts/detect.py`", errors[0])
+
+    def test_a_variable_rooted_path_is_the_skills_own(self) -> None:
+        self.body("Run `${SKILL_DIR}/scripts/detect.py`.\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_relative_path_inside_a_script_is_not_markdown(self) -> None:
+        # Resolved at runtime against the script, which is not where the agent
+        # is standing, so it is not the agent's path to follow.
+        self.body("Run `scripts/detect.py`.\n")
+        (self.folder / "scripts" / "run.sh").write_text(
+            'source "$(dirname "$0")/../templates/spec.md"\n', encoding="utf-8"
+        )
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_file_at_the_skill_root_is_not_matched_by_name(self) -> None:
+        # Install instructions name SKILL.md in trees that are nobody's skill.
+        self.body("Copy it to `.cursor/skills/demo-skill/SKILL.md`.\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_an_absolute_path_belongs_to_somebody_else(self) -> None:
+        self.body("The container mounts it at `/opt/demo/scripts/detect.py`.\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_path_ending_somewhere_else_is_a_different_file(self) -> None:
+        self.body("Compare against `vendor/other/detect.py`.\n")
+        self.assertEqual(structure.errors(), [])
+
+    def test_the_dataset_is_not_the_agents_to_read(self) -> None:
+        (self.folder / "evals" / "fixtures").mkdir(parents=True, exist_ok=True)
+        (self.folder / "evals" / "fixtures" / "detect.py").write_text("", encoding="utf-8")
+        self.body("Run `scripts/detect.py`.\n")
+        self.assertEqual(structure.errors(), [])
+
+
 class TestARepoWhereNoSkillWasFound(unittest.TestCase):
     """Grading nothing is reported, because a green check for it would lie."""
 
