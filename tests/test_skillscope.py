@@ -2871,7 +2871,11 @@ class TestEngineSandboxSelection(unittest.TestCase):
             "boxed", dataset=tier0_dataset("boxed"), machine=machine
         )
         if compose:
-            (folder / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+            # Beside machine.yml, not at the skill root: the skill root is what
+            # gets published, and eval infrastructure does not belong there.
+            (folder / "evals" / "compose.yaml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
         self.repo.activate()
 
     def test_docker_by_default(self) -> None:

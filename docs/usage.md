@@ -257,7 +257,7 @@ socket, since it is daemonless and rootless and needs neither that nor group
 membership.
 
 **What the sandbox must provide** is a property of the skill, declared as
-`sandbox: compose.yaml` in its `evals/machine.yml`. Skills get a container with
+`sandbox: compose.yaml` in its `evals/machine.yml`, resolved beside it. Skills get a container with
 no network by default; one that installs a server or pulls a model cannot run
 that way and says so. Selecting a provider does not discard what a skill asked
 for -- the compose file rides along.

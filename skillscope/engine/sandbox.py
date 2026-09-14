@@ -124,12 +124,17 @@ def for_skill(skill: str):
 
 
 def _declared_compose(skill: str):
-    """Path to the compose file a skill's `machine.yml` names, if any."""
+    """Path to the compose file a skill's `machine.yml` names, if any.
+
+    Resolved beside `machine.yml`, in `evals/`, rather than at the skill root.
+    A path in a file is most usefully relative to that file -- and the skill
+    root is what gets published, so eval infrastructure does not belong there.
+    """
     name = (datasets._read_machine(skill) or {}).get("sandbox")
     if not name:
         return None
 
-    path = datasets.skill_path(skill) / name
+    path = datasets.machine_path(skill).parent / name
     if not path.is_file():
         raise SystemExit(
             f"error: {skill}: evals/machine.yml names sandbox '{name}', "
