@@ -86,6 +86,17 @@ from . import (
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
+# The engines a graded run can be driven by, in the order they were added.
+#   legacy       -- the claude CLI, driven directly, no framework
+#   inspect      -- a harness-independent agent under inspect_ai
+#   claude-code  -- the real CLI inside the sandbox, via inspect_swe (Linux only)
+#   claude-cli   -- the real CLI on the host, under inspect_ai (any platform)
+ENGINES = ["legacy", "inspect", "claude-code", "claude-cli"]
+
+# Every engine but the first runs under inspect_ai, and they share what follows
+# from that: a preflight of their own, and a report that names the engine.
+INSPECT_ENGINES = tuple(e for e in ENGINES if e != "legacy")
+
 # Where JSON reports land inside the repo under test. One gitignored directory
 # rather than a path per repo, so a report is always in the same place.
 RUNS_DIRNAME = Path(".skillscope") / "runs"
@@ -344,7 +355,7 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
-    if getattr(args, "engine", "legacy") in ("inspect", "claude-code", "claude-cli"):
+    if getattr(args, "engine", "legacy") in INSPECT_ENGINES:
         # The CLI-based reachability probe tests something these engines do not
         # use, but they still need one of their own: a graded run starts
         # containers and installs skills before it first reaches a provider, so
@@ -681,7 +692,7 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--engine",
         default=os.environ.get("SKILLSCOPE_ENGINE", "legacy"),
-        choices=["legacy", "inspect", "claude-code", "claude-cli"],
+        choices=ENGINES,
         help=(
             "Which eval engine runs the cases. `legacy` drives the claude CLI "
             "directly; `inspect` runs a harness-independent agent through "

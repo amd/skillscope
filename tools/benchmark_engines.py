@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Compare the legacy and inspect engines on the same dataset.
+"""Compare two engines on the same dataset.
 
 Answers the two questions a migration has to answer before it can be trusted.
 
@@ -22,6 +22,15 @@ is measured is what CI executes.
     tools/benchmark_engines.py routing --routing-room my-skill --noise
     tools/benchmark_engines.py behavioral --skill my-skill
     tools/benchmark_engines.py --compare legacy.json inspect.json
+
+Which pair is compared is an argument, because the question changes over the
+migration. `legacy` against `inspect` asks whether a different agent reaches
+the same verdicts. `legacy` against `claude-cli` asks something narrower and
+sharper: both drive the same CLI, so agreement there says the framework around
+the agent is faithful, and disagreement is a defect in the crossing rather than
+a property of a different agent.
+
+    tools/benchmark_engines.py behavioral --candidate claude-cli --skill my-skill
 """
 
 from __future__ import annotations
@@ -33,9 +42,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Taken from the CLI rather than restated, so a new engine is offered here the
+# moment it is offered there.
+from skillscope.cli import ENGINES  # noqa: E402
+
 AGREE = "agree"
-NEW_PASSES = "only the inspect engine passes"
-NEW_FAILS = "only the legacy engine passes"
+NEW_PASSES = "only the candidate passes"
+NEW_FAILS = "only the baseline passes"
 
 
 def run_leg(leg: str, engine: str, passthrough: list[str], label: str) -> dict:
@@ -98,10 +113,10 @@ def compare(baseline: dict, candidate: dict) -> dict:
     }
 
 
-def spend(report: dict) -> dict:
+def spend(report: dict, engine: str = "legacy") -> dict:
     meta = report.get("meta", {})
     return {
-        "engine": meta.get("engine", "legacy"),
+        "engine": meta.get("engine", engine),
         "wall_time_s": meta.get("wall_time_s"),
         "model_calls": meta.get("model_calls"),
         "total_tokens": meta.get("total_tokens"),
@@ -134,9 +149,9 @@ def _spend_caveats(spend: dict) -> list[str]:
         )
     if any(spend[label]["cost_usd"] is None for label in ("baseline", "candidate")):
         notes.append(
-            "> One engine reported no cost -- inspect only has one when the "
-            "model provider supplies pricing, which a gateway generally does "
-            "not. Wall time and model calls are comparable on both sides; "
+            "> One engine reported no cost -- the inspect engines only have one "
+            "when the model provider supplies pricing, which a gateway generally "
+            "does not. Wall time and model calls are comparable on both sides; "
             "model calls in particular is the like-for-like measure of how "
             "much work each engine asks of the model per case."
         )
@@ -145,18 +160,20 @@ def _spend_caveats(spend: dict) -> list[str]:
 
 def render(result: dict) -> str:
     comparison = result["comparison"]
+    base = result["spend"]["baseline"]["engine"]
+    cand = result["spend"]["candidate"]["engine"]
     lines = [
         "## Engine benchmark",
         "",
         f"**{comparison['agreed']}/{comparison['compared']} cases agree** "
-        f"between the legacy and inspect engines.",
+        f"between the `{base}` and `{cand}` engines.",
         "",
     ]
 
     noise = result.get("noise")
     if noise is not None:
         lines += [
-            f"Noise floor: the legacy engine agrees with itself on "
+            f"Noise floor: the `{base}` engine agrees with itself on "
             f"{noise['agreed']}/{noise['compared']} cases. Treat any difference "
             "at or below that as run-to-run variance rather than engine drift.",
             "",
@@ -183,7 +200,7 @@ def render(result: dict) -> str:
         lines.append("None. Every shared case reached the same verdict on both engines.")
     else:
         lines += [
-            "| Case | Direction | Legacy | Inspect |",
+            f"| Case | Direction | `{base}` | `{cand}` |",
             "| --- | --- | --- | --- |",
         ]
         for flip in comparison["flips"]:
@@ -192,8 +209,8 @@ def render(result: dict) -> str:
             lines.append(f"| `{flip['id']}` | {flip['direction']} | {left} | {right} |")
 
     for key, heading in (
-        ("only_in_baseline", "Only the legacy run produced these cases"),
-        ("only_in_candidate", "Only the inspect run produced these cases"),
+        ("only_in_baseline", f"Only the `{base}` run produced these cases"),
+        ("only_in_candidate", f"Only the `{cand}` run produced these cases"),
     ):
         missing = comparison[key]
         if missing:
@@ -212,11 +229,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Compare two reports that already exist instead of running the legs.",
     )
     parser.add_argument(
+        "--baseline",
+        default="legacy",
+        choices=ENGINES,
+        help="The engine to measure against. Default: legacy.",
+    )
+    parser.add_argument(
+        "--candidate",
+        default="inspect",
+        choices=ENGINES,
+        help="The engine under test. Default: inspect.",
+    )
+    parser.add_argument(
         "--noise",
         action="store_true",
         help=(
-            "Run the legacy engine twice to measure how much it disagrees with "
-            "itself. Without this the flip list cannot be read as engine drift."
+            "Run the baseline engine twice to measure how much it disagrees "
+            "with itself. Without this the flip list cannot be read as engine "
+            "drift."
         ),
     )
     parser.add_argument("--output", default="", help="Write the JSON result here.")
@@ -229,19 +259,22 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not args.leg:
             parser.error("give a leg to run (routing or behavioral), or --compare")
-        baseline = run_leg(args.leg, "legacy", passthrough, "legacy")
+        baseline = run_leg(args.leg, args.baseline, passthrough, args.baseline)
         noise_run = (
-            run_leg(args.leg, "legacy", passthrough, "legacy-again")
+            run_leg(args.leg, args.baseline, passthrough, f"{args.baseline}-again")
             if args.noise
             else None
         )
-        candidate = run_leg(args.leg, "inspect", passthrough, "inspect")
+        candidate = run_leg(args.leg, args.candidate, passthrough, args.candidate)
         noise = compare(baseline, noise_run) if noise_run is not None else None
 
     result = {
         "comparison": compare(baseline, candidate),
         "noise": noise,
-        "spend": {"baseline": spend(baseline), "candidate": spend(candidate)},
+        "spend": {
+            "baseline": spend(baseline, getattr(args, "baseline", "legacy")),
+            "candidate": spend(candidate, getattr(args, "candidate", "inspect")),
+        },
     }
 
     report = render(result)
