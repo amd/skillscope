@@ -67,8 +67,19 @@ def _prompt() -> str | None:
     )
 
 
-def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = None):
-    """One inspect `Task` per skill: its cases, its skill installed, its scorer."""
+def build_task(
+    skill: str,
+    cases: list[Case],
+    model: str,
+    ctx: dict | None = None,
+    solver=None,
+):
+    """One inspect `Task` per skill: its cases, its skill installed, its scorer.
+
+    `solver` swaps what drives the agent while everything around it -- staging,
+    scoring, judging, reporting -- stays the same. That is the seam the engine
+    choice turns on.
+    """
     from inspect_ai import Task
     from inspect_ai.agent import react
 
@@ -79,7 +90,7 @@ def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = Non
     return Task(
         name=f"behavioral-{skill}",
         dataset=samples,
-        solver=react(prompt=_prompt(), tools=_tools(skill_dir)),
+        solver=solver or react(prompt=_prompt(), tools=_tools(skill_dir)),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=message_limit_for(model),
@@ -144,7 +155,11 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
 
 
 def run(
-    skills: list[str], cases: list[Case], model: str, effort: str
+    skills: list[str],
+    cases: list[Case],
+    model: str,
+    effort: str,
+    solver=None,
 ) -> list[BehaviorOutcome]:
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
     from inspect_ai import eval as inspect_eval
@@ -160,7 +175,7 @@ def run(
         print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
         try:
             logs = inspect_eval(
-                build_task(skill, skill_cases, model),
+                build_task(skill, skill_cases, model, solver=solver),
                 model=model,
                 model_args=models.model_args(model),
                 log_dir=str(Path(".skillscope") / "logs"),

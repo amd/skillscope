@@ -49,6 +49,7 @@ from skillscope import (
 from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 from skillscope.engine import behavioral as engine_behavioral
+from skillscope.engine import cli_agent as engine_cli_agent
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import routing as engine_routing
@@ -2598,6 +2599,24 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
         # Not silence: an unreported skill would let a run that graded nothing
         # call itself green.
         self.assertTrue(all(o.checks == [] for o in outcomes))
+
+
+class TestEngineCliAgentGuard(unittest.TestCase):
+    """The CLI runs on the host, so the sandbox has to be the host."""
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+
+    def test_a_container_provider_is_refused_with_the_alternative(self) -> None:
+        # Otherwise the CLI would work in the host's filesystem while the
+        # scorers read a container, and every expectation would fail for a
+        # reason nothing in the report explains.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        with self.assertRaises(SystemExit) as caught:
+            engine_cli_agent.require_local()
+        message = str(caught.exception)
+        self.assertIn("podman", message)
+        self.assertIn("--engine claude-code", message)
 
 
 class TestEngineModelNames(unittest.TestCase):

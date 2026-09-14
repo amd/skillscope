@@ -344,7 +344,7 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
-    if getattr(args, "engine", "legacy") in ("inspect", "claude-code"):
+    if getattr(args, "engine", "legacy") in ("inspect", "claude-code", "claude-cli"):
         # The CLI-based reachability probe tests something these engines do not
         # use, but they still need one of their own: a graded run starts
         # containers and installs skills before it first reaches a provider, so
@@ -524,14 +524,32 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
     if args.engine in ("inspect", "claude-code"):
         from .engine import models as engine_models
 
-        if args.engine == "inspect":
-            from .engine import behavioral as runner
-        else:
+        from .engine import behavioral as inspect_behavioral
+
+        if args.engine == "claude-code":
             from .engine import verify as runner
 
-        outcomes = runner.run(
-            skills, gradable, engine_models.resolve(args.model), args.effort
-        )
+            outcomes = runner.run(
+                skills, gradable, engine_models.resolve(args.model), args.effort
+            )
+        elif args.engine == "claude-cli":
+            # The real CLI, driven on the host, inside inspect's framework.
+            # `--model` stays the CLI's own alias here: this one does not go
+            # through an inspect model provider.
+            from .engine import cli_agent
+
+            cli_agent.require_local()
+            outcomes = inspect_behavioral.run(
+                skills,
+                gradable,
+                engine_models.resolve(args.model),
+                args.effort,
+                solver=cli_agent.claude_cli(args.model, args.effort),
+            )
+        else:
+            outcomes = inspect_behavioral.run(
+                skills, gradable, engine_models.resolve(args.model), args.effort
+            )
     else:
         outcomes = behavior.run(skills, gradable, args.model, args.effort)
 
@@ -663,7 +681,7 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--engine",
         default=os.environ.get("SKILLSCOPE_ENGINE", "legacy"),
-        choices=["legacy", "inspect", "claude-code"],
+        choices=["legacy", "inspect", "claude-code", "claude-cli"],
         help=(
             "Which eval engine runs the cases. `legacy` drives the claude CLI "
             "directly; `inspect` runs a harness-independent agent through "
