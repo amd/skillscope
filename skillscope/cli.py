@@ -360,7 +360,7 @@ def _prepare_graded_run(
         # use, but they still need one of their own: a graded run starts
         # containers and installs skills before it first reaches a provider, so
         # without this a bad key surfaces as a task that failed after all that.
-        engine.require()
+        engine.require(args.engine)
         if not args.skip_preflight:
             from .engine import models as engine_models
 

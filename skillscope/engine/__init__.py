@@ -15,18 +15,29 @@ to turn a missing wheel into an actionable message rather than a traceback.
 
 from __future__ import annotations
 
-INSTALL_HINT = (
-    "error: --engine inspect needs the inspect extra. Install it with:\n"
-    "    pip install 'skillscope[inspect]'"
-)
+def install_hint(engine: str = "inspect") -> str:
+    """Why this run cannot start, naming the engine that was actually asked for.
+
+    Every engine but `legacy` runs on inspect_ai, so any of them can raise
+    this. Naming `inspect` regardless sent a CI job looking for a flag it had
+    not passed.
+    """
+    return (
+        f"error: --engine {engine} needs the inspect extra. Install it with:\n"
+        "    pip install 'skillscope[inspect]'"
+    )
 
 
-def require() -> None:
+# Kept for callers that predate the engine argument.
+INSTALL_HINT = install_hint()
+
+
+def require(engine: str = "inspect") -> None:
     """Raise SystemExit with an install hint when `inspect_ai` is missing."""
     try:
         import inspect_ai  # noqa: F401
     except ModuleNotFoundError as exc:  # pragma: no cover -- environment shape
-        raise SystemExit(INSTALL_HINT) from exc
+        raise SystemExit(install_hint(engine)) from exc
 
 
 def available() -> bool:

@@ -42,6 +42,7 @@ from skillscope import (
     credentials,
     datasets,
     deadline,
+    engine as engine_module,
     references,
     routing,
     structure,
@@ -2599,6 +2600,18 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
         # Not silence: an unreported skill would let a run that graded nothing
         # call itself green.
         self.assertTrue(all(o.checks == [] for o in outcomes))
+
+
+class TestEngineInstallHint(unittest.TestCase):
+    """The hint has to name the engine the user actually asked for."""
+
+    def test_it_names_the_requested_engine(self) -> None:
+        # Naming `inspect` regardless sent a Windows CI job looking for a flag
+        # it had never passed -- it had asked for claude-cli.
+        self.assertIn("--engine claude-cli", engine_module.install_hint("claude-cli"))
+
+    def test_it_still_points_at_the_one_extra_that_fixes_all_of_them(self) -> None:
+        self.assertIn("skillscope[inspect]", engine_module.install_hint("claude-code"))
 
 
 class TestEngineWorkdirPath(unittest.TestCase):
