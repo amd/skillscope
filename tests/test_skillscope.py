@@ -2032,6 +2032,28 @@ class TestRoutingGate(unittest.TestCase):
     def gate(self, passed: int, graded: int, bar: float = 1.0, **extra) -> str | None:
         return cli.routing_gate(self.totals(passed, graded, **extra), bar)
 
+    def test_a_skill_the_agent_never_saw_fails_the_run(self) -> None:
+        """The quiet one. A staged skill that never reached the agent still has
+        cases, and every one of them reads as a missed trigger, so the run
+        produces a plausible number for a room that was not the one asked for."""
+        reason = cli.routing_gate(self.totals(11, 12), 1.0, ["absent-skill"])
+        self.assertIn("absent-skill", reason)
+        self.assertIn("session init", reason)
+
+    def test_a_missing_skill_outranks_the_accuracy_bar(self) -> None:
+        """Infrastructure before score: a perfect sweep of a wrong room is not a
+        pass, and `--min-accuracy 0` does not license one either."""
+        for bar in (1.0, 0.0):
+            with self.subTest(bar=bar):
+                reason = cli.routing_gate(self.totals(12, 12), bar, ["absent-skill"])
+                self.assertIsNotNone(reason)
+                self.assertNotIn("--min-accuracy", reason)
+
+    def test_nothing_missing_leaves_the_gate_alone(self) -> None:
+        for missing in (None, []):
+            with self.subTest(missing=missing):
+                self.assertIsNone(cli.routing_gate(self.totals(12, 12), 1.0, missing))
+
     def test_the_default_bar_is_every_graded_case(self) -> None:
         self.assertEqual(cli.build_parser().parse_args(["routing"]).min_accuracy, 1.0)
 
