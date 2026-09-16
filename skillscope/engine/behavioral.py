@@ -72,13 +72,15 @@ def build_task(
     cases: list[Case],
     model: str,
     ctx: dict | None = None,
-    solver=None,
+    solver_factory=None,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
-    `solver` swaps what drives the agent while everything around it -- staging,
-    scoring, judging, reporting -- stays the same. That is the seam the engine
-    choice turns on.
+    `solver_factory` swaps what drives the agent while everything around it --
+    scoring, judging, reporting -- stays the same. It receives the skill's
+    directory because staging is the driver's job: the react agent installs the
+    skill through inspect's `skill()` tool, and a solver that replaces the react
+    agent replaces that too.
     """
     from inspect_ai import Task
     from inspect_ai.agent import react
@@ -90,7 +92,11 @@ def build_task(
     return Task(
         name=f"behavioral-{skill}",
         dataset=samples,
-        solver=solver or react(prompt=_prompt(), tools=_tools(skill_dir)),
+        solver=(
+            solver_factory(skill_dir)
+            if solver_factory
+            else react(prompt=_prompt(), tools=_tools(skill_dir))
+        ),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=message_limit_for(model),
@@ -159,7 +165,7 @@ def run(
     cases: list[Case],
     model: str,
     effort: str,
-    solver=None,
+    solver_factory=None,
 ) -> list[BehaviorOutcome]:
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
     from inspect_ai import eval as inspect_eval
@@ -175,7 +181,7 @@ def run(
         print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
         try:
             logs = inspect_eval(
-                build_task(skill, skill_cases, model, solver=solver),
+                build_task(skill, skill_cases, model, solver_factory=solver_factory),
                 model=model,
                 model_args=models.model_args(model),
                 log_dir=str(Path(".skillscope") / "logs"),

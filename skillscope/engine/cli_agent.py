@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from pathlib import Path
 
 from .. import agent as legacy_agent
 
@@ -120,8 +121,23 @@ def events_to_messages(events: list[dict], prompt: str) -> tuple[list, str]:
     return messages, final
 
 
-def claude_cli(model: str | None, effort: str | None):
-    """Solver: run the real CLI once, and record what it did."""
+def install_skill(skill_dir: Path, workspace: str) -> None:
+    """Put the skill where the real harness looks for it.
+
+    `.claude/skills/<name>` inside a directory the CLI is given with
+    `--add-dir`, which is what the legacy engine has always done and what
+    `inspect_swe` does via its own `skills=` argument. The react agent reaches
+    the same place differently, through inspect's `skill()` tool -- so a solver
+    that replaces the react agent has to do this itself or the agent runs with
+    no skill at all, answering from the prompt and scoring like it.
+    """
+    dest = Path(workspace) / ".claude" / "skills" / skill_dir.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(skill_dir, dest, dirs_exist_ok=True)
+
+
+def claude_cli(model: str | None, effort: str | None, skill_dir: Path):
+    """Solver: install the skill, run the real CLI once, record what it did."""
     from inspect_ai.model import ModelOutput
     from inspect_ai.solver import solver
 
@@ -131,6 +147,7 @@ def claude_cli(model: str | None, effort: str | None):
             from inspect_ai.util import subprocess as sandbox_subprocess
 
             workspace = await _workspace()
+            install_skill(skill_dir, workspace)
             prompt = state.input_text
 
             cmd = [

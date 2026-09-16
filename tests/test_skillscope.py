@@ -2658,6 +2658,32 @@ class TestEngineWorkdirPath(unittest.TestCase):
         self.assertIsNone(engine_tools.workdir_path())
 
 
+class TestEngineCliAgentInstallsSkill(unittest.TestCase):
+    """A driver that replaces the react agent must stage the skill itself.
+
+    It did not, so the CLI ran with no skill and answered from the prompt
+    alone -- scoring 4/21 where every other engine scored 21/21, while
+    finishing faster, which was the only visible sign.
+    """
+
+    def test_the_skill_lands_where_the_harness_looks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "my-skill"
+            (src / "scripts").mkdir(parents=True)
+            (src / "SKILL.md").write_text("# my-skill", encoding="utf-8")
+            (src / "scripts" / "validate.py").write_text("x = 1", encoding="utf-8")
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+
+            engine_cli_agent.install_skill(src, str(workspace))
+
+            staged = workspace / ".claude" / "skills" / "my-skill"
+            self.assertTrue((staged / "SKILL.md").is_file())
+            # The whole tree, not just the manifest: skills ship validators and
+            # references the agent is expected to run.
+            self.assertTrue((staged / "scripts" / "validate.py").is_file())
+
+
 class TestEngineCliAgentLaunch(unittest.TestCase):
     """npm ships `claude` as a .cmd shim, which Windows will not exec."""
 

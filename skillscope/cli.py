@@ -560,7 +560,9 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
                 gradable,
                 engine_models.resolve(args.model),
                 args.effort,
-                solver=cli_agent.claude_cli(args.model, args.effort),
+                solver_factory=lambda d: cli_agent.claude_cli(
+                    args.model, args.effort, d
+                ),
             )
         else:
             outcomes = inspect_behavioral.run(
