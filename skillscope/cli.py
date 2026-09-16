@@ -532,7 +532,12 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    if args.engine in ("inspect", "claude-code"):
+    # INSPECT_ENGINES rather than a literal tuple: a literal was already wrong
+    # once. `claude-cli` was added to the branch below but not to this guard,
+    # so it fell through to the legacy engine and every run that asked for it
+    # silently got something else -- while the preflight above, which does key
+    # off INSPECT_ENGINES, still demanded the inspect extra it never used.
+    if args.engine in INSPECT_ENGINES:
         from .engine import models as engine_models
 
         from .engine import behavioral as inspect_behavioral

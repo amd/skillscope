@@ -19,6 +19,7 @@ temp directory rather than reading whatever happens to be checked out here.
 from __future__ import annotations
 
 import argparse
+import inspect
 import contextlib
 import io
 import json
@@ -2600,6 +2601,32 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
         # Not silence: an unreported skill would let a run that graded nothing
         # call itself green.
         self.assertTrue(all(o.checks == [] for o in outcomes))
+
+
+class TestBehavioralEngineDispatch(unittest.TestCase):
+    """Only `legacy` may bypass the inspect path.
+
+    `claude-cli` was added to the dispatch chain but not to the guard around
+    it, so it fell through to the legacy engine: runs that asked for one agent
+    silently got another, while the reports said `engine: claude-cli`
+    throughout. Nothing in the suite noticed, because nothing asserted which
+    runner a flag actually reaches.
+    """
+
+    def test_the_guard_covers_every_engine_but_legacy(self) -> None:
+        self.assertEqual(set(cli.INSPECT_ENGINES), set(cli.ENGINES) - {"legacy"})
+
+    def test_the_dispatch_reads_that_set_rather_than_a_literal(self) -> None:
+        # The bug was a literal tuple that fell behind the choices list. A
+        # literal here is the defect itself, so the source is what to assert.
+        source = inspect.getsource(cli.cmd_behavioral)
+        self.assertIn("if args.engine in INSPECT_ENGINES:", source)
+
+    def test_the_preflight_uses_the_same_set(self) -> None:
+        # These disagreed: the preflight demanded the inspect extra for
+        # claude-cli while the dispatch sent it to an engine that never uses
+        # it, which is how a Windows job failed on a flag it had not passed.
+        self.assertIn("INSPECT_ENGINES", inspect.getsource(cli._prepare_graded_run))
 
 
 class TestEngineInstallHint(unittest.TestCase):
