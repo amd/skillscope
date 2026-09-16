@@ -2658,6 +2658,31 @@ class TestEngineWorkdirPath(unittest.TestCase):
         self.assertIsNone(engine_tools.workdir_path())
 
 
+class TestEngineCliAgentLaunch(unittest.TestCase):
+    """npm ships `claude` as a .cmd shim, which Windows will not exec."""
+
+    def test_windows_runs_a_cmd_shim_through_the_interpreter(self) -> None:
+        with mock.patch.object(engine_cli_agent.os, "name", "nt"):
+            argv = engine_cli_agent.launch_argv([r"C:\npm\claude.CMD", "-p"])
+        # Without this the failure is WinError 2, which reads as "the CLI is
+        # not installed" when it plainly is.
+        self.assertEqual(argv, ["cmd.exe", "/c", r"C:\npm\claude.CMD", "-p"])
+
+    def test_a_real_executable_is_left_alone(self) -> None:
+        with mock.patch.object(engine_cli_agent.os, "name", "nt"):
+            self.assertEqual(
+                engine_cli_agent.launch_argv([r"C:\bin\claude.exe"]),
+                [r"C:\bin\claude.exe"],
+            )
+
+    def test_posix_is_untouched(self) -> None:
+        with mock.patch.object(engine_cli_agent.os, "name", "posix"):
+            self.assertEqual(
+                engine_cli_agent.launch_argv(["/usr/bin/claude", "-p"]),
+                ["/usr/bin/claude", "-p"],
+            )
+
+
 class TestEngineCliAgentGuard(unittest.TestCase):
     """The CLI runs on the host, so the sandbox has to be the host."""
 
