@@ -116,6 +116,14 @@ agent that simply never uses the skill. So every `SKILL.md` is read first:
 | `description` | non-empty, at most 1024 characters |
 | body | at most 500 lines — past that it is reference material, and an agent reads it in full every time the skill loads |
 
+One number is reported rather than asserted: what these skills add to the
+listing an agent is given at the start of a session — a line per skill, its
+name and its description — and what share of the default budget for that
+listing they take. The budget belongs to the whole installed set rather than to
+any one skill, so no per-skill bar can see it, and what a published catalog
+shares it with is not visible from here. There is nothing to fail, so the run
+prints the number and moves on.
+
 A directory that holds no `SKILL.md` is simply not a skill, and is passed over
 without a word. Matching *no* skill at all is the case that is reported, since
 a run that graded nothing and called itself green is the one way this harness

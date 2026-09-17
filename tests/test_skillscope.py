@@ -42,6 +42,7 @@ from skillscope import (
     credentials,
     datasets,
     deadline,
+    listing,
     references,
     routing,
     structure,
@@ -1726,6 +1727,168 @@ class TestARepoWhereNoSkillWasFound(unittest.TestCase):
         repo = Repo(self)
         repo.activate(docs="*.md")
         self.assertEqual(structure.errors(), [])
+
+
+class TestListingCost(unittest.TestCase):
+    """What a repo's skills add to the listing an agent reads at startup.
+
+    Every expected number here is worked out by hand from the entries the
+    fixture writes, rather than from the module's own constants. A total
+    derived the way `listing` derives it would agree just as readily with a
+    separator counted once too often, or an entry overhead of three, as with
+    the arithmetic the agent actually does -- and a misreported share is not
+    the kind of thing anyone notices by reading the line.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+
+    def write(self, text: str, skill: str = "alpha") -> None:
+        (self.repo.root / skill / "SKILL.md").write_text(text, encoding="utf-8")
+
+    def test_one_skill_costs_its_name_its_description_and_the_line_around_it(self) -> None:
+        # `alpha` is 5, `Aa` is 2, and `- ` before the name and `: ` after it
+        # are 4 more. One entry carries no separator, so 11 and not 12.
+        self.repo.skill("alpha", description="Aa")
+        self.repo.activate()
+        measured = listing.cost()
+        self.assertEqual(measured.skills, 1)
+        self.assertEqual(measured.characters, 11)
+        self.assertEqual(measured.unreadable, ())
+
+    def test_a_separator_sits_between_entries_and_not_after_the_last(self) -> None:
+        # 5 + 4 + 2 = 11, 4 + 4 + 6 = 14, 9 + 4 + 3 = 16, and two separators
+        # holding the three of them apart: 43.
+        self.repo.skill("alpha", description="Aa")
+        self.repo.skill("beta", description="Bbbbbb")
+        self.repo.skill("gamma-two", description="Ccc")
+        self.repo.activate()
+        measured = listing.cost()
+        self.assertEqual(measured.skills, 3)
+        self.assertEqual(measured.characters, 43)
+
+    def test_a_repo_with_no_skills_costs_nothing(self) -> None:
+        self.repo.activate(docs="*.md")
+        measured = listing.cost()
+        self.assertEqual(measured.skills, 0)
+        self.assertEqual(measured.characters, 0)
+
+    def test_a_skill_md_that_does_not_decode_is_named_rather_than_counted(self) -> None:
+        self.repo.skill("alpha", description="Aa")
+        self.repo.skill("broken")
+        (self.repo.root / "broken" / "SKILL.md").write_bytes(b"---\nname: \xff\xfe\n---\n")
+        self.repo.activate()
+        measured = listing.cost()
+        self.assertEqual(measured.unreadable, ("broken",))
+        # Neither an entry nor a separator: what is left is alpha's 11 alone.
+        self.assertEqual(measured.skills, 1)
+        self.assertEqual(measured.characters, 11)
+
+    def test_frontmatter_an_agent_cannot_load_is_named_rather_than_counted(self) -> None:
+        self.repo.skill("alpha", description="Aa")
+        self.repo.skill("broken")
+        self.write("# No frontmatter at all.\n", skill="broken")
+        self.repo.activate()
+        measured = listing.cost()
+        self.assertEqual(measured.unreadable, ("broken",))
+        self.assertEqual(measured.characters, 11)
+
+    def test_a_skill_with_no_description_to_cost_is_named_rather_than_counted(self) -> None:
+        # Counting it as name-plus-overhead would price a skill an agent can
+        # match nothing against as if it were carrying its share.
+        self.repo.skill("broken")
+        self.write("---\nname: broken\n---\n", skill="broken")
+        self.repo.activate()
+        measured = listing.cost()
+        self.assertEqual(measured.unreadable, ("broken",))
+        self.assertEqual(measured.skills, 0)
+        self.assertEqual(measured.characters, 0)
+
+    def test_a_description_is_counted_up_to_the_listing_cap_and_no_further(self) -> None:
+        # Defensive: the structural gate rejects a description past
+        # structure.MAX_DESCRIPTION_LENGTH, which is lower than this cap, so
+        # only a caller running without that gate ever reaches the clamp. Both
+        # halves of that claim are pinned here -- the cap's own value, and its
+        # sitting above the gate's -- since a cap read back off the module
+        # would agree with whatever the module happened to say, and the comment
+        # in `listing` explaining why the clamp is unreachable stops being true
+        # the moment the two cross.
+        self.assertEqual(listing.MAX_DESCRIPTION_IN_LISTING, 1536)
+        self.assertGreater(
+            listing.MAX_DESCRIPTION_IN_LISTING, structure.MAX_DESCRIPTION_LENGTH
+        )
+        self.repo.skill("alpha")
+        self.repo.activate()
+        for length, expected in (
+            (1535, 5 + 4 + 1535),
+            (1536, 5 + 4 + 1536),
+            (1586, 5 + 4 + 1536),
+        ):
+            with self.subTest(description=length):
+                self.write(f"---\nname: alpha\ndescription: {'d' * length}\n---\n")
+                self.assertEqual(listing.cost().characters, expected)
+
+
+class TestListingBudget(unittest.TestCase):
+    """The budget the cost is a share of, and what a share means at the edges."""
+
+    def test_the_budget_is_a_fraction_of_the_window_in_characters(self) -> None:
+        # 200,000 tokens, 4 bytes each, 1% of them: 8,000 characters.
+        self.assertEqual(listing.budget(), 8000)
+        self.assertEqual(listing.budget(50_000), 2000)
+
+    def test_a_window_too_small_to_hold_the_fraction_still_has_one_character(self) -> None:
+        # A budget of zero would be a division rather than a report.
+        self.assertEqual(listing.budget(1), 1)
+
+    def test_share_is_the_fraction_of_the_budget_this_repo_alone_takes(self) -> None:
+        measured = listing.Cost(skills=3, characters=800, budget=8000, unreadable=())
+        self.assertAlmostEqual(measured.share, 0.1)
+
+    def test_a_cost_with_no_budget_to_share_reports_no_share(self) -> None:
+        measured = listing.Cost(skills=3, characters=800, budget=0, unreadable=())
+        self.assertEqual(measured.share, 0.0)
+
+
+class TestListingReport(unittest.TestCase):
+    """The one line `structural` prints about the listing, and when it does not."""
+
+    def structural(self, *argv) -> str:
+        """Everything `skillscope structural` printed over a clean repo."""
+        args = cli.build_parser().parse_args(["structural", *argv])
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.cmd_structural(args), 0)
+        return stdout.getvalue()
+
+    def test_the_line_reports_the_count_the_cost_and_the_share(self) -> None:
+        measured = listing.Cost(skills=3, characters=800, budget=8000, unreadable=())
+        self.assertEqual(
+            listing.summary(measured),
+            "3 skill(s) cost 800 character(s) in the startup listing, 10% of "
+            "the 8000-character budget at a 200,000-token context window, "
+            "assuming the shipped defaults.",
+        )
+
+    def test_the_share_is_rounded_to_a_whole_percent(self) -> None:
+        measured = listing.Cost(skills=1, characters=1234, budget=8000, unreadable=())
+        self.assertIn("15% of the 8000-character budget", listing.summary(measured))
+
+    def test_a_run_reports_what_the_repos_skills_cost(self) -> None:
+        repo = Repo(self)
+        repo.skill("alpha", dataset=tier0_dataset("alpha"), description="Aa")
+        repo.activate()
+        self.assertIn(
+            "[evals] listing: 1 skill(s) cost 11 character(s)", self.structural()
+        )
+
+    def test_a_run_over_a_repos_prose_alone_has_no_listing_to_cost(self) -> None:
+        # --docs grades a repo that ships no skill, and a listing line there
+        # would be reporting on nothing.
+        repo = Repo(self)
+        (repo.root / "README.md").write_text("# Notes\n", encoding="utf-8")
+        repo.activate(docs="*.md")
+        self.assertNotIn("listing:", self.structural())
 
 
 def targets(text: str) -> list[str]:
