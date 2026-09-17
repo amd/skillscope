@@ -2686,6 +2686,18 @@ class TestEngineCliAgentInstallsSkill(unittest.TestCase):
             self.assertTrue((staged / "scripts" / "validate.py").is_file())
 
 
+class TestRealtimeLogging(unittest.TestCase):
+    """The live sample buffer is what MAX_PATH kills on Windows."""
+
+    def test_windows_runs_without_the_buffer(self) -> None:
+        with mock.patch.object(engine_behavioral.sys, "platform", "win32"):
+            self.assertFalse(engine_behavioral.realtime_logging())
+
+    def test_posix_keeps_it(self) -> None:
+        with mock.patch.object(engine_behavioral.sys, "platform", "linux"):
+            self.assertTrue(engine_behavioral.realtime_logging())
+
+
 class TestShellPrefixProbe(unittest.TestCase):
     """A guest without bash raises rather than answering."""
 

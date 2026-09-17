@@ -11,6 +11,7 @@ report path downstream is untouched.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from .. import agent, config, deadline, usage
@@ -29,6 +30,23 @@ MESSAGE_LIMIT = 120
 # wiring run proves the machinery in a handful of turns; the rest is the mock
 # failing to finish, slowly.
 MOCK_MESSAGE_LIMIT = 6
+
+
+def realtime_logging() -> bool:
+    """Whether inspect should keep its live sample buffer for this run.
+
+    The buffer exists so `inspect view` can watch a run in progress, and it
+    lives in a sqlite file under the user data directory, named after the task.
+    On Windows that directory is the service account's profile, which is long
+    enough that a task named after a longer skill crosses MAX_PATH -- sqlite
+    then answers "unable to open database file" and the whole task dies. Two
+    skills on the same runner passed and one did not, purely on the length of
+    its name.
+
+    Nothing watches a CI run live, and the `.eval` log is written either way,
+    so the buffer is cost without benefit exactly where it breaks.
+    """
+    return not sys.platform.startswith("win")
 
 
 def message_limit_for(model: str) -> int:
@@ -185,6 +203,7 @@ def run(
                 model=model,
                 model_args=models.model_args(model),
                 log_dir=str(Path(".skillscope") / "logs"),
+                log_realtime=realtime_logging(),
                 # skillscope's own progress lines are the report; inspect's rich
                 # display takes over the terminal and produces nothing useful
                 # when a CI job pipes stdout to a file.

@@ -137,6 +137,7 @@ def run(
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
+            log_realtime=behavioral.realtime_logging(),
             display="plain",
         )
         for log in logs:
