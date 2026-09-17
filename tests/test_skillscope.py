@@ -2686,6 +2686,25 @@ class TestEngineCliAgentInstallsSkill(unittest.TestCase):
             self.assertTrue((staged / "scripts" / "validate.py").is_file())
 
 
+class TestTaskTimeLimit(unittest.TestCase):
+    """A run that overruns should still say where it got to."""
+
+    def test_inspect_stops_before_the_hard_deadline_does(self) -> None:
+        bound = deadline.Deadline(1800, command="behavioral")
+        limit = engine_behavioral.task_time_limit(bound)
+        self.assertLess(limit, bound.remaining())
+        # Enough room for inspect to score what exists and write the log.
+        self.assertGreaterEqual(bound.remaining() - limit, 60)
+
+    def test_a_tiny_budget_still_gets_a_usable_limit(self) -> None:
+        # Never negative, never zero: a nonsense limit would fail the sample
+        # instantly and look like the agent doing nothing.
+        self.assertGreaterEqual(engine_behavioral.task_time_limit(deadline.Deadline(5)), 60)
+
+    def test_no_deadline_means_no_limit(self) -> None:
+        self.assertIsNone(engine_behavioral.task_time_limit(None))
+
+
 class TestRealtimeLogging(unittest.TestCase):
     """The live sample buffer is what MAX_PATH kills on Windows."""
 

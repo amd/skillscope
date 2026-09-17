@@ -32,6 +32,23 @@ MESSAGE_LIMIT = 120
 MOCK_MESSAGE_LIMIT = 6
 
 
+# How much of the command's budget to keep back from inspect's own per-sample
+# limit. The `--timeout` deadline ends the process with `os._exit`, which takes
+# the report and the transcript with it -- so a run that overruns says only
+# that it overran. Handing inspect the whole budget makes the two fire together
+# and the hard kill wins the race. Stopping the sample early enough for inspect
+# to score what exists and write the log turns a timeout into evidence: eight
+# Instinct runs have now overrun and not one of them said where it got to.
+TIMEOUT_RESERVE_S = 120
+
+
+def task_time_limit(bound) -> int | None:
+    """The per-sample limit to give inspect, inside the command's own deadline."""
+    if bound is None:
+        return None
+    return max(60, int(bound.remaining() - TIMEOUT_RESERVE_S))
+
+
 def realtime_logging() -> bool:
     """Whether inspect should keep its live sample buffer for this run.
 
@@ -118,7 +135,7 @@ def build_task(
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=message_limit_for(model),
-        time_limit=int(bound.remaining()) if bound is not None else None,
+        time_limit=task_time_limit(bound),
     )
 
 

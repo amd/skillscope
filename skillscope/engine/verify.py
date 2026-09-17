@@ -111,7 +111,7 @@ def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = Non
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=behavioral.message_limit_for(model),
-        time_limit=int(bound.remaining()) if bound is not None else None,
+        time_limit=behavioral.task_time_limit(bound),
     )
 
 
