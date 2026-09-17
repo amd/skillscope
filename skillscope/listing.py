@@ -55,7 +55,10 @@ DEFAULT_CONTEXT_TOKENS = 200_000
 
 # A single description is truncated at this many characters in the listing,
 # separately from the shared budget, so one very long one cannot take the room
-# every other skill needs.
+# every other skill needs. Defensive, for a caller that costs a repo without
+# running the structural gate first: that gate rejects anything past
+# `structure.MAX_DESCRIPTION_LENGTH`, which is lower, so a description reaching
+# here through the CLI is never clamped.
 MAX_DESCRIPTION_IN_LISTING = 1536
 
 # `- ` before the name and `: ` after it, in each line of the listing.
@@ -88,7 +91,8 @@ def cost(skills: list[str] | None = None) -> Cost:
     A skill whose frontmatter cannot be read is counted in ``unreadable``
     rather than as zero. :func:`structure.errors` is what reports it as a
     fault; leaving it out of the total silently would make a broken repo look
-    cheaper than a working one.
+    cheaper than a working one. The CLI runs that gate first, so ``unreadable``
+    is empty there, and populated only for a caller that skips it.
     """
     cfg = config.active()
     wanted = skills if skills is not None else sorted(cfg.skills)
@@ -145,5 +149,6 @@ def summary(measured: Cost) -> str:
         f"{measured.skills} skill(s) cost {measured.characters} character(s) "
         f"in the startup listing, {measured.share:.0%} of the "
         f"{measured.budget}-character budget at a "
-        f"{DEFAULT_CONTEXT_TOKENS:,}-token context window."
+        f"{DEFAULT_CONTEXT_TOKENS:,}-token context window, "
+        "assuming the shipped defaults."
     )
