@@ -26,7 +26,6 @@ a reader to assume otherwise.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 
@@ -35,19 +34,6 @@ from .. import agent as legacy_agent
 # Tool calls and results are reconstructed from the stream, so they need ids
 # that are merely unique within a sample rather than meaningful.
 _CALL_PREFIX = "cli"
-
-
-def launch_argv(argv: list[str]) -> list[str]:
-    """How to start the CLI, given that on Windows it is not an executable.
-
-    npm installs `claude` as a `.cmd` shim. The legacy engine launches it with
-    the synchronous `subprocess.run`, which copes; inspect's asyncio subprocess
-    execs the path directly and Windows answers `WinError 2`, which reads as
-    "the CLI is not installed" when it plainly is.
-    """
-    if os.name == "nt" and argv[0].lower().endswith((".cmd", ".bat")):
-        return ["cmd.exe", "/c", *argv]
-    return argv
 
 
 def require_local() -> None:
@@ -162,8 +148,7 @@ def claude_cli(model: str | None, effort: str | None, skill_dir: Path):
                 cmd += ["--effort", effort]
 
             result = await sandbox_subprocess(
-                launch_argv(cmd), input=prompt, cwd=workspace,
-                env=legacy_agent.claude_env(),
+                cmd, input=prompt, cwd=workspace, env=legacy_agent.claude_env(),
             )
 
             events: list[dict] = []

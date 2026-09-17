@@ -52,8 +52,17 @@ async def shell_prefix() -> list[str]:
     if cached:
         return list(cached)
 
-    probe = await sandbox().exec(["bash", "-lc", "exit 0"], concurrency=False)
-    prefix = POSIX_SHELL if probe.success else WINDOWS_SHELL
+    # A guest without bash does not answer "that failed" -- there is nothing
+    # to run, so the exec raises before any result exists. On a Windows host
+    # under the `local` sandbox that surfaced as WinError 2 and took the whole
+    # task down, which reads as the harness being broken rather than the probe
+    # learning what it asked.
+    try:
+        probe = await sandbox().exec(["bash", "-lc", "exit 0"], concurrency=False)
+        posix = probe.success
+    except (FileNotFoundError, OSError):
+        posix = False
+    prefix = POSIX_SHELL if posix else WINDOWS_SHELL
     store().set(SHELL_KEY, prefix)
     return list(prefix)
 

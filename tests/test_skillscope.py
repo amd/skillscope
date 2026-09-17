@@ -19,6 +19,8 @@ temp directory rather than reading whatever happens to be checked out here.
 from __future__ import annotations
 
 import argparse
+import sys
+import asyncio
 import inspect
 import contextlib
 import io
@@ -2684,29 +2686,46 @@ class TestEngineCliAgentInstallsSkill(unittest.TestCase):
             self.assertTrue((staged / "scripts" / "validate.py").is_file())
 
 
-class TestEngineCliAgentLaunch(unittest.TestCase):
-    """npm ships `claude` as a .cmd shim, which Windows will not exec."""
+class TestShellPrefixProbe(unittest.TestCase):
+    """A guest without bash raises rather than answering."""
 
-    def test_windows_runs_a_cmd_shim_through_the_interpreter(self) -> None:
-        with mock.patch.object(engine_cli_agent.os, "name", "nt"):
-            argv = engine_cli_agent.launch_argv([r"C:\npm\claude.CMD", "-p"])
-        # Without this the failure is WinError 2, which reads as "the CLI is
-        # not installed" when it plainly is.
-        self.assertEqual(argv, ["cmd.exe", "/c", r"C:\npm\claude.CMD", "-p"])
+    def _probe(self, exc: Exception | None):
+        from skillscope.engine import tools as t
 
-    def test_a_real_executable_is_left_alone(self) -> None:
-        with mock.patch.object(engine_cli_agent.os, "name", "nt"):
-            self.assertEqual(
-                engine_cli_agent.launch_argv([r"C:\bin\claude.exe"]),
-                [r"C:\bin\claude.exe"],
-            )
+        class _Result:
+            success = True
 
-    def test_posix_is_untouched(self) -> None:
-        with mock.patch.object(engine_cli_agent.os, "name", "posix"):
-            self.assertEqual(
-                engine_cli_agent.launch_argv(["/usr/bin/claude", "-p"]),
-                ["/usr/bin/claude", "-p"],
-            )
+        class _Sandbox:
+            async def exec(self, *a, **k):
+                if exc is not None:
+                    raise exc
+                return _Result()
+
+        store: dict = {}
+
+        class _Store:
+            def get(self, k, default=None):
+                return store.get(k, default)
+
+            def set(self, k, v):
+                store[k] = v
+
+        with mock.patch.dict(
+            sys.modules,
+            {"inspect_ai.util": mock.MagicMock(sandbox=lambda: _Sandbox(), store=_Store)},
+        ):
+            return asyncio.run(t.shell_prefix())
+
+    def test_a_missing_bash_selects_powershell_rather_than_failing(self) -> None:
+        # WinError 2 here took the whole task down and reported 0/0
+        # expectations, which reads as the harness being broken.
+        self.assertEqual(
+            self._probe(FileNotFoundError(2, "The system cannot find the file specified")),
+            engine_tools.WINDOWS_SHELL,
+        )
+
+    def test_a_working_bash_still_selects_posix(self) -> None:
+        self.assertEqual(self._probe(None), engine_tools.POSIX_SHELL)
 
 
 class TestEngineCliAgentGuard(unittest.TestCase):
