@@ -97,6 +97,11 @@ ENGINES = ["legacy", "inspect", "claude-code", "claude-cli"]
 # from that: a preflight of their own, and a report that names the engine.
 INSPECT_ENGINES = tuple(e for e in ENGINES if e != "legacy")
 
+# The engines routing has a leg for. `claude-cli` and `claude-code` name the
+# real CLI as the agent, and routing has no path that drives it -- both fell
+# through to the legacy engine, ran on the host, and reported a container.
+ROUTING_ENGINES = ("legacy", "inspect")
+
 # Where JSON reports land inside the repo under test. One gitignored directory
 # rather than a path per repo, so a report is always in the same place.
 RUNS_DIRNAME = Path(".skillscope") / "runs"
@@ -367,12 +372,49 @@ def _prepare_graded_run(
             ok, detail = engine_models.check_reachable(engine_models.resolve(args.model))
             if not ok:
                 raise SystemExit(f"error: model not reachable -- {detail}")
+            if args.engine == "claude-cli":
+                # This engine reaches the provider for the judge but drives the
+                # real CLI as the agent, so both credentials are load-bearing
+                # and probing one proves nothing about the other.
+                ok, detail = check_api_reachable(args.model)
+                if not ok:
+                    raise SystemExit(f"error: claude API not reachable -- {detail}")
         return selected
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
     return selected
+
+
+def _require_routing_engine(engine: str) -> None:
+    """Stop a routing run asked for an engine that has no routing leg.
+
+    ``cmd_routing`` implements two: the legacy CLI path and the inspect one.
+    ``claude-cli`` and ``claude-code`` fell through to the first of those, so a
+    run asked for either did exactly what ``--engine legacy`` does -- drove the
+    CLI on the host -- while the report said ``sandbox_isolated: true``,
+    because the meta was derived from the engine's *name* rather than from
+    anything that ran.
+
+    Refusing is the honest answer rather than relabelling. A routing score
+    indistinguishable from ``legacy``'s is not a second data point, and
+    ``claude-code`` has no sandboxed routing leg to report at all.
+    """
+    if engine in ROUTING_ENGINES:
+        return
+    hint = ""
+    if os.environ.get("SKILLSCOPE_ENGINE") == engine:
+        hint = (
+            f"\n    (--engine defaults to $SKILLSCOPE_ENGINE, which is set to "
+            f"{engine!r}. Pass --engine on the routing leg to override it.)"
+        )
+    raise SystemExit(
+        f"error: routing has no '{engine}' leg. That engine drives the real "
+        f"claude CLI, and routing has no path that does, so the run would do "
+        f"exactly what --engine legacy does -- on the host, unsandboxed. Use "
+        f"one of: {', '.join(ROUTING_ENGINES)}.{hint}"
+    )
 
 
 def _sandbox_meta(args: argparse.Namespace) -> dict:
@@ -413,14 +455,17 @@ def _finish_routing(
             "isolated_config_dir": isolated,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
             **usage.snapshot().as_meta(),
-            # Routing under the inspect engine executes nothing -- the skill
-            # tool is offered and never called -- so there is no sandbox and
-            # nothing to isolate. Saying "none" is not the same as saying the
-            # run was unprotected.
+            # Stated outright rather than derived from the engine's name,
+            # which is what reported a container for runs that never started
+            # one. Neither routing leg has a sandbox to describe: the inspect
+            # leg executes nothing -- the skill tool is offered and never
+            # called -- and the legacy leg drives the CLI on the host. Saying
+            # "none" is not the same as saying the run was unprotected, so the
+            # two are named apart.
             **(
                 {"sandbox": "none", "sandbox_isolated": None}
                 if args.engine == "inspect"
-                else _sandbox_meta(args)
+                else {"sandbox": "host", "sandbox_isolated": False}
             ),
             **(extra or {}),
         },
@@ -437,6 +482,11 @@ def _finish_routing(
 
 
 def cmd_routing(args: argparse.Namespace) -> int:
+    # Before the structural gate, and before the preflight: an engine routing
+    # cannot run should cost nothing, and the preflight below keys off the
+    # engine, so it has to be a real one first.
+    _require_routing_engine(args.engine)
+
     # Who is in the room decides what the structural gate covers, so it is
     # settled before anything is checked or any token is spent.
     routing_set = config.active().routing_set
@@ -703,8 +753,10 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Which eval engine runs the cases. `legacy` drives the claude CLI "
             "directly; `inspect` runs a harness-independent agent through "
-            "inspect_ai (needs `pip install 'skillscope[inspect]'`). Default: "
-            "legacy, or $SKILLSCOPE_ENGINE."
+            "inspect_ai (needs `pip install 'skillscope[inspect]'`); "
+            "`claude-code` and `claude-cli` run the real CLI, and are "
+            "behavioral-only -- routing takes " + " or ".join(ROUTING_ENGINES) +
+            ". Default: legacy, or $SKILLSCOPE_ENGINE."
         ),
     )
     _add_timeout_argument(parser)

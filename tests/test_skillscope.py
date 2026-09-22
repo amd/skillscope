@@ -3145,6 +3145,170 @@ class TestEngineSandboxSelection(unittest.TestCase):
         self.assertIn("nope.yaml", str(caught.exception))
 
 
+class TestRoutingEngineLeg(unittest.TestCase):
+    """Routing runs the engines it has a leg for, and refuses the rest.
+
+    `cmd_routing` branches on `inspect` and sends everything else to the legacy
+    path, so `--engine claude-cli` and `--engine claude-code` ran the CLI on the
+    host -- the same eleven subprocess calls `--engine legacy` makes -- while
+    the report said `sandbox: docker, sandbox_isolated: true`, because the meta
+    was derived from the engine's *name* and nothing had examined what ran.
+
+    Refused rather than relabelled: a routing score indistinguishable from
+    `legacy`'s is not a second data point, and there is no sandboxed routing leg
+    for `claude-code` to report at all.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate()
+
+    def refusal(self, engine: str) -> str:
+        with self.assertRaises(SystemExit) as caught:
+            cli._require_routing_engine(engine)
+        return str(caught.exception)
+
+    def test_the_engines_that_drive_the_real_cli_are_refused(self) -> None:
+        for engine in ("claude-cli", "claude-code"):
+            with self.subTest(engine=engine):
+                self.assertIn(engine, self.refusal(engine))
+
+    def test_the_refusal_names_what_to_use_instead(self) -> None:
+        # A run that stops without saying what would have worked just moves the
+        # guessing somewhere else.
+        message = self.refusal("claude-code")
+        self.assertIn("legacy", message)
+        self.assertIn("inspect", message)
+
+    def test_the_environment_variable_is_named_when_it_is_the_cause(self) -> None:
+        # SKILLSCOPE_ENGINE set for a whole job is the confusing case: nothing
+        # on the routing command line mentions the engine it is being refused
+        # for.
+        self.addCleanup(os.environ.pop, "SKILLSCOPE_ENGINE", None)
+        os.environ["SKILLSCOPE_ENGINE"] = "claude-cli"
+        self.assertIn("SKILLSCOPE_ENGINE", self.refusal("claude-cli"))
+
+    def test_an_engine_with_a_leg_passes(self) -> None:
+        for engine in cli.ROUTING_ENGINES:
+            with self.subTest(engine=engine):
+                self.assertIsNone(cli._require_routing_engine(engine))
+
+    def test_every_routing_engine_is_a_real_engine(self) -> None:
+        self.assertEqual(set(cli.ROUTING_ENGINES) - set(cli.ENGINES), set())
+
+    def test_the_refusal_happens_before_anything_is_spent(self) -> None:
+        # Ahead of the structural gate and the preflight, both of which cost
+        # time and one of which keys off the engine.
+        source = inspect.getsource(cli.cmd_routing)
+        guard = source.index("_require_routing_engine")
+        self.assertLess(guard, source.index("_prepare_graded_run"))
+
+    def test_the_report_does_not_ask_the_provider_what_contained_a_run(self) -> None:
+        # The defect in one line: `_sandbox_meta` returns `provider()`, which
+        # examines nothing and returns the default string, so a routing run
+        # that started no container still reported one. Neither routing leg has
+        # a sandbox, so neither should be asking.
+        self.assertNotIn("_sandbox_meta", inspect.getsource(cli._finish_routing))
+
+
+class TestRoutingReportsWhereItRan(unittest.TestCase):
+    """Both routing legs run unsandboxed, and the meta says which kind.
+
+    `none` and `host` are different claims: the inspect leg offers the skill as
+    a tool definition and never executes anything, so there is nothing to
+    isolate; the legacy leg runs the CLI on the host, where there is something
+    to isolate and nothing isolating it.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate()
+        self.written: dict = {}
+        patch = mock.patch.object(
+            cli, "_write_report", lambda summary, *a, **k: self.written.update(summary)
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def meta(self, engine: str) -> dict:
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", engine, "--skip-preflight"]
+        )
+        cli._finish_routing(args, [], {"alpha": None}, time.time(), isolated=True)
+        return self.written["meta"]
+
+    def test_the_legacy_leg_says_host(self) -> None:
+        meta = self.meta("legacy")
+        self.assertEqual(meta["sandbox"], "host")
+        self.assertIs(meta["sandbox_isolated"], False)
+
+    def test_the_inspect_leg_says_none_rather_than_unprotected(self) -> None:
+        meta = self.meta("inspect")
+        self.assertEqual(meta["sandbox"], "none")
+        self.assertIsNone(meta["sandbox_isolated"])
+
+    def test_no_routing_leg_ever_claims_isolation(self) -> None:
+        # The assertion the reports failed: whatever engine ran, routing had
+        # nothing contained, so nothing may say it did.
+        for engine in cli.ROUTING_ENGINES:
+            with self.subTest(engine=engine):
+                self.assertIsNot(self.meta(engine)["sandbox_isolated"], True)
+
+
+class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):
+    """`claude-cli` uses two, so probing one proves nothing about the other.
+
+    The real CLI is the agent and the inspect provider grades it, so a run dies
+    on whichever is missing. The preflight tested the provider alone -- and for
+    routing, which uses neither, it tested the provider and demanded the
+    inspect extra for a leg that runs no inspect code.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate()
+        self.probed: list[str] = []
+
+    def args(self, engine: str) -> argparse.Namespace:
+        return cli.build_parser().parse_args(
+            ["behavioral", "--engine", engine, "--model", "opus"]
+        )
+
+    def run_preflight(self, engine: str, cli_ok: bool = True) -> list[str]:
+        patches = [
+            mock.patch.object(cli.engine, "require", lambda *a, **k: None),
+            mock.patch.object(
+                cli, "check_api_reachable",
+                lambda *a, **k: (self.probed.append("cli"), (cli_ok, "ok"))[1],
+            ),
+        ]
+        probe = mock.patch(
+            "skillscope.engine.models.check_reachable",
+            lambda *a, **k: (self.probed.append("provider"), (True, "ok"))[1],
+        )
+        for patch in [*patches, probe]:
+            patch.start()
+            self.addCleanup(patch.stop)
+        cli._prepare_graded_run(self.args(engine))
+        return self.probed
+
+    def test_claude_cli_probes_the_cli_as_well_as_the_provider(self) -> None:
+        self.assertEqual(sorted(self.run_preflight("claude-cli")), ["cli", "provider"])
+
+    def test_a_sandboxed_engine_probes_only_the_provider(self) -> None:
+        # `claude-code` reaches the CLI inside the container through inspect's
+        # own bridge, so the host's CLI credential is not what it uses.
+        self.assertEqual(self.run_preflight("claude-code"), ["provider"])
+
+    def test_an_unreachable_cli_stops_the_run(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.run_preflight("claude-cli", cli_ok=False)
+        self.assertIn("claude API not reachable", str(caught.exception))
+
+
 class TestTheModelProbeIsBounded(unittest.TestCase):
     """The preflight must not become the hang it exists to prevent.
 
