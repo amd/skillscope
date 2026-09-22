@@ -1,0 +1,30 @@
+###############################################################################
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+###############################################################################
+
+# Example: a skill whose behavioral cases need real hardware.
+#
+# This file lives at <skill>/evals/machine.yml. It answers two questions that
+# are asked by different people, and it is worth keeping them apart:
+#
+#   * `os` / `labels` say which CI runner the job lands on -- a machine with
+#     the device physically in it. That is the repo's scheduling problem.
+#   * `sandbox` says what the container on that machine has to provide. That is
+#     the skill's problem, and without it the job lands on the right hardware
+#     and then runs in a container that cannot see it.
+#
+# Both are needed. Neither implies the other.
+
+os:
+  - Linux
+
+# The hardware the cases need, named as a runner label rather than a pool.
+labels:
+  - mi300x
+
+# Resolved beside this file, in evals/. Absent means the default container:
+# no network, no devices, which is what a skill that only reads and writes
+# files should want.
+sandbox: compose.yaml

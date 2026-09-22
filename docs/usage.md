@@ -262,6 +262,14 @@ no network by default; one that installs a server or pulls a model cannot run
 that way and says so. Selecting a provider does not discard what a skill asked
 for -- the compose file rides along.
 
+[`examples/skill-with-a-device/evals/`](../examples/skill-with-a-device/evals)
+is the pair, worked through: a `machine.yml` that asks for GPU runners and
+names a compose file, and the compose file that binds the devices in and
+grants egress. The two are not substitutes. `labels:` decides which machine the
+job lands on; `sandbox:` decides whether the container on it can see the
+hardware that machine has. A skill that sets only the first gets the right
+runner and a container that cannot reach its device.
+
 Windows is the exception to both: inspect's sandbox layer and every tool built
 on it assume a POSIX guest, so those legs run unsandboxed and trade isolation
 for running on the platform they are meant to test.

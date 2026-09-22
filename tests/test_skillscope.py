@@ -3417,5 +3417,55 @@ class TestTheProbeSaysWhatWentWrong(unittest.TestCase):
         self.assertIs(engine_models._underlying(hostile), hostile)
 
 
+class TestTheShippedSandboxExample(unittest.TestCase):
+    """The worked example has to keep working.
+
+    `sandbox:` was documented with no example of what the file it names looks
+    like, which left the one thing a reader actually needs -- a device bound in
+    and egress granted -- as an exercise. An example that drifts from the
+    schema, or from what inspect requires of a compose file, is worse than
+    none, so it is checked here rather than trusted.
+    """
+
+    EXAMPLE = REPO_ROOT / "examples" / "skill-with-a-device" / "evals"
+
+    def setUp(self) -> None:
+        import yaml
+
+        self.machine = yaml.safe_load(
+            (self.EXAMPLE / "machine.yml").read_text(encoding="utf-8")
+        )
+        self.compose = yaml.safe_load(
+            (self.EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+        )
+
+    def test_the_machine_file_uses_only_keys_the_parser_knows(self) -> None:
+        self.assertEqual(set(self.machine) - datasets.MACHINE_KEYS, set())
+
+    def test_it_names_the_compose_file_that_sits_beside_it(self) -> None:
+        # Resolved beside machine.yml, not at the skill root. An example that
+        # got this wrong would teach the one mistake the layout invites.
+        self.assertTrue((self.EXAMPLE / self.machine["sandbox"]).is_file())
+
+    def test_the_compose_file_offers_a_service_inspect_will_use(self) -> None:
+        services = self.compose["services"]
+        default = "default" in services or any(
+            spec.get("x-default") for spec in services.values()
+        )
+        self.assertTrue(default, f"no default service among {sorted(services)}")
+
+    def test_the_container_is_told_to_stay_up(self) -> None:
+        # inspect execs into a container that is already running. One that
+        # exits on start fails every case on a sandbox that is not there.
+        self.assertIn("command", self.compose["services"]["default"])
+
+    def test_it_demonstrates_the_two_things_the_default_withholds(self) -> None:
+        default = self.compose["services"]["default"]
+        self.assertIn("devices", default)
+        # Egress is granted by *not* setting this, which is worth asserting:
+        # an example that carried it would grant nothing and say it did.
+        self.assertNotIn("network_mode", default)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,0 +1,49 @@
+###############################################################################
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+###############################################################################
+
+# Example: the sandbox for a skill that needs a GPU and network egress.
+#
+# Named by `sandbox: compose.yaml` in the machine.yml beside this file. The
+# default sandbox is this minus `devices`, `group_add`, `security_opt`, `ipc`
+# and with `network_mode: none` -- so everything below is the opt-in, and a
+# skill that needs none of it should not ship a compose file at all.
+
+services:
+  # inspect runs the cases in the service named `default`. One service with a
+  # different name and `x-default: true` works too; several services without
+  # either is the error you get instead of a container.
+  default:
+    # The default image. Whatever you put here needs inspect's tool support to
+    # be reachable inside the container, so start from this one and add to it
+    # via `build:` rather than replacing it with a bare vendor image.
+    image: "aisiuk/inspect-tool-support"
+
+    # inspect execs into a container that is already up, so the container has
+    # to stay up on its own. Without these it exits immediately and every case
+    # fails on a sandbox that is not there.
+    command: "tail -f /dev/null"
+    init: true
+    stop_grace_period: 1s
+
+    # NETWORK. The default sandbox sets `network_mode: none`; omitting that key
+    # is what grants egress. Only do this for a skill that genuinely needs it
+    # -- pulling a model, reaching a package index -- because it is also the
+    # thing that lets a case reach the internet and stop being reproducible.
+    #
+    # `network_mode: none` here would restore the default.
+
+    # DEVICE. The GPU nodes, bound in from the host. The job has to already be
+    # on a machine that has them; that is what `labels:` in machine.yml is for.
+    devices:
+      - "/dev/kfd"
+      - "/dev/dri"
+
+    # What the userspace stack needs on top of the device nodes themselves.
+    group_add:
+      - video
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
