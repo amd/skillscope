@@ -17,6 +17,20 @@ from __future__ import annotations
 
 import os
 
+from .. import deadline
+
+# How long the reachability probe may take. The legacy probe has held the same
+# bound since it was written, for the same reason: off-network is the ordinary
+# way for this to fail, and a preflight that hangs is worse than no preflight.
+PROBE_TIMEOUT_S = 60.0
+
+# No retries, for the reason `claude_env` sets CLAUDE_CODE_MAX_RETRIES to 0:
+# inspect's default is `None`, which retries a connection error without a
+# limit, and a probe whose whole job is to fail fast must not be the one thing
+# that hangs. Against a closed port this is the difference between answering in
+# seconds and still running after four minutes.
+PROBE_RETRIES = 0
+
 ALIASES = {
     "opus": "anthropic/claude-opus-5",
     "sonnet": "anthropic/claude-sonnet-5",
@@ -37,14 +51,45 @@ def resolve(model: str) -> str:
     return ALIASES.get(model.lower(), f"anthropic/{model}")
 
 
-async def _probe(model: str):
-    from inspect_ai.model import get_model
+async def _probe(model: str, timeout: float):
+    import anyio
+    from inspect_ai.model import GenerateConfig, get_model
 
-    resolved = get_model(model, **model_args(model))
-    return await resolved.generate("Reply with the single word: ok")
+    resolved = get_model(
+        model,
+        # `timeout` bounds each attempt and PROBE_RETRIES stops it being
+        # attempted again; the cancel scope below bounds the call as a whole,
+        # since neither of those covers a connect that stalls before the
+        # provider's own clock starts.
+        config=GenerateConfig(max_retries=PROBE_RETRIES, timeout=max(1, int(timeout))),
+        # Not memoized: this config exists for the probe, and a graded run that
+        # later asked for the same model would otherwise inherit a retry
+        # setting chosen for a one-shot check.
+        memoize=False,
+        **model_args(model),
+    )
+    with anyio.fail_after(timeout):
+        return await resolved.generate("Reply with the single word: ok")
 
 
-def check_reachable(model: str) -> tuple[bool, str]:
+def probe_bound(timeout: float = PROBE_TIMEOUT_S) -> tuple[float | None, str]:
+    """Seconds this probe may take, or ``(None, why)`` when there are none left.
+
+    A preflight exists to save a run from a long confusing failure, so it must
+    not become one: the bound is the smaller of its own and whatever the
+    command's ``--timeout`` has left. The legacy probe has always clipped
+    itself this way; this one did not, which is how a closed port kept it
+    running long past the deadline that was supposed to cover it.
+    """
+    bound = deadline.active()
+    if bound is None:
+        return timeout, ""
+    if bound.expired():
+        return None, bound.message()
+    return bound.cap(timeout), ""
+
+
+def check_reachable(model: str, timeout: float = PROBE_TIMEOUT_S) -> tuple[bool, str]:
     """Confirm the model answers before anything expensive starts.
 
     A graded run starts containers and installs skills before it ever reaches a
@@ -52,19 +97,50 @@ def check_reachable(model: str) -> tuple[bool, str]:
     all that work rather than as a credentials problem. One tiny call up front
     turns a 401 buried in a sample error into a message on the first line.
 
+    Bounded twice over, because an unreachable gateway is the common case and a
+    preflight that outlives the command it protects helps nobody: `timeout`
+    here, clipped to whatever ``--timeout`` has left.
+
     Costs a handful of tokens. `mockllm` reaches no provider, so it is skipped
     rather than charged for a round trip that proves nothing.
     """
     if model.startswith("mockllm"):
         return True, "mockllm (no provider)"
 
+    timeout, expired = probe_bound(timeout)
+    if timeout is None:
+        return False, expired
+
     import anyio
 
     try:
-        output = anyio.run(_probe, model)
+        output = anyio.run(_probe, model, timeout)
+    except TimeoutError:
+        return False, (
+            f"model preflight timed out after {timeout:g}s "
+            "(is the network reachable?)"
+        )
     except Exception as exc:  # noqa: BLE001 -- the reason is the return value
+        exc = _underlying(exc)
         return False, f"{type(exc).__name__}: {exc}"[:400]
     return True, (output.completion or "").strip()[:40]
+
+
+def _underlying(exc: BaseException) -> BaseException:
+    """The error a retry wrapper is carrying, if it is carrying one.
+
+    Turning off retries makes tenacity raise `RetryError` rather than what
+    actually went wrong, and `RetryError[<Future at 0x7f...>]` is not a message
+    anybody can act on. Reported as `APIConnectionError: ...` instead, which is
+    the difference between this probe doing its job and merely failing.
+    """
+    attempt = getattr(exc, "last_attempt", None)
+    if attempt is None:
+        return exc
+    try:
+        return attempt.exception() or exc
+    except Exception:  # noqa: BLE001 -- a probe never fails on its own reporting
+        return exc
 
 
 def custom_headers() -> dict[str, str]:

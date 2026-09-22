@@ -3145,5 +3145,113 @@ class TestEngineSandboxSelection(unittest.TestCase):
         self.assertIn("nope.yaml", str(caught.exception))
 
 
+class TestTheModelProbeIsBounded(unittest.TestCase):
+    """The preflight must not become the hang it exists to prevent.
+
+    Pointed at a closed port it was still running after four minutes: inspect's
+    `GenerateConfig.max_retries` defaults to `None`, which retries a connection
+    error without a limit, and nothing clipped the call to `--timeout`. The
+    legacy probe has had both guards from the start, and says why in its own
+    docstring.
+    """
+
+    def tearDown(self) -> None:
+        deadline.use(None)
+
+    def test_retries_are_off(self) -> None:
+        self.assertEqual(engine_models.PROBE_RETRIES, 0)
+
+    def test_the_probe_asks_for_that_and_a_per_attempt_timeout(self) -> None:
+        source = inspect.getsource(engine_models._probe)
+        self.assertIn("max_retries=PROBE_RETRIES", source)
+        self.assertIn("timeout=", source)
+        # Belt and braces: neither of the above covers a connect that stalls
+        # before the provider's own clock starts.
+        self.assertIn("fail_after", source)
+
+    def test_the_probe_config_is_not_memoized_into_the_graded_run(self) -> None:
+        # Retries off is right for a one-shot check and wrong for the run it
+        # precedes, and inspect memoizes models by default.
+        self.assertIn("memoize=False", inspect.getsource(engine_models._probe))
+
+    def test_an_unbounded_command_gets_the_default(self) -> None:
+        deadline.use(None)
+        self.assertEqual(
+            engine_models.probe_bound(), (engine_models.PROBE_TIMEOUT_S, "")
+        )
+
+    def test_a_tighter_command_timeout_wins(self) -> None:
+        deadline.use(deadline.Deadline(5.0, command="behavioral"))
+        seconds, _ = engine_models.probe_bound()
+        self.assertLessEqual(seconds, 5.0)
+
+    def test_a_looser_command_timeout_does_not_extend_it(self) -> None:
+        deadline.use(deadline.Deadline(10_000.0, command="behavioral"))
+        seconds, _ = engine_models.probe_bound()
+        self.assertEqual(seconds, engine_models.PROBE_TIMEOUT_S)
+
+    def test_an_expired_command_probes_nothing_at_all(self) -> None:
+        deadline.use(deadline.Deadline(0.0, command="behavioral"))
+        seconds, why = engine_models.probe_bound()
+        self.assertIsNone(seconds)
+        self.assertIn("--timeout", why)
+
+    def test_an_expired_command_is_reported_rather_than_dialled(self) -> None:
+        deadline.use(deadline.Deadline(0.0, command="behavioral"))
+        ok, detail = engine_models.check_reachable("anthropic/claude-x")
+        self.assertFalse(ok)
+        self.assertIn("--timeout", detail)
+
+    def test_mockllm_still_costs_nothing(self) -> None:
+        self.assertEqual(
+            engine_models.check_reachable("mockllm/model"),
+            (True, "mockllm (no provider)"),
+        )
+
+
+class TestTheProbeSaysWhatWentWrong(unittest.TestCase):
+    """A preflight whose message is unreadable has not done its job.
+
+    Turning retries off makes tenacity raise `RetryError`, whose string form is
+    `RetryError[<Future at 0x7f...>]` -- it names neither the host nor the
+    failure. The point of probing early is a message on the first line.
+    """
+
+    class Future:
+        def __init__(self, error: BaseException | None) -> None:
+            self.error = error
+
+        def exception(self) -> BaseException | None:
+            return self.error
+
+    def wrapper(self, error: BaseException | None) -> Exception:
+        wrapped = RuntimeError("RetryError[<Future at 0x0>]")
+        wrapped.last_attempt = self.Future(error)
+        return wrapped
+
+    def test_the_wrapped_error_is_what_gets_reported(self) -> None:
+        cause = ConnectionError("Connection error.")
+        self.assertIs(engine_models._underlying(self.wrapper(cause)), cause)
+
+    def test_a_plain_error_is_left_alone(self) -> None:
+        plain = ValueError("401 unauthorized")
+        self.assertIs(engine_models._underlying(plain), plain)
+
+    def test_an_empty_wrapper_falls_back_to_itself(self) -> None:
+        empty = self.wrapper(None)
+        self.assertIs(engine_models._underlying(empty), empty)
+
+    def test_unwrapping_never_raises_on_its_own(self) -> None:
+        # This runs on the failure path. An exception here would replace a
+        # useful message with a traceback from the reporting code.
+        class Exploding:
+            def exception(self):
+                raise RuntimeError("boom")
+
+        hostile = RuntimeError("wrapped")
+        hostile.last_attempt = Exploding()
+        self.assertIs(engine_models._underlying(hostile), hostile)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
