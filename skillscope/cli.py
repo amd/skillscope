@@ -494,7 +494,12 @@ def cmd_routing(args: argparse.Namespace) -> int:
         from .engine import sandbox as engine_sandbox
 
         outcomes = inspect_routing.run(
-            cases, routing_set, args.model, args.effort, args.engine
+            cases,
+            routing_set,
+            args.model,
+            args.effort,
+            args.engine,
+            case_timeout=args.case_timeout,
         )
         if args.engine == "claude-code":
             # A container really was started: `verify.require()` refuses every

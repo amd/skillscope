@@ -469,6 +469,28 @@ def _solver(
     )
 
 
+def case_time_limit(case_timeout: float | None) -> int | None:
+    """The per-sample bound: `--case-timeout`, inside the command's own deadline.
+
+    inspect's `Task(time_limit=)` is per *sample*, which is per case -- the same
+    unit `--case-timeout` has always meant. Without this the only bound is the
+    whole command's remaining budget, so one hung prompt spends the run, which
+    is the exact thing the flag exists to prevent (`deadline` says so in its own
+    module docstring).
+
+    Clipped to whatever `--timeout` has left, for the reason
+    `behavioral.task_time_limit` keeps a reserve: the command deadline ends the
+    process outright, taking the report and the transcript with it, so a
+    per-case cap that outlives it turns a timeout into silence.
+    """
+    whole_run = behavioral.task_time_limit(deadline.active())
+    if case_timeout is None or case_timeout <= 0:
+        return whole_run
+    if whole_run is None:
+        return int(case_timeout)
+    return max(1, min(int(case_timeout), whole_run))
+
+
 def build_task(
     cases: list[Case],
     routing_set: dict[str, Path],
@@ -476,6 +498,7 @@ def build_task(
     effort: str,
     engine: str,
     config_dir: Path | None = None,
+    case_timeout: float | None = None,
 ):
     """One inspect `Task` for the *room*, with the cases as its samples.
 
@@ -506,7 +529,7 @@ def build_task(
         message_limit=min(
             behavioral.message_limit_for(models.resolve(model)), ROUTING_MESSAGE_LIMIT
         ),
-        time_limit=behavioral.task_time_limit(deadline.active()),
+        time_limit=case_time_limit(case_timeout),
     )
 
 
@@ -516,6 +539,7 @@ def run(
     model: str,
     effort: str,
     engine: str,
+    case_timeout: float | None = None,
 ) -> list[routing_core.Outcome]:
     """Run every routing case against the room. Mirrors `routing.run_case`'s output.
 
@@ -586,6 +610,7 @@ def run(
             engine,
             resolved,
             Path(config_dir) if engine == NO_SANDBOX else None,
+            case_timeout,
         )
 
     outcomes: list[routing_core.Outcome] = []
@@ -606,11 +631,14 @@ def run(
 
 
 def _evaluate(
-    inspect_eval, cases, routing_set, model, effort, engine, resolved, config_dir
+    inspect_eval, cases, routing_set, model, effort, engine, resolved, config_dir,
+    case_timeout=None,
 ):
     """Run the task. Split out so `run` reads as a sequence of decisions."""
     return inspect_eval(
-        build_task(cases, routing_set, model, effort, engine, config_dir),
+        build_task(
+            cases, routing_set, model, effort, engine, config_dir, case_timeout
+        ),
         model=resolved,
         model_args=models.model_args(resolved),
         log_dir=str(Path(".skillscope") / "logs"),

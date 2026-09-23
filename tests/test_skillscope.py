@@ -54,12 +54,14 @@ from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import no_sandbox as engine_no_sandbox
+from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import sandbox as engine_sandbox
 from skillscope.engine import verify as engine_verify
 from skillscope.engine import routing as engine_routing
 from skillscope.engine import no_sandbox as engine_no_sandbox
+from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import tools as engine_tools
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -3179,8 +3181,12 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
         self.repo.activate(routing_room="alpha")
         self.reached: list[str] = []
 
-        def record_inspect(cases, routing_set, model, effort, engine):
+        def record_inspect(cases, routing_set, model, effort, engine, **kwargs):
+            # The cap is recorded, not merely tolerated: a leg that never
+            # receives it bounds a case by the whole command's budget while the
+            # report claims otherwise.
             self.reached.append(f"inspect:{engine}")
+            self.passed_kwargs = kwargs
             return []
 
         def record_legacy(case, routing_set, cfg):
@@ -3223,6 +3229,10 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
         self.run_routing("claude-code-no-sandbox")
         self.assertEqual(self.reached, ["inspect:claude-code-no-sandbox"])
 
+    def test_the_leg_is_given_the_per_case_cap(self) -> None:
+        self.run_routing("claude-code")
+        self.assertIn("case_timeout", self.passed_kwargs)
+
     def test_the_guard_reads_the_engine_set_rather_than_a_literal(self) -> None:
         # A literal tuple is the defect itself, so the source is what to assert.
         self.assertIn(
@@ -3233,6 +3243,46 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
         self.assertNotIn("inspect", cli.ENGINES)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
+
+
+class TestRoutingCaseTimeoutBinds(unittest.TestCase):
+    """`--case-timeout` has to reach the new legs, or it is a cap in name only.
+
+    The flag exists so one hung prompt cannot spend the whole run -- `deadline`
+    says so in its own docstring. The inspect legs originally bounded a sample
+    only by the command's remaining budget, which is precisely the thing the
+    flag guards against, while the report recorded `case_timeout` as though it
+    had applied. A cap that is reported and not enforced is worse than none.
+    """
+
+    def tearDown(self) -> None:
+        deadline.use(None)
+
+    def test_the_flag_is_the_bound_when_the_command_has_room(self) -> None:
+        deadline.use(deadline.Deadline(3000.0, command="routing"))
+        self.assertEqual(engine_routing.case_time_limit(90), 90)
+
+    def test_the_command_deadline_clips_a_longer_case_cap(self) -> None:
+        # The command deadline ends the process outright, taking the report
+        # with it, so a per-case cap must not outlive it.
+        deadline.use(deadline.Deadline(200.0, command="routing"))
+        self.assertLess(engine_routing.case_time_limit(9999), 200)
+
+    def test_no_case_cap_falls_back_to_the_command_budget(self) -> None:
+        deadline.use(deadline.Deadline(3000.0, command="routing"))
+        self.assertEqual(
+            engine_routing.case_time_limit(None),
+            engine_behavioral.task_time_limit(deadline.active()),
+        )
+
+    def test_an_unbounded_command_still_honours_the_case_cap(self) -> None:
+        deadline.use(None)
+        self.assertEqual(engine_routing.case_time_limit(45), 45)
+
+    def test_the_cli_hands_the_flag_to_the_leg(self) -> None:
+        # Asserted on the source: the failure mode is the argument silently
+        # not being passed, which no unit of the leg can notice.
+        self.assertIn("case_timeout=args.case_timeout", inspect.getsource(cli.cmd_routing))
 
 
 class TestRoutingRoomIsTheRoomThatWasAskedFor(unittest.TestCase):
