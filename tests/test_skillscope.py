@@ -3252,6 +3252,62 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
 
 
+class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
+    """A run that finished saying nothing is a routing result, not a failure.
+
+    The routing mapper has to tell "the agent reached for no skill" from "the
+    agent never ran", and it draws that line at whether the sample produced any
+    messages. The host driver appended a closing message only when the CLI had
+    something to say, so a run that finished quietly left none -- and two cases
+    on the real runner were graded as infrastructure failures where the legacy
+    engine graded them `correct_trigger` and `true_negative`.
+
+    The distinction is still drawn, just in the right place: a stream carrying
+    no result event at all is a CLI that never finished.
+
+    Exercised through `run_completed`, which is pure. The unit suite runs
+    without the inspect extra, and a rule reachable only through inspect's
+    message objects would go untested in CI -- which is where it matters.
+    """
+
+    def test_a_run_that_finished_with_an_answer(self) -> None:
+        done, final = engine_no_sandbox.run_completed(
+            [{"type": "result", "result": "no skill needed"}]
+        )
+        self.assertTrue(done)
+        self.assertEqual(final, "no skill needed")
+
+    def test_a_run_that_finished_saying_nothing_still_counts_as_finished(self) -> None:
+        # The case this fixes. An empty answer is the agent declining to route.
+        done, final = engine_no_sandbox.run_completed([{"type": "result", "result": ""}])
+        self.assertTrue(done)
+        self.assertEqual(final, "")
+
+    def test_a_result_event_with_no_text_at_all_still_counts(self) -> None:
+        self.assertTrue(engine_no_sandbox.run_completed([{"type": "result"}])[0])
+
+    def test_a_stream_that_never_finished_does_not_count(self) -> None:
+        # Preserved deliberately: no result event means the CLI did not reach
+        # the end, which is an infrastructure failure and must stay one.
+        self.assertFalse(
+            engine_no_sandbox.run_completed(
+                [{"type": "assistant", "message": {"content": []}}]
+            )[0]
+        )
+
+    def test_the_last_result_event_wins(self) -> None:
+        _, final = engine_no_sandbox.run_completed(
+            [{"type": "result", "result": "first"}, {"type": "result", "result": "last"}]
+        )
+        self.assertEqual(final, "last")
+
+    def test_the_placeholder_matches_what_the_output_already_used(self) -> None:
+        # The message list was the inconsistent half; `state.output` has always
+        # substituted this for an empty answer.
+        source = inspect.getsource(engine_no_sandbox)
+        self.assertEqual(source.count('"(no final message)"'), 2)
+
+
 class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
     """A skill's setup either runs, or the run stops. Not skipped quietly.
 

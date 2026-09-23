@@ -57,6 +57,30 @@ async def _workspace() -> str:
     return sandbox().as_type(LocalSandboxEnvironment).directory.name
 
 
+def run_completed(events: list[dict]) -> tuple[bool, str]:
+    """Whether the CLI reached the end of the run, and what it said if so.
+
+    Pure, and separated from message construction on purpose: it is the
+    distinction the routing mapper depends on -- "the agent reached for no
+    skill" against "the agent never ran" -- and the unit suite runs without the
+    inspect extra, so a rule only reachable through inspect's message objects
+    would have no coverage where it matters.
+
+    A `result` event is the evidence. The CLI emits one when it finishes,
+    carrying the closing answer or nothing at all; a stream without one is a
+    run that did not get there.
+    """
+    completed = False
+    final = ""
+    for event in events:
+        if event.get("type") != "result":
+            continue
+        completed = True
+        if isinstance(event.get("result"), str):
+            final = event["result"]
+    return completed, final
+
+
 def events_to_messages(events: list[dict], prompt: str) -> tuple[list, str]:
     """Turn the CLI's stream into inspect messages, and the final answer.
 
@@ -96,12 +120,20 @@ def events_to_messages(events: list[dict], prompt: str) -> tuple[list, str]:
                 )
             )
 
-    final = ""
-    for event in events:
-        if event.get("type") == "result" and isinstance(event.get("result"), str):
-            final = event["result"]
-    if final:
-        messages.append(ChatMessageAssistant(content=final))
+    completed, final = run_completed(events)
+
+    # Recorded even when empty, which is the point. A run that finished
+    # without a tool call and without a closing sentence is a routing result:
+    # the agent reached for no skill. Appending nothing made it
+    # indistinguishable from a CLI that never ran, and the routing mapper --
+    # which has to tell those apart, and cannot do it from an empty message
+    # list -- graded two such cases as infrastructure failures where the
+    # legacy engine graded them `correct_trigger` and `true_negative`.
+    #
+    # The placeholder matches what `state.output` has always used for the same
+    # case; only the message list was inconsistent with it.
+    if completed or final:
+        messages.append(ChatMessageAssistant(content=final or "(no final message)"))
     return messages, final
 
 
