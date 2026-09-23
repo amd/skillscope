@@ -24,14 +24,14 @@ is measured is what CI executes.
     tools/benchmark_engines.py --compare legacy.json candidate.json
 
 Which pair is compared is an argument, because the question changes over the
-migration. `legacy` against `claude-cli` asks the narrow, sharp question: both
+migration. `legacy` against `claude-code-no-sandbox` asks the narrow, sharp question: both
 drive the same CLI, so agreement says the framework around the agent is
 faithful, and disagreement is a defect in the crossing rather than a property
-of a different agent. `claude-cli` against `claude-code` asks the other one --
+of a different agent. `claude-code-no-sandbox` against `claude-code` asks the other one --
 same agent, host against container, which is where a contaminated runner shows
 up as a disagreement neither engine could find alone.
 
-    tools/benchmark_engines.py behavioral --candidate claude-cli --skill my-skill
+    tools/benchmark_engines.py behavioral --candidate claude-code-no-sandbox --skill my-skill
 """
 
 from __future__ import annotations
@@ -238,9 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--candidate",
-        default="claude-cli",
+        default="claude-code-no-sandbox",
         choices=ENGINES,
-        help="The engine under test. Default: claude-cli.",
+        help="The engine under test. Default: claude-code-no-sandbox.",
     )
     parser.add_argument(
         "--noise",
@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         "noise": noise,
         "spend": {
             "baseline": spend(baseline, getattr(args, "baseline", "legacy")),
-            "candidate": spend(candidate, getattr(args, "candidate", "claude-cli")),
+            "candidate": spend(candidate, getattr(args, "candidate", "claude-code-no-sandbox")),
         },
     }
 

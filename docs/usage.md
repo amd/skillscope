@@ -218,7 +218,7 @@ changes.
 | --- | --- | --- | --- |
 | `legacy` (default) | The `claude` CLI, driven directly | the host | the CLI on `PATH` |
 | `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
-| `claude-cli` | The real CLI, under `inspect_ai` | the host | `skillscope[inspect]`, the CLI on `PATH` |
+| `claude-code-no-sandbox` | The real CLI, under `inspect_ai` | the host | `skillscope[inspect]`, the CLI on `PATH` |
 
 All three drive the agent a skill is written for, so what differs between them
 is **where the agent runs**, not what it is. That is the axis worth choosing

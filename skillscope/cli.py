@@ -87,24 +87,24 @@ from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
 # The engines a graded run can be driven by, in the order they were added.
-#   legacy       -- the claude CLI, driven directly, no framework
-#   claude-code  -- the real CLI inside the sandbox, via inspect_swe (Linux only)
-#   claude-cli   -- the real CLI on the host, under inspect_ai (any platform)
+#   legacy                  -- the claude CLI, driven directly, no framework
+#   claude-code             -- the real CLI in a sandbox, via inspect_swe (Linux only)
+#   claude-code-no-sandbox  -- the real CLI on the host, under inspect_ai (any platform)
 #
 # All three drive the agent a skill is actually written for. A fourth,
 # `inspect`, drove a harness-independent agent instead, and was removed: it
 # carried a smaller tool set than the real harness, so a skill referring to a
 # tool it did not have failed the case for a reason that was the agent's rather
 # than the skill's -- and nothing in the report distinguished the two.
-ENGINES = ["legacy", "claude-code", "claude-cli"]
+ENGINES = ["legacy", "claude-code", "claude-code-no-sandbox"]
 
 # Every engine but the first runs under inspect_ai, and they share what follows
 # from that: a preflight of their own, and a report that names the engine.
 INSPECT_ENGINES = tuple(e for e in ENGINES if e != "legacy")
 
-# The engines routing has a leg for. `claude-cli` and `claude-code` name the
-# real CLI as the agent, and routing has no path that drives it -- both fell
-# through to the legacy engine, ran on the host, and reported a container.
+# The engines routing has a leg for. The other two reach the real CLI through
+# inspect_ai, and routing has no path that does -- both fell through to the
+# legacy engine, ran on the host, and reported a container they never started.
 ROUTING_ENGINES = ("legacy",)
 
 # Where JSON reports land inside the repo under test. One gitignored directory
@@ -377,7 +377,7 @@ def _prepare_graded_run(
             ok, detail = engine_models.check_reachable(engine_models.resolve(args.model))
             if not ok:
                 raise SystemExit(f"error: model not reachable -- {detail}")
-            if args.engine == "claude-cli":
+            if args.engine == "claude-code-no-sandbox":
                 # This engine reaches the provider for the judge but drives the
                 # real CLI as the agent, so both credentials are load-bearing
                 # and probing one proves nothing about the other.
@@ -395,7 +395,7 @@ def _prepare_graded_run(
 def _require_routing_engine(engine: str) -> None:
     """Stop a routing run asked for an engine that has no routing leg.
 
-    ``cmd_routing`` implements one: the legacy CLI path. ``claude-cli`` and
+    ``cmd_routing`` implements one: the legacy CLI path. ``claude-code-no-sandbox`` and
     ``claude-code`` fell through to it, so a run asked for either did exactly
     what ``--engine legacy`` does -- drove the CLI on the host -- while the
     report said ``sandbox_isolated: true``, because the meta was derived from
@@ -574,7 +574,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         return 0
 
     # INSPECT_ENGINES rather than a literal tuple: a literal was already wrong
-    # once. `claude-cli` was added to the branch below but not to this guard,
+    # once. `claude-code-no-sandbox` was added to the branch below but not to this guard,
     # so it fell through to the legacy engine and every run that asked for it
     # silently got something else -- while the preflight above, which does key
     # off INSPECT_ENGINES, still demanded the inspect extra it never used.
@@ -589,7 +589,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
             outcomes = runner.run(
                 skills, gradable, engine_models.resolve(args.model), args.effort
             )
-        elif args.engine == "claude-cli":
+        elif args.engine == "claude-code-no-sandbox":
             # The real CLI, driven on the host, inside inspect's framework.
             # `--model` stays the CLI's own alias here: this one does not go
             # through an inspect model provider.
@@ -749,7 +749,7 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Which eval engine runs the cases. All three drive the real claude "
             "CLI. `legacy` drives it directly; `claude-code` runs it inside a "
-            "sandbox via inspect_swe (Linux only); `claude-cli` runs it on the "
+            "sandbox via inspect_swe (Linux only); `claude-code-no-sandbox` runs it on the "
             "host under inspect_ai (any platform). The last two need "
             "`pip install 'skillscope[inspect]'` and are behavioral-only -- "
             "routing takes " + " or ".join(ROUTING_ENGINES) +

@@ -2607,9 +2607,9 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
 class TestBehavioralEngineDispatch(unittest.TestCase):
     """Only `legacy` may bypass the inspect path.
 
-    `claude-cli` was added to the dispatch chain but not to the guard around
+    `claude-code-no-sandbox` was added to the dispatch chain but not to the guard around
     it, so it fell through to the legacy engine: runs that asked for one agent
-    silently got another, while the reports said `engine: claude-cli`
+    silently got another, while the reports said `engine: claude-code-no-sandbox`
     throughout. Nothing in the suite noticed, because nothing asserted which
     runner a flag actually reaches.
     """
@@ -2625,7 +2625,7 @@ class TestBehavioralEngineDispatch(unittest.TestCase):
 
     def test_the_preflight_uses_the_same_set(self) -> None:
         # These disagreed: the preflight demanded the inspect extra for
-        # claude-cli while the dispatch sent it to an engine that never uses
+        # claude-code-no-sandbox while the dispatch sent it to an engine that never uses
         # it, which is how a Windows job failed on a flag it had not passed.
         self.assertIn("INSPECT_ENGINES", inspect.getsource(cli._prepare_graded_run))
 
@@ -2635,8 +2635,8 @@ class TestEngineInstallHint(unittest.TestCase):
 
     def test_it_names_the_requested_engine(self) -> None:
         # Naming `inspect` regardless sent a Windows CI job looking for a flag
-        # it had never passed -- it had asked for claude-cli.
-        self.assertIn("--engine claude-cli", engine_module.install_hint("claude-cli"))
+        # it had never passed -- it had asked for claude-code-no-sandbox.
+        self.assertIn("--engine claude-code-no-sandbox", engine_module.install_hint("claude-code-no-sandbox"))
 
     def test_it_still_points_at_the_one_extra_that_fixes_all_of_them(self) -> None:
         self.assertIn("skillscope[inspect]", engine_module.install_hint("claude-code"))
@@ -3104,7 +3104,7 @@ class TestRoutingEngineLeg(unittest.TestCase):
     """Routing runs the engines it has a leg for, and refuses the rest.
 
     `cmd_routing` branches on `inspect` and sends everything else to the legacy
-    path, so `--engine claude-cli` and `--engine claude-code` ran the CLI on the
+    path, so `--engine claude-code-no-sandbox` and `--engine claude-code` ran the CLI on the
     host -- the same eleven subprocess calls `--engine legacy` makes -- while
     the report said `sandbox: docker, sandbox_isolated: true`, because the meta
     was derived from the engine's *name* and nothing had examined what ran.
@@ -3125,7 +3125,7 @@ class TestRoutingEngineLeg(unittest.TestCase):
         return str(caught.exception)
 
     def test_the_engines_that_drive_the_real_cli_are_refused(self) -> None:
-        for engine in ("claude-cli", "claude-code"):
+        for engine in ("claude-code-no-sandbox", "claude-code"):
             with self.subTest(engine=engine):
                 self.assertIn(engine, self.refusal(engine))
 
@@ -3141,7 +3141,7 @@ class TestRoutingEngineLeg(unittest.TestCase):
     def test_an_engine_that_no_longer_exists_is_refused_by_the_parser(self) -> None:
         # The harness-independent engine was removed. Argparse rejecting the
         # name is what keeps a stale command line from silently selecting
-        # something else, the way --engine claude-cli once selected legacy.
+        # something else, the way --engine claude-code-no-sandbox once selected legacy.
         self.assertNotIn("inspect", cli.ENGINES)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
@@ -3151,8 +3151,8 @@ class TestRoutingEngineLeg(unittest.TestCase):
         # on the routing command line mentions the engine it is being refused
         # for.
         self.addCleanup(os.environ.pop, "SKILLSCOPE_ENGINE", None)
-        os.environ["SKILLSCOPE_ENGINE"] = "claude-cli"
-        self.assertIn("SKILLSCOPE_ENGINE", self.refusal("claude-cli"))
+        os.environ["SKILLSCOPE_ENGINE"] = "claude-code-no-sandbox"
+        self.assertIn("SKILLSCOPE_ENGINE", self.refusal("claude-code-no-sandbox"))
 
     def test_an_engine_with_a_leg_passes(self) -> None:
         for engine in cli.ROUTING_ENGINES:
@@ -3218,7 +3218,7 @@ class TestRoutingReportsWhereItRan(unittest.TestCase):
 
 
 class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):
-    """`claude-cli` uses two, so probing one proves nothing about the other.
+    """`claude-code-no-sandbox` uses two, so probing one proves nothing about the other.
 
     The real CLI is the agent and the inspect provider grades it, so a run dies
     on whichever is missing. The preflight tested the provider alone -- and for
@@ -3256,7 +3256,7 @@ class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):
         return self.probed
 
     def test_claude_cli_probes_the_cli_as_well_as_the_provider(self) -> None:
-        self.assertEqual(sorted(self.run_preflight("claude-cli")), ["cli", "provider"])
+        self.assertEqual(sorted(self.run_preflight("claude-code-no-sandbox")), ["cli", "provider"])
 
     def test_a_sandboxed_engine_probes_only_the_provider(self) -> None:
         # `claude-code` reaches the CLI inside the container through inspect's
@@ -3265,7 +3265,7 @@ class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):
 
     def test_an_unreachable_cli_stops_the_run(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            self.run_preflight("claude-cli", cli_ok=False)
+            self.run_preflight("claude-code-no-sandbox", cli_ok=False)
         self.assertIn("claude API not reachable", str(caught.exception))
 
 

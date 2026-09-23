@@ -43,7 +43,7 @@ def require_local() -> None:
     provider = sandbox_spec.provider()
     if provider not in sandbox_spec.NOT_ISOLATED:
         raise SystemExit(
-            f"error: --engine claude-cli runs the CLI on the host, so it needs "
+            f"error: --engine claude-code-no-sandbox runs the CLI on the host, so it needs "
             f"SKILLSCOPE_SANDBOX=local, not {provider!r}. For a sandboxed run of "
             "the real harness on Linux, use --engine claude-code."
         )

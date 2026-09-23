@@ -6,7 +6,7 @@
 
 Shared by every engine that runs on the framework: the task, the scorer, the
 sandbox and the reporting live here, and the caller supplies the solver that
-drives the agent. `claude-cli` passes one; `claude-code` builds its own task in
+drives the agent. `claude-code-no-sandbox` passes one; `claude-code` builds its own task in
 `verify.py` because `inspect_swe` supplies the whole agent rather than a solver.
 
 `run()` matches `behavior.run()` -- same arguments, same `BehaviorOutcome`

@@ -6,7 +6,7 @@
 
 The legacy engine drives the `claude` CLI directly; these hand the work to
 `inspect_ai` -- ``claude-code`` runs the CLI inside the sandbox through
-`inspect_swe`, ``claude-cli`` runs it on the host. All of them produce the same
+`inspect_swe`, ``claude-code-no-sandbox`` runs it on the host. All of them produce the same
 outcome objects, so everything downstream -- `summarize`, `render_markdown`,
 the report writers -- is shared.
 
