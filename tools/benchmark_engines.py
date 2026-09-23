@@ -230,9 +230,10 @@ def refuse_unrunnable_pair(parser, args) -> None:
     then surfaces as `produced no report`, which blames a missing file rather
     than naming the engine that was never going to run.
 
-    Routing is the live case: it has one engine, so every pair is either the
-    same engine twice -- which measures nothing an engine comparison is for --
-    or a candidate that does not run there at all.
+    Every engine has a routing leg now, so in practice this catches the same
+    engine named twice, which measures run-to-run variance rather than a
+    difference between engines. `--noise` already reports that, and reports it
+    as what it is.
     """
     if args.leg != "routing":
         return
@@ -242,15 +243,14 @@ def refuse_unrunnable_pair(parser, args) -> None:
     if unrunnable:
         parser.error(
             f"routing has no leg for {', '.join(unrunnable)}. It runs on "
-            f"{', '.join(sorted(runnable))}, so there is no pair to compare "
-            "until another engine gains a routing leg."
+            f"{', '.join(sorted(runnable))}."
         )
     if args.baseline == args.candidate:
         parser.error(
             f"--baseline and --candidate are both {args.baseline!r}, which "
             "measures run-to-run variance rather than a difference between "
-            "engines. That is what --noise already reports, on the behavioral "
-            "leg where there is a second engine to compare against."
+            "engines. That is what --noise already reports, and it labels the "
+            "result as the noise floor rather than as a flip list."
         )
 
 

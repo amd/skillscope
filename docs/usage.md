@@ -231,10 +231,23 @@ about the skill -- which is a thing one engine on its own cannot tell you.
 nondeterministic and the harness is not what is being graded, so a divergence
 there is a question about the skill rather than a build failure.
 
-**Routing runs on `legacy` only.** The other two reach the CLI through
-`inspect_ai`, and the routing leg has no path that does; asking for either is
-refused rather than quietly run as `legacy`. So routing is always unsandboxed
-today, and its reports say so.
+**Routing runs on all three**, and the choice matters more there than it does
+for behavioral. A stray user-level skill on the runner does not spoil one
+case's grade -- it is offered for every prompt, so it changes every decision at
+once while the run still reports a clean accuracy. `claude-code` is the only
+leg immune by construction: its guest has no `~/.claude` to contribute.
+
+The host legs handle it differently. `legacy` redirects the CLI's config dir
+when it can, warns when it cannot, and names any gate-crashing skill in the
+report, because it reads the CLI's session-init event.
+`claude-code-no-sandbox` cannot read that event, so it has no way to notice the
+same contamination or report it -- and therefore refuses to run a routing leg
+at all unless `ANTHROPIC_API_KEY` is set, which is what lets it redirect the
+config dir. Refusing beats being quietly wrong about every case.
+
+One cost to know about: neither inspect-backed leg stops at the moment a skill
+activates, the way `legacy` does, so a routing case runs to its message cap
+instead. That makes them dearer per case. `--case-timeout` still bounds them.
 
 ### Where a sandboxed run is sandboxed
 
