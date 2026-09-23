@@ -40,6 +40,11 @@ class BehaviorOutcome:
     elapsed_s: float
     checks: list[dict] = field(default_factory=list)
     error: str | None = None
+    # Set when the failure was the model provider's rather than the skill's.
+    # A behavioral case that failed on a gateway 504 is a skill nobody
+    # measured, and reporting it beside one that genuinely failed its
+    # expectations invites exactly the wrong conclusion.
+    degraded: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -204,6 +209,9 @@ def summarize(outcomes: list[BehaviorOutcome], meta: dict) -> dict:
             "checks": sum(len(o.checks) for o in outcomes),
             "checks_passed": sum(1 for o in outcomes for c in o.checks if c["passed"]),
             "errors": sum(1 for o in outcomes if o.error),
+            # Of those errors, the ones the provider caused. A behavioral run
+            # with these in it has not measured the skills it names.
+            "degraded": sum(1 for o in outcomes if o.degraded),
         },
         "per_skill": per_skill,
         "cases": [asdict(o) for o in outcomes],

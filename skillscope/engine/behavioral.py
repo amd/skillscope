@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import agent, config, deadline, usage
+from .. import agent, config, deadline, routing as routing_core, usage
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
 from . import convert, models, sandbox as sandbox_spec, scorers, stats
@@ -124,6 +124,7 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
             passed=False,
             elapsed_s=0.0,
             error=detail,
+            degraded=routing_core.is_provider_error(detail),
         )
         for case in cases
     ]
@@ -165,6 +166,7 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
                 elapsed_s=round(getattr(sample, "total_time", None) or 0.0, 2),
                 checks=checks,
                 error=error,
+                degraded=routing_core.is_provider_error(error),
             )
         )
     return outcomes

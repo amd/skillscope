@@ -329,6 +329,10 @@ def _error_outcome(case: Case, detail: str, stop_reason: str = "error") -> routi
         elapsed_s=0.0,
         tool_calls=0,
         error=detail,
+        # Same classifier as the legacy leg, so "the gateway failed" reads the
+        # same in both reports. Two engines that describe an outage
+        # differently cannot be compared during one.
+        degraded=routing_core.is_provider_error(detail),
     )
 
 

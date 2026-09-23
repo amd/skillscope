@@ -65,6 +65,68 @@ SKILL_TOOLS = {"skill", "slashcommand"}
 # Where the staged skills live, as they appear in a tool argument.
 STAGED_SKILLS_DIR = ".claude/skills"
 
+# Signatures of a failure that belongs to the model provider rather than to the
+# skill. Matched case-insensitively against whatever the run reported.
+#
+# Worth naming rather than leaving as prose: a gateway that answers 504 lands
+# in a report as a lower score with nothing saying why, and a reader cannot
+# tell it from the skill failing. At the rate these have been observed -- a
+# third of runs on one catalogue -- an unmarked provider error is the single
+# biggest reason two runs of the same engine disagree, which makes it the
+# first thing to rule out before a difference between engines means anything.
+PROVIDER_ERROR_SIGNS = (
+    "api error",
+    "overloaded",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "gateway",
+    "upstream",
+    "server-side",
+    "connection error",
+    "apiconnectionerror",
+    "timed out",
+    "timeout",
+)
+
+
+def _result_error(event: dict) -> str:
+    """Why a `result` event says the run failed, keeping the reason it gave.
+
+    The CLI puts the reason in `result` sometimes and in `subtype` other times
+    -- `error_during_execution`, `error_max_turns` -- and collapsing both into
+    "result event reported an error" discards the one thing that makes the
+    failure readable. It did exactly that to a gateway 504 on this catalogue:
+    the report showed a case that failed for no stated reason, and nothing
+    downstream could tell it from a skill that simply did not fire.
+
+    Both are kept when both exist, because the subtype says what class of
+    failure it was and the body says what happened.
+    """
+    detail = str(event.get("result") or "").strip()
+    subtype = str(event.get("subtype") or "").strip()
+    if detail and subtype:
+        return f"{detail} (subtype: {subtype})"[:400]
+    return (detail or subtype or "result event reported an error")[:400]
+
+
+def is_provider_error(message: str | None) -> bool:
+    """Whether this failure came from the provider rather than from the skill.
+
+    Deliberately generous. A false positive marks a real skill failure as
+    degraded, which makes a reader look twice at a run that was fine. A false
+    negative lets a gateway outage score as a routing miss, which makes a
+    reader trust a number that measured nothing. The costs are not symmetric.
+    """
+    if not message:
+        return False
+    lowered = str(message).lower()
+    return any(sign in lowered for sign in PROVIDER_ERROR_SIGNS)
+
+
 VERDICTS = ("correct_trigger", "true_negative", "missed_trigger", "wrong_skill", "false_trigger", "error")
 PASSING_VERDICTS = {"correct_trigger", "true_negative"}
 
@@ -104,6 +166,10 @@ class Outcome:
     visible_skills: list[str] = field(default_factory=list)
     extra_skills: list[str] = field(default_factory=list)
     error: str | None = None
+    # Set when the failure was the provider's. Kept beside `error` rather than
+    # folded into `verdict` so the verdict vocabulary stays about routing, and
+    # so a reader can subtract these without re-parsing error strings.
+    degraded: bool = False
 
 
 def stage_workspace(skills: dict[str, Path]) -> Path:
@@ -546,7 +612,7 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
                 stop_reason = "result"
                 usage.record_stream_event(event)
                 if event.get("is_error"):
-                    error = str(event.get("result") or "result event reported an error")[:400]
+                    error = _result_error(event)
                 break
 
             for name, tool_input in _iter_tool_uses(event):
@@ -612,6 +678,7 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
         visible_skills=visible,
         extra_skills=extra,
         error=error,
+        degraded=is_provider_error(error),
     )
     print(
         f"  [{'PASS' if outcome.passed else 'FAIL'}] {case.id}: "
@@ -688,6 +755,12 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
             # way the numbers are an artifact, not a result.
             "activations": sum(1 for o in graded if o.observed),
             "activations_expected": sum(1 for o in graded if o.expect),
+            # Cases the provider failed rather than the skill. Reported beside
+            # the score because it is the number that decides whether the
+            # score can be read at all: a run with a third of its cases
+            # degraded has measured the gateway, and comparing it against
+            # another run attributes an outage to whatever changed in between.
+            "degraded": sum(1 for o in outcomes if o.degraded),
         },
         "verdicts": {name: verdicts.get(name, 0) for name in VERDICTS},
         "by_category": by_category,
@@ -718,6 +791,23 @@ def render_markdown(summary: dict) -> str:
         "is only as meaningful as the room is realistic.",
         "",
     ]
+
+    # Before the table, not after it. A reader who has already taken in the
+    # score has formed a view, and a note underneath it does not undo that --
+    # whereas a run with a tenth of its cases degraded is one whose score
+    # should be read differently from the first glance.
+    degraded = totals.get("degraded", 0)
+    if degraded:
+        share = degraded / totals["cases"] if totals["cases"] else 0
+        lines += [
+            f"> **{degraded} of {totals['cases']} cases failed at the model "
+            f"provider, not in the skill** ({share:.0%}). A gateway error "
+            "lands as a lower score with nothing in the verdict saying why, "
+            "so treat this run as degraded rather than as a measurement: the "
+            "difference between it and another run may be the provider's "
+            "rather than the skill's or the engine's.",
+            "",
+        ]
     lines += [
         "| Verdict | Count | Meaning |",
         "| --- | --- | --- |",

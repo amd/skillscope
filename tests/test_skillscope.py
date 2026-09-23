@@ -2489,7 +2489,14 @@ class TestBehaviorReporting(unittest.TestCase):
         summary = behavior.summarize(outcomes, {"model": "opus", "effort": "high"})
         self.assertEqual(
             summary["totals"],
-            {"cases": 2, "passed": 1, "checks": 2, "checks_passed": 1, "errors": 0},
+            {
+                "cases": 2,
+                "passed": 1,
+                "checks": 2,
+                "checks_passed": 1,
+                "errors": 0,
+                "degraded": 0,
+            },
         )
         report = behavior.render_markdown(summary)
         self.assertIn("1/2 cases passed", report)
@@ -3243,6 +3250,117 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
         self.assertNotIn("inspect", cli.ENGINES)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
+
+
+class TestProviderFailuresAreMarked(unittest.TestCase):
+    """A gateway error is not a routing result, and must not read as one.
+
+    A 504 lands in a report as a lower score with nothing in the verdict
+    saying why, so a reader cannot tell it from the skill failing. At the rate
+    observed on one catalogue -- roughly a third of runs -- that makes an
+    unmarked provider error the most likely reason two runs of the same engine
+    disagree, which has to be ruled out before a difference between engines
+    means anything.
+
+    Matching is deliberately generous: a false positive makes a reader look
+    twice at a run that was fine, a false negative lets an outage score as a
+    routing miss. The costs are not symmetric.
+    """
+
+    def test_the_shapes_actually_observed_are_recognised(self) -> None:
+        for message in (
+            "API Error: 504 Exception trying to (AnthropicVertex) Chat Completions",
+            "API preflight timed out after 60s (is the network reachable?)",
+            "APIConnectionError: Connection error.",
+            "429 rate limit exceeded",
+            "502 Bad Gateway",
+            "upstream connect error",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(routing.is_provider_error(message))
+
+    def test_a_real_skill_failure_is_not_marked(self) -> None:
+        for message in (
+            "the skill produced no plan.md",
+            "run ended without a routing decision (stopped after: tool_budget)",
+            None,
+            "",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(routing.is_provider_error(message))
+
+    def test_the_reason_a_result_event_gave_is_kept(self) -> None:
+        # It was being discarded. A 504 arrived as "result event reported an
+        # error", which no classifier and no reader can do anything with.
+        self.assertIn(
+            "504",
+            routing._result_error({"is_error": True, "result": "API Error: 504 upstream"}),
+        )
+
+    def test_the_subtype_is_kept_when_there_is_no_body(self) -> None:
+        # The CLI puts the reason in one field or the other depending on how
+        # it failed, and only one of them is ever populated.
+        self.assertIn(
+            "error_max_turns",
+            routing._result_error({"is_error": True, "subtype": "error_max_turns"}),
+        )
+
+    def test_an_agent_failure_is_not_blamed_on_the_provider(self) -> None:
+        # `error_max_turns` is the agent running out of road, not the gateway.
+        # Marking it degraded would excuse a real failure.
+        self.assertFalse(routing.is_provider_error(
+            routing._result_error({"is_error": True, "subtype": "error_max_turns"})
+        ))
+
+    def test_an_error_with_no_reason_is_not_guessed_at(self) -> None:
+        # Neither marked nor excused: we do not know, and saying so is the
+        # only honest option.
+        self.assertFalse(routing.is_provider_error(
+            routing._result_error({"is_error": True})
+        ))
+
+    def test_routing_totals_report_how_many_were_degraded(self) -> None:
+        # Beside the score, because it decides whether the score can be read.
+        outcomes = [
+            routing.Outcome(
+                id=str(i), category="c", skill="s", prompt="p", expect=None,
+                observed=None, verdict="error", passed=False, stop_reason="result",
+                elapsed_s=0.0, tool_calls=0, error=err,
+                degraded=routing.is_provider_error(err),
+            )
+            for i, err in enumerate(["API Error: 504 upstream", "the skill did nothing"])
+        ]
+        totals = routing.summarize(outcomes, ["s"], {"skills": ["s"]})["totals"]
+        self.assertEqual(totals["errors"], 2)
+        self.assertEqual(totals["degraded"], 1)
+
+    def test_behavioral_totals_report_it_too(self) -> None:
+        # Same vocabulary on both commands, or a degraded behavioral run reads
+        # as a failing skill.
+        outcomes = [
+            behavior.BehaviorOutcome(
+                id="a", skill="s", prompt="p", passed=False, elapsed_s=0.0,
+                error="API Error: 504", degraded=True,
+            )
+        ]
+        totals = behavior.summarize(outcomes, {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["degraded"], 1)
+
+    def test_the_report_warns_before_the_reader_sees_the_score(self) -> None:
+        # Underneath the table is too late: a reader has already formed a view.
+        outcomes = [
+            routing.Outcome(
+                id="a", category="c", skill="s", prompt="p", expect=None,
+                observed=None, verdict="error", passed=False, stop_reason="result",
+                elapsed_s=0.0, tool_calls=0, error="API Error: 504", degraded=True,
+            )
+        ]
+        summary = routing.summarize(
+            outcomes, ["s"], {"skills": ["s"], "model": "m", "effort": "e"}
+        )
+        report = routing.render_markdown(summary)
+        self.assertIn("failed at the model provider", report)
+        self.assertLess(report.index("model provider"), report.index("| Verdict |"))
 
 
 class TestRoutingStopsAtTheDecision(unittest.TestCase):
