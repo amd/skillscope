@@ -58,6 +58,8 @@ from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import sandbox as engine_sandbox
 from skillscope.engine import verify as engine_verify
+from skillscope.engine import routing as engine_routing
+from skillscope.engine import no_sandbox as engine_no_sandbox
 from skillscope.engine import tools as engine_tools
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -3141,90 +3143,128 @@ class TestEngineSandboxSelection(unittest.TestCase):
         self.assertIn("nope.yaml", str(caught.exception))
 
 
-class TestRoutingEngineLeg(unittest.TestCase):
-    """Routing runs the engines it has a leg for, and refuses the rest.
+class TestRoutingRunsOnEveryEngine(unittest.TestCase):
+    """Routing has a leg for all three engines, and reaches the one asked for.
 
-    `cmd_routing` branches on `inspect` and sends everything else to the legacy
-    path, so `--engine claude-code-no-sandbox` and `--engine claude-code` ran the CLI on the
-    host -- the same eleven subprocess calls `--engine legacy` makes -- while
-    the report said `sandbox: docker, sandbox_isolated: true`, because the meta
-    was derived from the engine's *name* and nothing had examined what ran.
-
-    Refused rather than relabelled: a routing score indistinguishable from
-    `legacy`'s is not a second data point, and there is no sandboxed routing leg
-    for `claude-code` to report at all.
+    It used to have one. `claude-code` and `claude-code-no-sandbox` were
+    refused, because they named the real CLI as the agent and routing had no
+    path that drove it. Now they do, and the assertion that matters is no
+    longer the refusal -- it is that asking for a leg reaches that leg. The
+    defect this replaces was exactly the opposite: a run asked for one engine
+    silently got another, and the report named the one it had asked for.
     """
 
     def setUp(self) -> None:
         self.repo = Repo(self)
         self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
-        self.repo.activate()
+        self.repo.activate(routing_room="alpha")
+        self.reached: list[str] = []
 
-    def refusal(self, engine: str) -> str:
-        with self.assertRaises(SystemExit) as caught:
-            cli._require_routing_engine(engine)
-        return str(caught.exception)
+        def record_inspect(cases, routing_set, model, effort, engine):
+            self.reached.append(f"inspect:{engine}")
+            return []
 
-    def test_the_engines_that_drive_the_real_cli_are_refused(self) -> None:
-        for engine in ("claude-code-no-sandbox", "claude-code"):
-            with self.subTest(engine=engine):
-                self.assertIn(engine, self.refusal(engine))
+        def record_legacy(case, routing_set, cfg):
+            self.reached.append("legacy")
+            raise AssertionError("the legacy leg ran for an inspect engine")
 
-    def test_the_refusal_names_what_to_use_instead(self) -> None:
-        # A run that stops without saying what would have worked just moves the
-        # guessing somewhere else. Asserted against the whole `Use:` clause
-        # rather than the engine names alone: "legacy" already appears in the
-        # fixed prose explaining what the refused engine would have done, so
-        # looking for the bare word passed even with the clause deleted.
-        message = self.refusal("claude-code")
-        self.assertIn("Use: " + ", ".join(cli.ROUTING_ENGINES), message)
+        for target, attr, fn in (
+            ("skillscope.engine.routing", "run", record_inspect),
+            (None, "run_case", record_legacy),
+        ):
+            patch = (
+                mock.patch(f"{target}.{attr}", fn)
+                if target
+                else mock.patch.object(routing, attr, fn)
+            )
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        for name in ("_write_report", "_prepare_graded_run"):
+            patch = mock.patch.object(cli, name, lambda *a, **k: None)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_routing(self, engine: str) -> None:
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", engine, "--skip-preflight", "--model", "mockllm/model"]
+        )
+        cli.cmd_routing(args)
+
+    def test_every_engine_now_has_a_routing_leg(self) -> None:
+        self.assertEqual(set(cli.ROUTING_ENGINES), set(cli.ENGINES))
+
+    def test_asking_for_the_sandboxed_leg_reaches_it(self) -> None:
+        self.run_routing("claude-code")
+        self.assertEqual(self.reached, ["inspect:claude-code"])
+
+    def test_asking_for_the_host_leg_reaches_it(self) -> None:
+        # The assertion that would have caught the original fallthrough: the
+        # legacy runner is patched to fail loudly if it is reached.
+        self.run_routing("claude-code-no-sandbox")
+        self.assertEqual(self.reached, ["inspect:claude-code-no-sandbox"])
+
+    def test_the_guard_reads_the_engine_set_rather_than_a_literal(self) -> None:
+        # A literal tuple is the defect itself, so the source is what to assert.
+        self.assertIn(
+            "if args.engine in INSPECT_ENGINES:", inspect.getsource(cli.cmd_routing)
+        )
 
     def test_an_engine_that_no_longer_exists_is_refused_by_the_parser(self) -> None:
-        # The harness-independent engine was removed. Argparse rejecting the
-        # name is what keeps a stale command line from silently selecting
-        # something else, the way --engine claude-code-no-sandbox once selected legacy.
         self.assertNotIn("inspect", cli.ENGINES)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
 
-    def test_the_environment_variable_is_named_when_it_is_the_cause(self) -> None:
-        # SKILLSCOPE_ENGINE set for a whole job is the confusing case: nothing
-        # on the routing command line mentions the engine it is being refused
-        # for.
-        self.addCleanup(os.environ.pop, "SKILLSCOPE_ENGINE", None)
-        os.environ["SKILLSCOPE_ENGINE"] = "claude-code-no-sandbox"
-        self.assertIn("SKILLSCOPE_ENGINE", self.refusal("claude-code-no-sandbox"))
 
-    def test_an_engine_with_a_leg_passes(self) -> None:
-        for engine in cli.ROUTING_ENGINES:
-            with self.subTest(engine=engine):
-                self.assertIsNone(cli._require_routing_engine(engine))
+class TestRoutingRoomIsTheRoomThatWasAskedFor(unittest.TestCase):
+    """The host routing leg isolates the config dir, or it does not run.
 
-    def test_every_routing_engine_is_a_real_engine(self) -> None:
-        self.assertEqual(set(cli.ROUTING_ENGINES) - set(cli.ENGINES), set())
+    The legacy engine warns and carries on, because it reads the CLI's `init`
+    event and can name a user-level skill that gate-crashed the room. Neither
+    inspect leg gets that event, so the same contamination would be invisible
+    -- and a stray skill is offered for every prompt, so it changes every
+    decision at once while the run still reports a clean accuracy.
 
-    def test_the_refusal_happens_before_anything_is_spent(self) -> None:
-        # Ahead of the structural gate and the preflight, both of which cost
-        # time and one of which keys off the engine.
-        source = inspect.getsource(cli.cmd_routing)
-        guard = source.index("_require_routing_engine")
-        self.assertLess(guard, source.index("_prepare_graded_run"))
+    Observed rather than feared: a probe of this leg on a developer machine put
+    roughly forty user-level skills in the room and none of the three staged.
+    """
 
-    def test_the_report_does_not_ask_the_provider_what_contained_a_run(self) -> None:
-        # The defect in one line: `_sandbox_meta` returns `provider()`, which
-        # examines nothing and returns the default string, so a routing run
-        # that started no container still reported one. Neither routing leg has
-        # a sandbox, so neither should be asking.
-        self.assertNotIn("_sandbox_meta", inspect.getsource(cli._finish_routing))
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, "ANTHROPIC_API_KEY", None)
+
+    def test_the_host_leg_refuses_without_the_credential_that_isolates_it(self) -> None:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        with self.assertRaises(SystemExit) as caught:
+            engine_routing.require_isolated_room("claude-code-no-sandbox")
+        message = str(caught.exception)
+        self.assertIn("ANTHROPIC_API_KEY", message)
+        self.assertIn("--engine claude-code", message)
+
+    def test_the_host_leg_runs_when_it_can_isolate(self) -> None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        self.assertIsNone(engine_routing.require_isolated_room("claude-code-no-sandbox"))
+
+    def test_the_sandboxed_leg_needs_no_credential_to_have_a_clean_room(self) -> None:
+        # The guest has no `~/.claude` to keep out, which is the whole reason
+        # this leg is the one to prefer for routing.
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        self.assertIsNone(engine_routing.require_isolated_room("claude-code"))
+
+    def test_the_host_solver_can_be_pointed_at_a_config_dir(self) -> None:
+        # Without this parameter the leg reads the runner's own config dir and
+        # nothing downstream can tell.
+        self.assertIn(
+            "config_dir", inspect.signature(engine_no_sandbox.claude_code_no_sandbox).parameters
+        )
 
 
 class TestRoutingReportsWhereItRan(unittest.TestCase):
-    """Routing runs on the host, and the meta says so rather than implying it.
+    """Each leg states what contained it; none may overstate it.
 
-    The value is stated outright now. Deriving it from the engine's name is
-    what let a run that started no container report `sandbox: docker,
-    sandbox_isolated: true`, and the derivation was wrong in a direction no
-    reader could catch: it overstated the isolation.
+    Deriving this from the engine's name is what let a run that started no
+    container report `sandbox: docker, sandbox_isolated: true`. Hardcoding
+    `host` was right only while no routing leg had a sandbox. Now one does, so
+    the value is passed in by the leg that knows.
     """
 
     def setUp(self) -> None:
@@ -3238,24 +3278,42 @@ class TestRoutingReportsWhereItRan(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def meta(self, engine: str) -> dict:
+    def meta(self, engine: str, **containment) -> dict:
         args = cli.build_parser().parse_args(
             ["routing", "--engine", engine, "--skip-preflight"]
         )
-        cli._finish_routing(args, [], {"alpha": None}, time.time(), isolated=True)
+        cli._finish_routing(
+            args, [], {"alpha": None}, time.time(), isolated=True, **containment
+        )
         return self.written["meta"]
 
-    def test_the_legacy_leg_says_host(self) -> None:
-        meta = self.meta("legacy")
+    def test_a_host_leg_says_host(self) -> None:
+        meta = self.meta("legacy", sandbox="host", sandbox_isolated=False)
         self.assertEqual(meta["sandbox"], "host")
         self.assertIs(meta["sandbox_isolated"], False)
 
-    def test_no_routing_leg_ever_claims_isolation(self) -> None:
-        # The assertion the reports failed: whatever engine ran, routing had
-        # nothing contained, so nothing may say it did.
-        for engine in cli.ROUTING_ENGINES:
-            with self.subTest(engine=engine):
-                self.assertIsNot(self.meta(engine)["sandbox_isolated"], True)
+    def test_the_sandboxed_leg_names_the_provider_it_used(self) -> None:
+        meta = self.meta("claude-code", sandbox="docker", sandbox_isolated=True)
+        self.assertEqual(meta["sandbox"], "docker")
+        self.assertIs(meta["sandbox_isolated"], True)
+
+    def test_a_leg_that_does_not_say_what_contained_it_cannot_report(self) -> None:
+        # Required keywords, so a leg added later fails at the call site
+        # instead of quietly reporting a containment it never had.
+        args = cli.build_parser().parse_args(["routing", "--skip-preflight"])
+        with self.assertRaises(TypeError):
+            cli._finish_routing(args, [], {"alpha": None}, time.time(), isolated=True)
+
+    def test_a_legs_own_meta_cannot_overwrite_what_contained_it(self) -> None:
+        meta = self.meta(
+            "legacy", sandbox="host", sandbox_isolated=False,
+        )
+        self.assertEqual(meta["sandbox"], "host")
+
+    def test_the_report_does_not_ask_the_provider_what_contained_a_run(self) -> None:
+        # The defect in one line: `_sandbox_meta` returns `provider()`, which
+        # examines nothing and returns the default string.
+        self.assertNotIn("_sandbox_meta", inspect.getsource(cli._finish_routing))
 
 
 class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):

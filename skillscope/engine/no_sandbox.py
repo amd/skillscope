@@ -120,8 +120,21 @@ def install_skill(skill_dir: Path, workspace: str) -> None:
     shutil.copytree(skill_dir, dest, dirs_exist_ok=True)
 
 
-def claude_code_no_sandbox(model: str | None, effort: str | None, skill_dir: Path):
-    """Solver: install the skill, run the real CLI once, record what it did."""
+def claude_code_no_sandbox(
+    model: str | None,
+    effort: str | None,
+    skill_dir: Path,
+    config_dir: Path | None = None,
+):
+    """Solver: install the skill, run the real CLI once, record what it did.
+
+    `config_dir` redirects the CLI away from the runner's own `~/.claude`, the
+    way the legacy engine does. Optional because a behavioral case installs one
+    skill and grades what the agent produced, so a stray user-level skill is at
+    worst noise. A routing case grades *which* skill fired, and a stray one
+    joins the room for every case -- so that caller passes it and refuses to
+    run without it.
+    """
     from inspect_ai.model import ModelOutput
     from inspect_ai.solver import solver
 
@@ -145,8 +158,12 @@ def claude_code_no_sandbox(model: str | None, effort: str | None, skill_dir: Pat
             if effort:
                 cmd += ["--effort", effort]
 
+            env = legacy_agent.claude_env()
+            if config_dir is not None:
+                env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
             result = await sandbox_subprocess(
-                cmd, input=prompt, cwd=workspace, env=legacy_agent.claude_env(),
+                cmd, input=prompt, cwd=workspace, env=env,
             )
 
             events: list[dict] = []
