@@ -2796,9 +2796,19 @@ class TestClaudeCodeRefusesTheHostsFilesystem(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     engine_verify.require()
 
-    def test_a_container_provider_is_allowed(self) -> None:
+    def test_a_container_provider_is_not_refused_for_being_a_container(self) -> None:
+        # Asserted as "not this refusal" rather than "no refusal at all": the
+        # unit suite runs without the inspect extra on purpose, so `require`
+        # may still stop on the missing wheel. That is a different answer to a
+        # different question, and conflating them made this pass locally and
+        # fail in CI.
         os.environ[engine_sandbox.SANDBOX_ENV] = "docker"
-        self.assertIsNone(engine_verify.require())
+        try:
+            engine_verify.require()
+        except SystemExit as exc:
+            # Whatever it stopped on, it was not the sandbox.
+            self.assertNotIn("settings.json", str(exc))
+            self.assertIn("pip install", str(exc))
 
 
 class TestEngineNoSandboxGuard(unittest.TestCase):
