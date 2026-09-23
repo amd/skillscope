@@ -249,16 +249,53 @@ def _activation_event(call) -> dict:
     return _activation_event_from(call.function, call.arguments or {})
 
 
+def _assistant_messages(sample):
+    """Every assistant turn in this sample, from whichever record has them.
+
+    Two records, and neither is reliable alone. `sample.messages` is the
+    conversation inspect adopted; for a bridged agent that adoption follows
+    heuristics about which thread is the main one, and a run that ends inside a
+    sub-agent can leave it holding the wrong thread or none. The transcript is
+    strictly more complete -- every bridged generation emits a `ModelEvent`,
+    sub-agents included -- but it is a record of events rather than of a
+    conversation.
+
+    Measured, not assumed: the first sandboxed run on a real container graded
+    24 of 67 cases as "the agent never ran" because `sample.messages` was empty
+    for them, while the legacy engine saw those same cases activate a skill.
+    The evidence was in the transcript the whole time.
+
+    Read in order and de-duplicated by identity, because the same assistant
+    turn appears in both records when both have it, and the routing decision is
+    the *first* skill reached for -- counting one turn twice could move it.
+    """
+    seen: set[int] = set()
+
+    for message in getattr(sample, "messages", None) or []:
+        if getattr(message, "role", None) == "assistant" and id(message) not in seen:
+            seen.add(id(message))
+            yield message
+
+    for event in getattr(sample, "events", None) or []:
+        output = getattr(event, "output", None)
+        message = getattr(output, "message", None) if output is not None else None
+        if message is None or getattr(message, "role", None) != "assistant":
+            continue
+        if id(message) in seen:
+            continue
+        seen.add(id(message))
+        yield message
+
+
 def _tool_calls(sample):
     """Every tool call the agent made, in the order it made them.
 
     Order is the whole point: the routing decision is the *first* skill the
-    agent reaches for. Without the early stop this module does not have yet, a
-    run continues past its decision and goes on to do the work, which can
-    activate further skills -- grading the last one would report what the job
-    needed rather than what the prompt routed to.
+    agent reaches for. A run that continues past its decision goes on to do the
+    work, which can activate further skills -- grading the last one would
+    report what the job needed rather than what the prompt routed to.
     """
-    for message in getattr(sample, "messages", None) or []:
+    for message in _assistant_messages(sample):
         for call in getattr(message, "tool_calls", None) or []:
             yield call
 
@@ -304,14 +341,16 @@ def _spoke(sample) -> bool:
     a sandbox that never came up, a CLI that printed nothing parseable. The
     legacy engine draws the same line with its `INCONCLUSIVE_STOPS` set.
 
-    An assistant message is the cheapest honest evidence that the run got far
+    An assistant turn is the cheapest honest evidence that the run got far
     enough to decide something. A sample with none of them said nothing, called
     nothing, and answered nothing.
+
+    Looked for in both records, for the reason `_assistant_messages` gives: a
+    bridged agent's conversation does not always land in `sample.messages`, and
+    reading only that one graded a quarter of a real run as infrastructure
+    failures.
     """
-    return any(
-        getattr(message, "role", None) == "assistant"
-        for message in (getattr(sample, "messages", None) or [])
-    )
+    return any(True for _ in _assistant_messages(sample))
 
 
 def _error_outcome(case: Case, detail: str, stop_reason: str = "error") -> routing_core.Outcome:

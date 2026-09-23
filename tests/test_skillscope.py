@@ -3252,6 +3252,75 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
 
 
+class TestTheTranscriptIsReadTooNotJustTheMessages(unittest.TestCase):
+    """A bridged agent's work does not always land in `sample.messages`.
+
+    inspect adopts one conversation onto the sample, and for a bridged scaffold
+    that adoption follows heuristics about which thread is the main one -- a
+    run ending inside a sub-agent can leave it holding the wrong thread or
+    none. The transcript is strictly more complete: every bridged generation
+    emits a `ModelEvent`, sub-agents included.
+
+    Measured rather than reasoned about. The first sandboxed routing run on a
+    real container graded 24 of 67 cases as "the agent never ran", while the
+    legacy engine saw those same cases activate a skill. Reading only
+    `sample.messages` was the whole of the bug.
+    """
+
+    class Call:
+        def __init__(self, function, arguments):
+            self.function, self.arguments = function, arguments
+
+    class Msg:
+        def __init__(self, role="assistant", tool_calls=None):
+            self.role, self.tool_calls = role, tool_calls
+
+    class Event:
+        def __init__(self, message):
+            self.output = type("O", (), {"message": message})()
+
+    class Sample:
+        def __init__(self, messages=None, events=None):
+            self.messages, self.events = messages, events
+
+    ROOM = ["alpha", "beta"]
+
+    def skill_call(self):
+        return self.Call("Skill", {"command": "alpha"})
+
+    def test_an_activation_only_in_the_messages_is_seen(self) -> None:
+        sample = self.Sample(messages=[self.Msg(tool_calls=[self.skill_call()])])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[0], "alpha")
+
+    def test_an_activation_only_in_the_transcript_is_seen(self) -> None:
+        # The case that was being missed.
+        sample = self.Sample(events=[self.Event(self.Msg(tool_calls=[self.skill_call()]))])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[0], "alpha")
+
+    def test_a_turn_in_both_records_is_not_counted_twice(self) -> None:
+        # The routing decision is the first skill reached for, so double
+        # counting a turn could move it.
+        shared = self.Msg(tool_calls=[self.skill_call()])
+        sample = self.Sample(messages=[shared], events=[self.Event(shared)])
+        observed, tool_calls, _ = engine_routing._observe(sample, self.ROOM)
+        self.assertEqual(observed, "alpha")
+        self.assertEqual(tool_calls, 0)
+
+    def test_a_run_that_chose_nothing_is_still_a_run(self) -> None:
+        sample = self.Sample(messages=[self.Msg(tool_calls=[])])
+        self.assertIsNone(engine_routing._observe(sample, self.ROOM)[0])
+        self.assertTrue(engine_routing._spoke(sample))
+
+    def test_a_sample_with_neither_record_never_ran(self) -> None:
+        # Preserved: this is the infrastructure failure the guard exists for,
+        # and grading it as a miss would invent a routing result.
+        self.assertFalse(engine_routing._spoke(self.Sample()))
+
+    def test_the_transcript_alone_counts_as_having_run(self) -> None:
+        sample = self.Sample(events=[self.Event(self.Msg(tool_calls=[]))])
+        self.assertTrue(engine_routing._spoke(sample))
+
+
 class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
     """A run that finished saying nothing is a routing result, not a failure.
 
