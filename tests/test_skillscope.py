@@ -2775,9 +2775,18 @@ class TestClaudeCodeRefusesTheHostsFilesystem(unittest.TestCase):
     def setUp(self) -> None:
         self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
         os.environ.pop(engine_sandbox.SANDBOX_ENV, None)
-        patch = mock.patch.object(engine_sandbox, "is_windows", lambda: False)
-        patch.start()
-        self.addCleanup(patch.stop)
+        # Two different levers, and this class is about the second one.
+        # `provider()` asks `is_windows()`; `require()` reads `sys.platform`
+        # itself and reads it first. Patching only the former left these
+        # tests measuring the platform guard on a Windows runner and the
+        # sandbox guard on a Linux one, under the same names.
+        for target, attr, value in (
+            (engine_sandbox, "is_windows", lambda: False),
+            (engine_verify.sys, "platform", "linux"),
+        ):
+            patch = mock.patch.object(target, attr, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def test_a_host_sharing_provider_is_refused(self) -> None:
         os.environ[engine_sandbox.SANDBOX_ENV] = "local"
