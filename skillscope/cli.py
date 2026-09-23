@@ -500,6 +500,9 @@ def cmd_routing(args: argparse.Namespace) -> int:
             args.effort,
             args.engine,
             case_timeout=args.case_timeout,
+            max_tool_calls=args.max_tool_calls,
+            max_inspection_calls=args.max_inspection_calls,
+            max_budget_usd=args.max_budget_usd,
         )
         if args.engine == "claude-code":
             # A container really was started: `verify.require()` refuses every
@@ -516,7 +519,20 @@ def cmd_routing(args: argparse.Namespace) -> int:
             # for -- but nothing was contained, and the report says so.
             box = {"sandbox": "host", "sandbox_isolated": False}
             isolated = True
+        # Reported only where they bind. The host leg's CLI buffers until
+        # exit, so nothing can count its calls in time to stop it, and a cap
+        # recorded there would be a cap that never bit.
         extra: dict = {"case_timeout": args.case_timeout}
+        if args.engine == "claude-code":
+            extra["max_tool_calls"] = args.max_tool_calls
+            extra["max_inspection_calls"] = args.max_inspection_calls
+        else:
+            # The CLI's own cap, passed through and only when the build
+            # advertises it -- so this records what was actually enforced.
+            flags = inspect_routing.host_cost_flags(args.max_budget_usd)
+            if flags:
+                extra["max_budget_usd"] = args.max_budget_usd
+            extra["optional_cli_flags_used"] = sorted(f for f in flags if f.startswith("--"))
     else:
         outcomes, isolated, extra = _routing_legacy(args, routing_set, cases)
         box = {"sandbox": "host", "sandbox_isolated": False}

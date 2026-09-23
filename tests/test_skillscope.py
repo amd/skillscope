@@ -3245,6 +3245,95 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
 
 
+class TestRoutingStopsAtTheDecision(unittest.TestCase):
+    """The sandboxed leg stops when the decision is made, as legacy does.
+
+    Legacy reads the CLI's stream and kills the process the moment a skill
+    activates, because everything after that is work the routing question does
+    not ask for and does pay for. The rule here runs earlier: it sees each tool
+    call the bridged CLI *proposes*, so the case stops without the work
+    happening at all.
+
+    The skill's name goes into the reason on purpose. Approval runs before the
+    bridge adopts the assistant message, so the tool call that revealed the
+    decision may be absent from the transcript afterwards -- and a suppressed
+    activation reads exactly like an agent that correctly declined to route.
+
+    Exercised through `routing_decision`, which is pure, rather than through
+    the approver that wraps it: the unit suite runs without the inspect extra
+    on purpose, and a rule that can only be tested with it would not be tested
+    at all in CI.
+    """
+
+    ROOM = ["alpha", "beta", "gamma"]
+
+    def decide(self, function, arguments, tally=None, tools=None, inspections=None):
+        return engine_routing.routing_decision(
+            function, arguments, self.ROOM,
+            tally or engine_routing._Tally(), tools, inspections,
+        )
+
+    def test_activating_a_skill_stops_the_case(self) -> None:
+        decision, _ = self.decide("Skill", {"command": "alpha"})
+        self.assertEqual(decision, "terminate")
+
+    def test_the_skill_that_fired_survives_in_the_reason(self) -> None:
+        # The half that cannot go missing when the message does.
+        _, reason = self.decide("Skill", {"command": "alpha"})
+        self.assertEqual(
+            engine_routing.activation_from_limit(reason, self.ROOM), "alpha"
+        )
+
+    def test_a_skill_nobody_installed_is_still_a_decision(self) -> None:
+        # A contaminated room is a routing result, not a non-event: the run
+        # has to be able to say a stranger fired.
+        decision, reason = self.decide("Skill", {"command": "dataviz"})
+        self.assertEqual(decision, "terminate")
+        self.assertEqual(
+            engine_routing.activation_from_limit(reason, self.ROOM), "other:dataviz"
+        )
+
+    def test_ordinary_work_is_allowed_through(self) -> None:
+        self.assertEqual(self.decide("Bash", {"command": "ls"})[0], "approve")
+
+    def test_the_tool_call_budget_stops_a_case_that_is_rummaging(self) -> None:
+        tally = engine_routing._Tally()
+        decisions = [
+            self.decide("Bash", {"command": f"ls {i}"}, tally, tools=2)[0]
+            for i in range(4)
+        ]
+        self.assertEqual(decisions, ["approve", "approve", "terminate", "terminate"])
+
+    def test_bookkeeping_calls_do_not_count_against_the_budget(self) -> None:
+        # Same rule as legacy: the budget is about work, not housekeeping.
+        tally = engine_routing._Tally()
+        for name in sorted(routing.BOOKKEEPING_TOOLS):
+            self.decide(name, {}, tally, tools=1)
+        self.assertEqual(tally.tools, 0)
+
+    def test_a_limit_reason_from_elsewhere_is_not_read_as_an_activation(self) -> None:
+        self.assertIsNone(
+            engine_routing.activation_from_limit("operator cancelled", self.ROOM)
+        )
+
+    def test_a_named_skill_outside_the_room_is_not_read_as_an_activation(self) -> None:
+        # The room is the authority. Otherwise a stray string becomes a verdict.
+        forged = engine_routing.ACTIVATION_MARK + "delta"
+        self.assertIsNone(engine_routing.activation_from_limit(forged, self.ROOM))
+
+    def test_the_approver_delegates_to_the_rule_rather_than_repeating_it(self) -> None:
+        self.assertIn(
+            "routing_decision(", inspect.getsource(engine_routing.routing_approver)
+        )
+
+    def test_the_host_leg_gets_no_approver(self) -> None:
+        # Its CLI buffers until exit, so there is nothing to approve in time;
+        # attaching one would suggest a bound that does not exist.
+        self.assertIn(
+            "if engine == CLAUDE_CODE", inspect.getsource(engine_routing.build_task)
+        )
+
+
 class TestRoutingCaseTimeoutBinds(unittest.TestCase):
     """`--case-timeout` has to reach the new legs, or it is a cap in name only.
 

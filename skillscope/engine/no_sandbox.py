@@ -125,8 +125,16 @@ def claude_code_no_sandbox(
     effort: str | None,
     skill_dir: Path,
     config_dir: Path | None = None,
+    extra_flags: list[str] | None = None,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
+
+    `extra_flags` are the CLI's own cost controls -- `--max-budget-usd`,
+    `--no-session-persistence` -- which the legacy engine passes and this
+    driver could not, because it did not build that part of the command line.
+    The caller probes for them with `routing.supported_flags` first: an older
+    build rejects an unknown flag and every case fails identically, which reads
+    as a routing collapse rather than a flag problem.
 
     `config_dir` redirects the CLI away from the runner's own `~/.claude`, the
     way the legacy engine does. Optional because a behavioral case installs one
@@ -157,6 +165,7 @@ def claude_code_no_sandbox(
                 cmd += ["--model", model]
             if effort:
                 cmd += ["--effort", effort]
+            cmd += list(extra_flags or [])
 
             env = legacy_agent.claude_env()
             if config_dir is not None:

@@ -219,6 +219,23 @@ def _sample_from_case(case: Case):
     )
 
 
+def _activation_event_from(function: str, arguments: dict) -> dict:
+    """The stream-json shape `detect_activation` reads, from plain values.
+
+    Split from `_activation_event` so the decision rule can be exercised
+    without constructing an inspect `ToolCall`, which needs the extra the unit
+    suite runs without.
+    """
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": function, "input": arguments or {}}
+            ]
+        },
+    }
+
+
 def _activation_event(call) -> dict:
     """Re-wrap one inspect `ToolCall` as the stream-json event it would have been.
 
@@ -229,18 +246,7 @@ def _activation_event(call) -> dict:
     matching and the same `other:<name>` contamination check, as a line the CLI
     printed itself.
     """
-    return {
-        "type": "assistant",
-        "message": {
-            "content": [
-                {
-                    "type": "tool_use",
-                    "name": call.function,
-                    "input": call.arguments or {},
-                }
-            ]
-        },
-    }
+    return _activation_event_from(call.function, call.arguments or {})
 
 
 def _tool_calls(sample):
@@ -380,6 +386,16 @@ def _outcomes(log, cases: list[Case], skills: list[str]) -> list[routing_core.Ou
             outcome.elapsed_s = elapsed
         else:
             observed, tool_calls, inspection_calls = _observe(sample, skills)
+            # The transcript first, the limit second. An approver that stopped
+            # the case at the decision may have done so before the bridge
+            # adopted the message carrying it, so the activation can be absent
+            # from the messages and present in the limit it caused. Neither
+            # source alone is reliable; the transcript is the richer one, so it
+            # wins when both have an answer.
+            if observed is None:
+                observed = activation_from_limit(
+                    getattr(getattr(sample, "limit", None), "reason", None), skills
+                )
             if observed is None and not _spoke(sample):
                 outcome = _error_outcome(
                     case,
@@ -433,6 +449,7 @@ def _solver(
     model: str,
     effort: str,
     config_dir: Path | None = None,
+    max_budget_usd: float | None = None,
 ):
     """The agent that drives one routing case, for the leg that was asked for.
 
@@ -465,8 +482,137 @@ def _solver(
     # not a provider lookup.
     return chain(
         _install_room_solver(routing_set),
-        no_sandbox.claude_code_no_sandbox(model, effort, room[0], config_dir),
+        no_sandbox.claude_code_no_sandbox(
+            model, effort, room[0], config_dir, host_cost_flags(max_budget_usd)
+        ),
     )
+
+
+# Written into an approver's explanation when it stops a case, and read back
+# off the sample's limit. The transcript is the primary source for what a case
+# observed; this is the one that survives a terminate, because approval runs
+# before the bridge adopts the assistant message into the agent's state, so the
+# very tool call that revealed the decision may not be there afterwards. Two
+# sources, one of which cannot go missing.
+ACTIVATION_MARK = "skillscope-activated:"
+BUDGET_MARK = "skillscope-budget:"
+
+
+class _Tally:
+    """Tool calls and skills-tree inspections seen so far in one case."""
+
+    def __init__(self) -> None:
+        self.tools = 0
+        self.inspections = 0
+
+
+def routing_decision(
+    function: str,
+    arguments: dict,
+    room: list[str],
+    tally: _Tally,
+    max_tool_calls: int | None,
+    max_inspection_calls: int | None,
+) -> tuple[str, str]:
+    """Whether this tool call ends the case, and why. Returns (decision, reason).
+
+    Pure, and deliberately so: it decides with nothing but the call, the room
+    and a running count, which means the rule can be tested without inspect
+    installed -- and the unit suite runs without the extras on purpose. The
+    approver below is the thin wrapper that turns this into inspect's vocabulary.
+
+    The rule is the legacy engine's, moved earlier. Legacy sees a call in the
+    CLI's stream after it has run and then races to kill the process; this sees
+    it proposed and declines it, so the work never happens.
+    """
+    hit = routing_core.detect_activation(
+        _activation_event_from(function, arguments), room,
+        allow_body_path=ALLOW_BODY_PATH,
+    )
+    if hit:
+        # The decision. Everything after it is paid for and unread.
+        return "terminate", f"{ACTIVATION_MARK}{hit}"
+
+    if (function or "").lower() not in routing_core.BOOKKEEPING_TOOLS:
+        tally.tools += 1
+    if routing_core._is_skills_inspection(function, json.dumps(arguments or {})):
+        tally.inspections += 1
+
+    over = (max_tool_calls is not None and tally.tools > max_tool_calls) or (
+        max_inspection_calls is not None and tally.inspections > max_inspection_calls
+    )
+    if over:
+        # An agent still rummaging at this point is not about to choose, and
+        # the run buys nothing by watching it.
+        return "terminate", (
+            f"{BUDGET_MARK}{tally.tools} tool call(s), "
+            f"{tally.inspections} inspection(s)"
+        )
+    return "approve", "not a routing decision"
+
+
+def routing_approver(
+    room: list[str],
+    max_tool_calls: int | None,
+    max_inspection_calls: int | None,
+):
+    """Stop the case at the decision, and at the budget, the way legacy does.
+
+    Sees each tool call the bridged CLI *proposes*, before it runs, and ends
+    the sample as `EvalSampleLimit(type="operator")` carrying the reason
+    `routing_decision` produced -- which is the same information legacy puts in
+    `stop_reason`.
+
+    Only the sandboxed leg gets one. The host leg's CLI is a subprocess whose
+    stdout is buffered until exit, so nothing there can observe a decision
+    while there is still a run to stop.
+    """
+    from inspect_ai.approval import Approval, approver
+
+    tally = _Tally()
+
+    @approver
+    def _routing():
+        async def approve(message, call, view, history) -> Approval:
+            decision, reason = routing_decision(
+                call.function, call.arguments or {}, room,
+                tally, max_tool_calls, max_inspection_calls,
+            )
+            return Approval(decision=decision, explanation=reason)
+
+        return approve
+
+    return _routing()
+
+
+def activation_from_limit(reason: str | None, room: list[str]) -> str | None:
+    """The skill an approver named when it stopped the case, if it named one.
+
+    The fallback half of the two-source rule above. Matched against the room so
+    a reason that arrived from anywhere else cannot be read as an activation.
+    """
+    if not reason or ACTIVATION_MARK not in reason:
+        return None
+    named = reason.split(ACTIVATION_MARK, 1)[1].strip()
+    if named in room or named.startswith("other:"):
+        return named
+    return None
+
+
+def host_cost_flags(max_budget_usd: float | None) -> list[str]:
+    """The CLI's own cost controls, for the leg that builds its command line.
+
+    The host leg cannot count tool calls in time to stop a case -- its stdout
+    is buffered until exit -- so the one bound it can enforce mid-run is the
+    CLI's, passed straight through the way legacy does. Probed first, because
+    an older build rejects an unknown flag and every case then fails the same
+    way, which reads as a routing collapse rather than a missing flag.
+    """
+    if not max_budget_usd or max_budget_usd <= 0:
+        return []
+    if "--max-budget-usd" not in routing_core.supported_flags(["--max-budget-usd"]):
+        return []
+    return ["--max-budget-usd", str(max_budget_usd)]
 
 
 def case_time_limit(case_timeout: float | None) -> int | None:
@@ -499,6 +645,9 @@ def build_task(
     engine: str,
     config_dir: Path | None = None,
     case_timeout: float | None = None,
+    max_tool_calls: int | None = None,
+    max_inspection_calls: int | None = None,
+    max_budget_usd: float | None = None,
 ):
     """One inspect `Task` for the *room*, with the cases as its samples.
 
@@ -516,11 +665,27 @@ def build_task(
     nobody asked for, and picking which member to honour has no right answer.
     """
     from inspect_ai import Task
+    from inspect_ai.approval import ApprovalPolicy
 
     return Task(
         name="routing",
         dataset=[_sample_from_case(case) for case in cases],
-        solver=_solver(engine, routing_set, model, effort, config_dir),
+        solver=_solver(engine, routing_set, model, effort, config_dir, max_budget_usd),
+        # Only the sandboxed leg. Its tool calls cross inspect's bridge, so an
+        # approver sees each one before it runs; the host leg's CLI buffers its
+        # stdout until exit, so there is nothing there to approve in time.
+        approval=(
+            [
+                ApprovalPolicy(
+                    approver=routing_approver(
+                        list(routing_set), max_tool_calls, max_inspection_calls
+                    ),
+                    tools="*",
+                )
+            ]
+            if engine == CLAUDE_CODE
+            else None
+        ),
         # No scorer. The verdict needs the case's expectation and the room's
         # membership, and `routing.classify` is already the grader for both
         # legacy and these legs; wrapping it in a scorer would put a second
@@ -540,6 +705,9 @@ def run(
     effort: str,
     engine: str,
     case_timeout: float | None = None,
+    max_tool_calls: int | None = None,
+    max_inspection_calls: int | None = None,
+    max_budget_usd: float | None = None,
 ) -> list[routing_core.Outcome]:
     """Run every routing case against the room. Mirrors `routing.run_case`'s output.
 
@@ -611,6 +779,9 @@ def run(
             resolved,
             Path(config_dir) if engine == NO_SANDBOX else None,
             case_timeout,
+            max_tool_calls,
+            max_inspection_calls,
+            max_budget_usd,
         )
 
     outcomes: list[routing_core.Outcome] = []
@@ -632,12 +803,14 @@ def run(
 
 def _evaluate(
     inspect_eval, cases, routing_set, model, effort, engine, resolved, config_dir,
-    case_timeout=None,
+    case_timeout=None, max_tool_calls=None, max_inspection_calls=None,
+    max_budget_usd=None,
 ):
     """Run the task. Split out so `run` reads as a sequence of decisions."""
     return inspect_eval(
         build_task(
-            cases, routing_set, model, effort, engine, config_dir, case_timeout
+            cases, routing_set, model, effort, engine, config_dir, case_timeout,
+            max_tool_calls, max_inspection_calls, max_budget_usd,
         ),
         model=resolved,
         model_args=models.model_args(resolved),
