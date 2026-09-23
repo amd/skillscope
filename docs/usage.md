@@ -245,9 +245,17 @@ same contamination or report it -- and therefore refuses to run a routing leg
 at all unless `ANTHROPIC_API_KEY` is set, which is what lets it redirect the
 config dir. Refusing beats being quietly wrong about every case.
 
-One cost to know about: neither inspect-backed leg stops at the moment a skill
-activates, the way `legacy` does, so a routing case runs to its message cap
-instead. That makes them dearer per case. `--case-timeout` still bounds them.
+Stopping at the decision differs by leg, and it is the difference that decides
+what a routing run costs. `legacy` sees the activation in the CLI's stream
+after the call has run, then kills the process. `claude-code` stops earlier:
+its calls cross inspect's bridge, so the one that reveals the decision is
+declined before it runs, and `--max-tool-calls` / `--max-inspection-calls` ride
+the same path. `claude-code-no-sandbox` cannot do either — its CLI's output is
+buffered until the process exits, so the decision is only visible once it has
+been paid for. There it runs to the message cap, bounded by `--case-timeout`
+and by the CLI's own `--max-budget-usd`, and is correspondingly dearer per
+case. The report records which caps actually applied rather than which were
+asked for.
 
 ### Where a sandboxed run is sandboxed
 
