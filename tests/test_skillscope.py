@@ -3252,6 +3252,83 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
             cli.build_parser().parse_args(["routing", "--engine", "inspect"])
 
 
+class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
+    """A skill's setup either runs, or the run stops. Not skipped quietly.
+
+    `evals/hooks.py` is environment plumbing and only the legacy engine
+    executes it -- no inspect-backed engine builds the `ctx` those hooks take.
+    Skipping it leaves no trace: the case is graded as though the setup
+    happened, and the failure surfaces later as a skill that mysteriously does
+    not work on this runner.
+
+    Not hypothetical. The catalogue this was written against ships a hook whose
+    `setup` clears stale vLLM containers and whose `teardown` removes them, so
+    skipping it leaks containers holding GPU memory into whatever runs next --
+    the same contamination the sandboxed engines exist to prevent.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("plain", dataset=tier0_dataset("plain"))
+        self.repo.skill(
+            "hooked",
+            dataset=tier0_dataset("hooked"),
+            hooks="def setup(workspace, case, ctx):\n    pass\n",
+        )
+        self.repo.activate()
+
+    def refuse(self, engine: str, skills: list[str], command: str = "behavioral"):
+        return cli._require_hook_support(engine, skills, command)
+
+    def test_an_inspect_engine_refuses_a_skill_that_ships_a_hook(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code-no-sandbox", ["hooked"])
+        message = str(caught.exception)
+        self.assertIn("hooks.py", message)
+        self.assertIn("hooked", message)
+        self.assertIn("--engine legacy", message)
+
+    def test_the_refusal_names_every_skill_that_would_be_skipped(self) -> None:
+        # Naming one of three sends someone round the loop twice.
+        self.repo.skill(
+            "also-hooked",
+            dataset=tier0_dataset("also"),
+            hooks="def teardown(workspace, case, ctx):\n    pass\n",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code", ["hooked", "also-hooked", "plain"])
+        message = str(caught.exception)
+        self.assertIn("hooked", message)
+        self.assertIn("also-hooked", message)
+
+    def test_legacy_runs_hooks_so_it_is_not_refused(self) -> None:
+        self.assertIsNone(self.refuse("legacy", ["hooked"]))
+
+    def test_a_skill_without_a_hook_is_not_refused(self) -> None:
+        self.assertIsNone(self.refuse("claude-code", ["plain"]))
+
+    def test_routing_is_exempt_because_it_never_reads_hooks(self) -> None:
+        # A routing run installs the skills and asks which one fires. It
+        # executes nothing, so there is no setup to skip.
+        self.assertIsNone(self.refuse("claude-code", ["hooked"], command="routing"))
+
+    def test_every_inspect_engine_is_covered(self) -> None:
+        for engine in cli.INSPECT_ENGINES:
+            with self.subTest(engine=engine):
+                with self.assertRaises(SystemExit):
+                    self.refuse(engine, ["hooked"])
+
+    def test_no_inspect_engine_has_quietly_gained_hook_support(self) -> None:
+        # If one ever does, this guard becomes wrong rather than merely
+        # unnecessary, and the failure would be a refusal nobody can explain.
+        import skillscope.engine.behavioral as eb
+        import skillscope.engine.verify as ev
+
+        for module in (eb, ev):
+            with self.subTest(module=module.__name__):
+                self.assertNotIn("load_hooks", inspect.getsource(module))
+
+
 class TestProviderFailuresAreMarked(unittest.TestCase):
     """A gateway error is not a routing result, and must not read as one.
 

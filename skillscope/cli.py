@@ -372,6 +372,12 @@ def _prepare_graded_run(
         # containers and installs skills before it first reaches a provider, so
         # without this a bad key surfaces as a task that failed after all that.
         engine.require(args.engine)
+        # Before the model probe, because it costs nothing and a run that
+        # cannot honour a skill's setup should not first spend a round trip
+        # finding out the credentials are fine.
+        _require_hook_support(
+            args.engine, selected, getattr(args, "command", "")
+        )
         if not args.skip_preflight:
             from .engine import models as engine_models
 
@@ -391,6 +397,46 @@ def _prepare_graded_run(
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
     return selected
+
+
+def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
+    """Refuse a run whose skills ship hooks the chosen engine cannot execute.
+
+    `evals/hooks.py` is environment plumbing -- clearing stale containers,
+    tearing down a service -- and only the legacy engine runs it. No engine
+    built on inspect_ai builds the `ctx` those hooks receive, so on those
+    engines the file is simply not read.
+
+    Not read is the problem. A hook that did not run leaves no trace in the
+    report: the case is graded as though its setup happened, and the failure
+    surfaces later as a skill that mysteriously does not work on this runner.
+    One skill in the catalogue this was written against uses `setup` to clear
+    stale vLLM containers and `teardown` to remove them -- on a shared GPU
+    runner, skipping that leaks containers holding GPU memory into whatever
+    runs next, which is the same class of contamination the sandboxed engines
+    exist to prevent.
+
+    Routing never reads hooks on any engine, so it is exempt: a routing run
+    installs the skills and asks which one fires, and executes nothing.
+    """
+    if command != "behavioral" or engine not in INSPECT_ENGINES:
+        return
+
+    with_hooks = [s for s in skills if datasets.hooks_path(s).is_file()]
+    if not with_hooks:
+        return
+
+    listed = "\n".join(
+        f"    {s}: {datasets.hooks_path(s)}" for s in with_hooks
+    )
+    raise SystemExit(
+        f"error: --engine {engine} cannot run evals/hooks.py, and these "
+        f"skills ship one:\n{listed}\n"
+        "    Their setup and teardown would be skipped silently, and the "
+        "cases graded as though it had run.\n"
+        "    Use --engine legacy, which executes hooks, or drop the hook if "
+        "it is no longer needed."
+    )
 
 
 def _sandbox_meta(args: argparse.Namespace) -> dict:
