@@ -575,7 +575,7 @@ def machine_plan(skill: str) -> dict:
     on the platforms the repo runs on by default. A skill ships one to drop a
     platform it cannot support (``os``), to ask for a runner label its work
     requires (``labels``), or to name a compose file for the sandbox its cases
-    need (``sandbox``, read by the inspect engine)::
+    need (``sandbox``, read by ``--engine claude-code``)::
 
         os: [Linux]
         labels: [mi300x]

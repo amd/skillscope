@@ -11,5 +11,10 @@ dist/
 # Reports and kept transcripts, written into the repo under test
 .skillscope/
 
+# inspect's own run transcripts, wherever a tool was invoked from. Committing
+# one is easy to do by accident and they are large, opaque and reproducible.
+*.eval
+tools/logs/
+
 # Nested checkout of this repo, used by the reusable workflows in CI
 .skillscope-action/

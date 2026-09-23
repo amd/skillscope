@@ -221,6 +221,46 @@ def render(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def refuse_unrunnable_pair(parser, args) -> None:
+    """Stop before the first leg when the pair cannot produce a comparison.
+
+    Checked up front because the cost is not symmetric: the baseline leg runs
+    first, and with `--noise` it runs twice, so a candidate the leg will refuse
+    is discovered only after a full routing run has been paid for. The refusal
+    then surfaces as `produced no report`, which blames a missing file rather
+    than naming the engine that was never going to run.
+
+    Routing is the live case: it has one engine, so every pair is either the
+    same engine twice -- which measures nothing an engine comparison is for --
+    or a candidate that does not run there at all.
+    """
+    if args.leg != "routing":
+        return
+
+    runnable = set(cli_routing_engines())
+    unrunnable = sorted({args.baseline, args.candidate} - runnable)
+    if unrunnable:
+        parser.error(
+            f"routing has no leg for {', '.join(unrunnable)}. It runs on "
+            f"{', '.join(sorted(runnable))}, so there is no pair to compare "
+            "until another engine gains a routing leg."
+        )
+    if args.baseline == args.candidate:
+        parser.error(
+            f"--baseline and --candidate are both {args.baseline!r}, which "
+            "measures run-to-run variance rather than a difference between "
+            "engines. That is what --noise already reports, on the behavioral "
+            "leg where there is a second engine to compare against."
+        )
+
+
+def cli_routing_engines() -> tuple[str, ...]:
+    """The engines the CLI will actually run a routing leg on."""
+    from skillscope.cli import ROUTING_ENGINES
+
+    return ROUTING_ENGINES
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("leg", nargs="?", choices=["routing", "behavioral"])
@@ -261,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not args.leg:
             parser.error("give a leg to run (routing or behavioral), or --compare")
+        refuse_unrunnable_pair(parser, args)
         baseline = run_leg(args.leg, args.baseline, passthrough, args.baseline)
         noise_run = (
             run_leg(args.leg, args.baseline, passthrough, f"{args.baseline}-again")

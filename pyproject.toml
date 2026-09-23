@@ -33,9 +33,9 @@ inspect = ["inspect-ai>=0.3.263", "anthropic>=0.40"]
 # setup; `SKILLSCOPE_SANDBOX=podman` then selects it.
 podman = ["skillscope[inspect]", "inspect-podman"]
 
-# The Claude Code verification leg (`--engine claude-code`). Separate from
-# `inspect` because it is a reporting-only cross-check, not something a graded
-# run needs -- and because it only works on a POSIX guest.
+# The Claude Code verification leg (`--engine claude-code`). Kept out of the
+# `inspect` extra because it is a reporting-only cross-check, not something a
+# graded run needs -- and because it only works on a POSIX guest.
 verify = ["skillscope[inspect]", "inspect-swe>=0.2.70"]
 
 [project.scripts]

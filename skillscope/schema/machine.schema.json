@@ -23,7 +23,7 @@
     "sandbox": {
       "type": "string",
       "minLength": 1,
-      "description": "Compose file, resolved beside this machine.yml in evals/, describing the sandbox the behavioral cases need under the inspect engine. Absent means the default container with no network, which is what a skill that only reads and writes files should want. Name one to opt into network egress -- a skill that installs a server or pulls a model cannot run without it -- or to bind a device in. Ignored on Windows, where inspect's sandbox layer assumes a POSIX guest and cases run unsandboxed on the host instead.",
+      "description": "Compose file, resolved beside this machine.yml in evals/, describing the sandbox the behavioral cases need under `--engine claude-code`. Absent means the default container with no network, which is what a skill that only reads and writes files should want. Name one to opt into network egress -- a skill that installs a server or pulls a model cannot run without it -- or to bind a device in. Ignored on Windows, where inspect's sandbox layer assumes a POSIX guest and cases run unsandboxed on the host instead.",
       "examples": ["compose.yaml"]
     }
   }

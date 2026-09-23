@@ -23,7 +23,7 @@ so it passes only if the fixture was staged, the sandbox was listed, and the
 listing was matched -- and it cannot be passed by an agent that got lucky. No
 model is ever called, so this costs nothing and is deterministic.
 
-    tools/sandbox_smoketest.py <repo> [--skill demo-skill]
+    tools/sandbox_smoketest.py <repo> [--skill demo-skill] [--expect-sandbox docker]
 
 Exits non-zero, loudly, on the first thing that did not hold.
 """
@@ -67,6 +67,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo", help="Repo holding the fixture skill.")
     parser.add_argument("--skill", default="demo-skill")
+    parser.add_argument(
+        "--expect-sandbox",
+        default="",
+        help=(
+            "The provider this run must resolve to, e.g. 'docker' or 'local'. "
+            "Supplied by the caller rather than read back from the harness: "
+            "asking the harness what it chose and then checking its own answer "
+            "cannot fail, and the failure that matters is a run that quietly "
+            "got no container at all."
+        ),
+    )
     args = parser.parse_args()
 
     config.use(config.build(Path(args.repo).resolve(), skills_dir="*"))
@@ -79,8 +90,18 @@ def main() -> int:
     if not cases:
         fail(f"{args.skill} has no case asserting anything, so nothing is proven")
 
-    expected = sandbox_spec.provider()
-    print(f"[smoketest] {len(cases)} case(s), sandbox provider {expected!r}", flush=True)
+    provider = sandbox_spec.provider()
+    print(f"[smoketest] {len(cases)} case(s), sandbox provider {provider!r}", flush=True)
+
+    # Before anything runs: a graded run that silently dropped its sandbox
+    # reports the same shape as one that kept it, and `local` is the host
+    # filesystem, so every check below would pass with nothing isolated.
+    if args.expect_sandbox and provider != args.expect_sandbox:
+        fail(
+            f"expected the {args.expect_sandbox!r} sandbox, got {provider!r}. "
+            f"Check SKILLSCOPE_SANDBOX and the platform detection -- an "
+            f"unsandboxed run passes every check below for the wrong reason."
+        )
 
     sandbox_spec.require_provider()
     from inspect_ai import eval as inspect_eval
@@ -122,7 +143,7 @@ def main() -> int:
 
     print(
         f"[smoketest] ok -- {len(checks)} check(s) graded, "
-        f"{len(seeded)} seeded fixture(s) found, sandbox {expected!r}."
+        f"{len(seeded)} seeded fixture(s) found, sandbox {provider!r}."
     )
     return 0
 

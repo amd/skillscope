@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Grading for the inspect engine.
+"""Grading for the engines built on `inspect_ai`.
 
 One scorer grades every expectation a case carries and reports them all, rather
 than one scorer per kind. A behavioral run costs minutes and real tokens, so a

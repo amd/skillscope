@@ -11,18 +11,19 @@ outcome objects, so everything downstream -- `summarize`, `render_markdown`,
 the report writers -- is shared.
 
 `inspect_ai` is an optional dependency, so nothing here is imported at module
-scope by the rest of the package. Call `require()` before touching a submodule
+scope by the rest of the package. Call `require(engine)` before touching a submodule
 to turn a missing wheel into an actionable message rather than a traceback.
 """
 
 from __future__ import annotations
 
-def install_hint(engine: str = "inspect") -> str:
+def install_hint(engine: str) -> str:
     """Why this run cannot start, naming the engine that was actually asked for.
 
     Every engine but `legacy` runs on inspect_ai, so any of them can raise
-    this. Naming `inspect` regardless sent a CI job looking for a flag it had
-    not passed.
+    this. Required rather than defaulted: a default sent a CI job looking for a
+    flag it had not passed, and the value it defaulted to is now one argparse
+    rejects outright.
     """
     return (
         f"error: --engine {engine} needs the inspect extra. Install it with:\n"
@@ -30,11 +31,7 @@ def install_hint(engine: str = "inspect") -> str:
     )
 
 
-# Kept for callers that predate the engine argument.
-INSTALL_HINT = install_hint()
-
-
-def require(engine: str = "inspect") -> None:
+def require(engine: str) -> None:
     """Raise SystemExit with an install hint when `inspect_ai` is missing."""
     try:
         import inspect_ai  # noqa: F401

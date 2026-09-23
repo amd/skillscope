@@ -3131,12 +3131,12 @@ class TestRoutingEngineLeg(unittest.TestCase):
 
     def test_the_refusal_names_what_to_use_instead(self) -> None:
         # A run that stops without saying what would have worked just moves the
-        # guessing somewhere else. Asserted against ROUTING_ENGINES rather than
-        # a literal, so an engine that gains a routing leg has to appear here.
+        # guessing somewhere else. Asserted against the whole `Use:` clause
+        # rather than the engine names alone: "legacy" already appears in the
+        # fixed prose explaining what the refused engine would have done, so
+        # looking for the bare word passed even with the clause deleted.
         message = self.refusal("claude-code")
-        for engine in cli.ROUTING_ENGINES:
-            with self.subTest(engine=engine):
-                self.assertIn(engine, message)
+        self.assertIn("Use: " + ", ".join(cli.ROUTING_ENGINES), message)
 
     def test_an_engine_that_no_longer_exists_is_refused_by_the_parser(self) -> None:
         # The harness-independent engine was removed. Argparse rejecting the

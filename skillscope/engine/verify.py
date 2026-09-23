@@ -4,10 +4,11 @@
 
 """The Claude Code verification leg (`--engine claude-code`).
 
-The `inspect` engine grades a skill with a harness-independent agent, which is
-a deliberate choice: it tests whether a skill's *instructions* work rather than
-how one product reads them. This leg exists to answer the question that choice
-raises -- do the results still hold under the real thing?
+The only leg that runs the real agent *and* isolates it. `legacy` and
+`claude-code-no-sandbox` both drive the same CLI on the host, so they measure
+the machine as it is, with whatever else is installed on it. This one measures
+the skill alone -- and when the two disagree, the disagreement is a fact about
+one of those environments rather than about the skill.
 
 It runs actual Claude Code inside the sandbox, via `inspect_swe`, and produces
 the same outcome objects as the other two engines, so the benchmark tool can
@@ -95,8 +96,8 @@ def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = Non
     # starts at `/`, and left to itself the agent scattered its output there:
     # every `files_exist` check in the first trial run reported an empty
     # sandbox, which reads as "the agent did nothing" rather than "the agent
-    # worked somewhere else". The other engines say this in a prompt, because
-    # their agent takes instructions; this one takes a working directory.
+    # worked somewhere else". `inspect_swe` takes a working directory rather
+    # than instructions, so this is set rather than asked for.
     bound = deadline.active()
     return Task(
         name=f"claude-code-{skill}",

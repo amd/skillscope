@@ -107,7 +107,13 @@ jobs:
       # this runnable on a pull request from a fork, which is exactly where a
       # cross-platform sandbox bug shows up.
       - name: Exercise the sandbox, the staging and the listing
-        run: python tools/sandbox_smoketest.py fixture --skill demo-skill
+        # The expected provider is supplied per platform rather than read back
+        # from the harness. Ubuntu must get a real container; a leg that
+        # quietly fell back to `local` would pass every check below against the
+        # host filesystem and stay green under the name "Sandbox machinery".
+        run: >
+          python tools/sandbox_smoketest.py fixture --skill demo-skill
+          --expect-sandbox ${{ matrix.os == 'windows-latest' && 'local' || 'docker' }}
 
   action:
     name: Action against a throwaway repo

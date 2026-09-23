@@ -110,10 +110,10 @@ def install_skill(skill_dir: Path, workspace: str) -> None:
 
     `.claude/skills/<name>` inside a directory the CLI is given with
     `--add-dir`, which is what the legacy engine has always done and what
-    `inspect_swe` does via its own `skills=` argument. The react agent reaches
-    the same place differently, through inspect's `skill()` tool -- so a solver
-    that replaces the react agent has to do this itself or the agent runs with
-    no skill at all, answering from the prompt and scoring like it.
+    `inspect_swe` does via its own `skills=` argument. Staging is the driver's
+    job, and this driver is the one that has to do it by hand: skip it and the
+    agent runs with no skill at all, answering from the prompt and scoring like
+    it -- which looks like a bad skill rather than a missing one.
     """
     dest = Path(workspace) / ".claude" / "skills" / skill_dir.name
     dest.parent.mkdir(parents=True, exist_ok=True)
