@@ -56,6 +56,26 @@ def require() -> None:
             "requires a POSIX guest, both to locate the CLI and to run the "
             "model proxy it installs in the sandbox."
         )
+
+    # Not a preference. `inspect_swe` prepares the guest for the CLI by writing
+    # $HOME/.claude/settings.json outright, discarding whatever was there. In a
+    # container that file belongs to nobody and the write is the setup working
+    # as intended. Under the `local` provider $HOME is the developer's own, and
+    # the same write destroys their real configuration -- permissions, model,
+    # gateway environment -- with no backup and no warning. Observed, not
+    # theorised: it cost one settings.json before this guard existed.
+    provider = sandbox_spec.provider()
+    if provider in sandbox_spec.NOT_ISOLATED:
+        raise SystemExit(
+            f"error: --engine claude-code needs a real sandbox, but "
+            f"{sandbox_spec.SANDBOX_ENV}={provider!r} selects one that shares "
+            "the host's filesystem. inspect_swe would overwrite your own "
+            "~/.claude/settings.json to set up the agent. Unset "
+            f"{sandbox_spec.SANDBOX_ENV} for a container, or use "
+            "--engine claude-code-no-sandbox to run the CLI on the host "
+            "without it touching your configuration."
+        )
+
     try:
         import inspect_swe  # noqa: F401
     except ModuleNotFoundError as exc:  # pragma: no cover -- environment shape

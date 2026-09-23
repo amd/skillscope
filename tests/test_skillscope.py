@@ -57,6 +57,7 @@ from skillscope.engine import no_sandbox as engine_no_sandbox
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import sandbox as engine_sandbox
+from skillscope.engine import verify as engine_verify
 from skillscope.engine import tools as engine_tools
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -2756,6 +2757,46 @@ class TestShellPrefixProbe(unittest.TestCase):
 
     def test_a_working_bash_still_selects_posix(self) -> None:
         self.assertEqual(self._probe(None), engine_tools.POSIX_SHELL)
+
+
+class TestClaudeCodeRefusesTheHostsFilesystem(unittest.TestCase):
+    """`claude-code` needs a container, and not for isolation's sake.
+
+    `inspect_swe` prepares the guest by writing `$HOME/.claude/settings.json`
+    outright. In a container that file belongs to nobody. Under the `local`
+    provider `$HOME` is the developer's own, and the same write silently
+    destroys their real configuration -- permissions, model, gateway
+    environment -- with no backup. This cost one settings.json before the
+    guard existed, which is why the guard is a refusal rather than a warning.
+    """
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+        os.environ.pop(engine_sandbox.SANDBOX_ENV, None)
+        patch = mock.patch.object(engine_sandbox, "is_windows", lambda: False)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_host_sharing_provider_is_refused(self) -> None:
+        os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        with self.assertRaises(SystemExit) as caught:
+            engine_verify.require()
+        message = str(caught.exception)
+        self.assertIn("settings.json", message)
+        self.assertIn("--engine claude-code-no-sandbox", message)
+
+    def test_every_unisolated_provider_is_refused(self) -> None:
+        # Keyed off the same set `describe()` reports from, so a provider that
+        # is added as unisolated cannot quietly stay allowed here.
+        for provider in engine_sandbox.NOT_ISOLATED:
+            with self.subTest(provider=provider):
+                os.environ[engine_sandbox.SANDBOX_ENV] = provider
+                with self.assertRaises(SystemExit):
+                    engine_verify.require()
+
+    def test_a_container_provider_is_allowed(self) -> None:
+        os.environ[engine_sandbox.SANDBOX_ENV] = "docker"
+        self.assertIsNone(engine_verify.require())
 
 
 class TestEngineNoSandboxGuard(unittest.TestCase):
