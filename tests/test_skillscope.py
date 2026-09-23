@@ -56,7 +56,6 @@ from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import cli_agent as engine_cli_agent
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
-from skillscope.engine import routing as engine_routing
 from skillscope.engine import sandbox as engine_sandbox
 from skillscope.engine import tools as engine_tools
 
@@ -3007,50 +3006,6 @@ class TestEngineJudgeArtifacts(unittest.TestCase):
         self.assertFalse(engine_judge.is_probably_binary("report.md"))
 
 
-class _Call:
-    def __init__(self, function: str, arguments: dict) -> None:
-        self.function = function
-        self.arguments = arguments
-
-
-class _Message:
-    def __init__(self, tool_calls: list | None = None) -> None:
-        self.tool_calls = tool_calls
-
-
-class TestEngineRoutingActivation(unittest.TestCase):
-    """Naming a skill through the tool *is* the activation, so it is observed."""
-
-    def test_a_skill_call_is_the_decision(self) -> None:
-        messages = [_Message([_Call("skill", {"command": "local-ai-use"})])]
-        self.assertEqual(engine_routing.activation_of(messages), "local-ai-use")
-
-    def test_no_tool_call_means_nothing_activated(self) -> None:
-        self.assertIsNone(engine_routing.activation_of([_Message(), _Message([])]))
-
-    def test_another_tool_is_not_an_activation(self) -> None:
-        messages = [_Message([_Call("think", {"thought": "skill demo-skill?"})])]
-        self.assertIsNone(engine_routing.activation_of(messages))
-
-    def test_the_first_skill_named_wins(self) -> None:
-        messages = [
-            _Message([_Call("skill", {"command": "first"})]),
-            _Message([_Call("skill", {"command": "second"})]),
-        ]
-        self.assertEqual(engine_routing.activation_of(messages), "first")
-
-    def test_a_blank_command_is_not_an_activation(self) -> None:
-        messages = [_Message([_Call("skill", {"command": "  "})])]
-        self.assertIsNone(engine_routing.activation_of(messages))
-
-    def test_tool_calls_are_counted_across_messages(self) -> None:
-        messages = [
-            _Message([_Call("think", {}), _Call("skill", {"command": "x"})]),
-            _Message(),
-        ]
-        self.assertEqual(engine_routing.tool_call_count(messages), 2)
-
-
 class TestEngineSandboxSelection(unittest.TestCase):
     """The provider is the machine's choice; the compose file is the skill's."""
 
@@ -3176,10 +3131,20 @@ class TestRoutingEngineLeg(unittest.TestCase):
 
     def test_the_refusal_names_what_to_use_instead(self) -> None:
         # A run that stops without saying what would have worked just moves the
-        # guessing somewhere else.
+        # guessing somewhere else. Asserted against ROUTING_ENGINES rather than
+        # a literal, so an engine that gains a routing leg has to appear here.
         message = self.refusal("claude-code")
-        self.assertIn("legacy", message)
-        self.assertIn("inspect", message)
+        for engine in cli.ROUTING_ENGINES:
+            with self.subTest(engine=engine):
+                self.assertIn(engine, message)
+
+    def test_an_engine_that_no_longer_exists_is_refused_by_the_parser(self) -> None:
+        # The harness-independent engine was removed. Argparse rejecting the
+        # name is what keeps a stale command line from silently selecting
+        # something else, the way --engine claude-cli once selected legacy.
+        self.assertNotIn("inspect", cli.ENGINES)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.build_parser().parse_args(["routing", "--engine", "inspect"])
 
     def test_the_environment_variable_is_named_when_it_is_the_cause(self) -> None:
         # SKILLSCOPE_ENGINE set for a whole job is the confusing case: nothing
@@ -3213,12 +3178,12 @@ class TestRoutingEngineLeg(unittest.TestCase):
 
 
 class TestRoutingReportsWhereItRan(unittest.TestCase):
-    """Both routing legs run unsandboxed, and the meta says which kind.
+    """Routing runs on the host, and the meta says so rather than implying it.
 
-    `none` and `host` are different claims: the inspect leg offers the skill as
-    a tool definition and never executes anything, so there is nothing to
-    isolate; the legacy leg runs the CLI on the host, where there is something
-    to isolate and nothing isolating it.
+    The value is stated outright now. Deriving it from the engine's name is
+    what let a run that started no container report `sandbox: docker,
+    sandbox_isolated: true`, and the derivation was wrong in a direction no
+    reader could catch: it overstated the isolation.
     """
 
     def setUp(self) -> None:
@@ -3243,11 +3208,6 @@ class TestRoutingReportsWhereItRan(unittest.TestCase):
         meta = self.meta("legacy")
         self.assertEqual(meta["sandbox"], "host")
         self.assertIs(meta["sandbox_isolated"], False)
-
-    def test_the_inspect_leg_says_none_rather_than_unprotected(self) -> None:
-        meta = self.meta("inspect")
-        self.assertEqual(meta["sandbox"], "none")
-        self.assertIsNone(meta["sandbox_isolated"])
 
     def test_no_routing_leg_ever_claims_isolation(self) -> None:
         # The assertion the reports failed: whatever engine ran, routing had

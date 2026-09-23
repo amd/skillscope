@@ -214,22 +214,29 @@ environment gets one matrix, labels and all.
 reports are identical whichever you pick; only the thing driving the agent
 changes.
 
-| `--engine` | What runs | Needs |
-| --- | --- | --- |
-| `legacy` (default) | The `claude` CLI, driven directly | the CLI on `PATH` |
-| `inspect` | A harness-independent agent through `inspect_ai` | `pip install 'skillscope[inspect]'` |
-| `claude-code` | Real Claude Code inside the sandbox, to cross-check the other two | `skillscope[verify]`, Linux only |
+| `--engine` | What runs | Runs in | Needs |
+| --- | --- | --- | --- |
+| `legacy` (default) | The `claude` CLI, driven directly | the host | the CLI on `PATH` |
+| `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
+| `claude-cli` | The real CLI, under `inspect_ai` | the host | `skillscope[inspect]`, the CLI on `PATH` |
 
-`inspect` grades a skill on whether its *instructions* work rather than on how
-one product reads them, which is the stronger claim and the one a product repo
-can adopt. It is also much cheaper: a routing case is a single model call,
-because the decision is visible in the first reply and nothing needs executing.
+All three drive the agent a skill is written for, so what differs between them
+is **where the agent runs**, not what it is. That is the axis worth choosing
+along: the host measures the machine as it is, with whatever else is installed
+on it, and the sandbox measures the skill alone. When the two disagree, the
+disagreement is usually a fact about one of those environments rather than
+about the skill -- which is a thing one engine on its own cannot tell you.
 
 `claude-code` is a reporting leg, never a gate. Harness runs are
 nondeterministic and the harness is not what is being graded, so a divergence
 there is a question about the skill rather than a build failure.
 
-### Where an `inspect` run is sandboxed
+**Routing runs on `legacy` only.** The other two reach the CLI through
+`inspect_ai`, and the routing leg has no path that does; asking for either is
+refused rather than quietly run as `legacy`. So routing is always unsandboxed
+today, and its reports say so.
+
+### Where a sandboxed run is sandboxed
 
 Two separate decisions, made by different people.
 

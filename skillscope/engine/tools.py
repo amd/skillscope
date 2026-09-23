@@ -2,13 +2,18 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""A tool set that works on a non-POSIX guest.
+"""Reading a sandbox, on a guest that may not be POSIX.
 
-inspect's own tools assume one: `bash()` execs `["bash", "--login", "-c", ...]`,
-`text_editor()` needs a Linux-only helper binary, and `list_files()`/`grep()`
-shell out to `find`/`grep`. On a Windows host with the `local` sandbox that
-leaves an agent that can read and think but cannot write a file or run a
-command -- not enough to grade a behavioral case with.
+Not tools an agent calls -- those were removed with the harness-independent
+engine. What is left is how *skillscope itself* inspects a sandbox after the
+agent has finished: where the work was supposed to land (`workdir`), what is
+actually there (`list_paths`), and how to resolve a path a case named. The
+scorers, the judge and the claude-code leg all read a sandbox this way.
+
+inspect's own helpers assume a POSIX guest: `bash()` execs
+`["bash", "--login", "-c", ...]` and `list_files()`/`grep()` shell out to
+`find`/`grep`. On a Windows host with the `local` sandbox that is a scorer
+which cannot see the files it is grading.
 
 Everything here is built on `SandboxEnvironment.exec` / `read_file` /
 `write_file`, which are provider-level and platform-neutral. Only the shell
@@ -164,143 +169,3 @@ async def list_paths() -> list[str]:
             f"stderr: {result.stderr.strip()[:200] or '(none)'}"
         )
     return normalize_listing(result.stdout)
-
-
-def _text(result) -> str:
-    """`stdout` plus `stderr`, which is where a failing command says why."""
-    parts = [result.stdout.strip(), result.stderr.strip()]
-    body = "\n".join(p for p in parts if p)
-    if result.success:
-        return body or "(no output)"
-    return f"exit code {result.returncode}\n{body}".strip()
-
-
-def shell(timeout: int = 300):
-    """Run shell commands in the sandbox, on whichever platform it is."""
-    from inspect_ai.tool import Tool, tool
-
-    @tool(name="shell")
-    def _shell() -> Tool:
-        async def execute(command: str) -> str:
-            """Run a command in the sandbox and return its output.
-
-            Uses bash on Linux and macOS, and PowerShell on Windows, so write
-            commands for the platform you find yourself on. Check with `uname`
-            or `$PSVersionTable` if you are unsure.
-
-            Args:
-                command: The command line to run.
-
-            Returns:
-                The command's combined output, or its exit code and error output
-                when it fails.
-            """
-            return _text(await run(command, timeout=timeout))
-
-        return execute
-
-    return _shell()
-
-
-def write_file():
-    """Create or overwrite a file, without going through a shell."""
-    from inspect_ai.tool import Tool, tool
-
-    @tool(name="write_file")
-    def _write_file() -> Tool:
-        async def execute(path: str, content: str) -> str:
-            """Write text to a file in the sandbox, replacing it if it exists.
-
-            Prefer this over shell redirection: it needs no quoting or escaping
-            and behaves the same on every platform.
-
-            Args:
-                path: File to write, relative to the working directory.
-                content: The full text the file should contain.
-
-            Returns:
-                Confirmation of what was written.
-            """
-            from inspect_ai.util import sandbox
-
-            await sandbox().write_file(await resolve(path), content)
-            return f"wrote {len(content)} characters to {path}"
-
-        return execute
-
-    return _write_file()
-
-
-def edit_file():
-    """Replace one exact occurrence of a string in a file."""
-    from inspect_ai.tool import Tool, tool
-
-    @tool(name="edit_file")
-    def _edit_file() -> Tool:
-        async def execute(path: str, old_text: str, new_text: str) -> str:
-            """Replace an exact snippet in a file.
-
-            `old_text` must appear exactly once, so include enough surrounding
-            context to make it unique. To create a file, use write_file.
-
-            Args:
-                path: File to edit, relative to the working directory.
-                old_text: The exact text to replace.
-                new_text: What to put in its place.
-
-            Returns:
-                Confirmation, or an explanation of why the edit was refused.
-            """
-            from inspect_ai.util import sandbox
-
-            target = await resolve(path)
-            current = await sandbox().read_file(target, text=True)
-            found = current.count(old_text)
-            if found == 0:
-                return f"no edit made: {path} does not contain that text"
-            if found > 1:
-                return (
-                    f"no edit made: that text appears {found} times in {path}. "
-                    "Include more surrounding context so it matches once."
-                )
-            await sandbox().write_file(target, current.replace(old_text, new_text, 1))
-            return f"edited {path}"
-
-        return execute
-
-    return _edit_file()
-
-
-def list_files():
-    """List the files the sandbox working directory holds."""
-    from inspect_ai.tool import Tool, tool
-
-    @tool(name="list_files")
-    def _list_files() -> Tool:
-        async def execute() -> str:
-            """List every file in the working directory, recursively.
-
-            Returns:
-                One relative path per line.
-            """
-            try:
-                paths = await list_paths()
-            except ListingFailed as exc:
-                return f"could not list the directory: {exc}"
-            return "\n".join(paths) if paths else "(no files)"
-
-        return execute
-
-    return _list_files()
-
-
-def toolset() -> list:
-    """The tools a behavioral run gives the agent.
-
-    inspect's `think()` is reused as-is -- it never touches the sandbox, so it
-    is already platform-neutral. Its `bash()`, `text_editor()`, `list_files()`
-    and `grep()` are the ones replaced above.
-    """
-    from inspect_ai.tool import think
-
-    return [shell(), write_file(), edit_file(), list_files(), think()]

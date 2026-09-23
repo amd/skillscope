@@ -44,16 +44,17 @@ jobs:
       - name: Run the suite
         run: python -m unittest discover -s tests -t . --verbose
 
-  engine:
-    name: Inspect engine (${{ matrix.os }})
+  sandbox:
+    name: Sandbox machinery (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Both sandboxes a run can get. Ubuntu has Docker, which is the default
-        # and what CI uses; Windows has none, which is the other supported
-        # shape. The Windows leg is the only place the cross-platform tools are
-        # exercised at all -- inspect's own assume a POSIX guest.
+        # Both sandboxes a run can get. Ubuntu has Docker, which is the
+        # default and what CI uses; Windows has none, which is the other
+        # supported shape. The Windows leg is the only place the cross-platform
+        # sandbox helpers are exercised at all -- inspect's own assume a POSIX
+        # guest, and a scorer that cannot list the guest cannot grade it.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -70,11 +71,11 @@ jobs:
       - name: Install with the inspect extra
         run: python -m pip install --upgrade pip && python -m pip install ".[inspect]"
 
-      # `mockllm` reaches no provider, so this needs no key and runs on a pull
-      # request from a fork. It cannot tell us whether a skill is any good --
-      # the mock does no work and every judged expectation fails. What it does
-      # tell us is whether the machinery around the model still holds together
-      # on both platforms, which is where every bug so far has been.
+      # The case seeds a file and expects that same file. Nothing an agent
+      # does can satisfy it and nothing an agent does can break it, so what
+      # passes or fails is the layer underneath: the sandbox started, the
+      # fixture was staged into it, the guest was listed, and the listing was
+      # matched. That is where every cross-platform bug so far has been.
       - name: Build a repo to test
         shell: bash
         run: |
@@ -101,58 +102,12 @@ jobs:
           }
           EOF
 
-      # `SKILLSCOPE_REPO` rather than `working-directory`, because a `--skills-dir`
-      # glob that was passed is resolved against the repo root and `find_root`
-      # takes that from the nearest `.git`. Running from a subdirectory of a
-      # checkout would therefore still glob the checkout. Same thing `repo:`
-      # does for the action.
-      #
-      # Exits non-zero because the mock satisfies nothing; the report is the
-      # artifact under test, not the exit code.
-      - name: Grade the fixture on the inspect engine
-        continue-on-error: true
-        env:
-          SKILLSCOPE_REPO: fixture
-        run: >
-          python -m skillscope behavioral --engine inspect
-          --model mockllm/model --skills-dir '*' --skill demo-skill
-          --output engine-report.json
-
-      - name: Check the machinery held
-        shell: python
-        env:
-          EXPECTED_SANDBOX: ${{ matrix.os == 'windows-latest' && 'local' || 'docker' }}
-        run: |
-          import json
-          import os
-
-          report = json.load(open("engine-report.json", encoding="utf-8"))
-          meta, totals = report["meta"], report["totals"]
-          print(json.dumps(meta, indent=2))
-
-          # An infrastructure failure is not a graded result. This is what
-          # catches a sandbox that would not start.
-          assert totals["errors"] == 0, report["cases"]
-
-          expected = os.environ["EXPECTED_SANDBOX"]
-          assert meta["sandbox"] == expected, f"ran in {meta['sandbox']!r}, wanted {expected!r}"
-
-          checks = [c for case in report["cases"] for c in case["checks"]]
-          assert checks, "nothing was graded, so nothing was proven"
-
-          # A sandbox that cannot be listed reports the same shape as an agent
-          # that produced nothing, so the difference is asserted explicitly.
-          broken = [c for c in checks if "could not list the sandbox" in (c["detail"] or "")]
-          assert not broken, broken
-
-          # The seeded file exists because the case put it there, not because
-          # the mock did anything. It passing proves the whole path: the fixture
-          # was staged into the working directory, the directory was listed, and
-          # the listing was matched against what the case asked for.
-          seeded = [c for c in checks if c["kind"] == "files_exist"]
-          assert seeded, "the seeded-file check did not run"
-          assert all(c["passed"] for c in seeded), seeded
-          print(f"{len(checks)} checks graded, seeded fixture found, sandbox {expected}.")
+      # No key, no model, no agent: a stub solver stands in for the agent so
+      # only the machinery beneath it can pass the case. That is what makes
+      # this runnable on a pull request from a fork, which is exactly where a
+      # cross-platform sandbox bug shows up.
+      - name: Exercise the sandbox, the staging and the listing
+        run: python tools/sandbox_smoketest.py fixture --skill demo-skill
 
   action:
     name: Action against a throwaway repo

@@ -2,7 +2,12 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Behavioral evals on the inspect engine.
+"""Behavioral evals under `inspect_ai`.
+
+Shared by every engine that runs on the framework: the task, the scorer, the
+sandbox and the reporting live here, and the caller supplies the solver that
+drives the agent. `claude-cli` passes one; `claude-code` builds its own task in
+`verify.py` because `inspect_swe` supplies the whole agent rather than a solver.
 
 `run()` matches `behavior.run()` -- same arguments, same `BehaviorOutcome`
 list -- so swapping engines is a one-line substitution in the CLI and every
@@ -17,7 +22,7 @@ from pathlib import Path
 from .. import agent, config, deadline, usage
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
-from . import convert, models, sandbox as sandbox_spec, scorers, stats, tools
+from . import convert, models, sandbox as sandbox_spec, scorers, stats
 
 # An agent that never decides it is finished must still stop. The legacy engine
 # bounded this with `--case-timeout` and a process kill; inspect expresses it
@@ -73,52 +78,26 @@ def message_limit_for(model: str) -> int:
     return MESSAGE_LIMIT
 
 
-def _tools(skill_dir: Path) -> list:
-    """Tools the agent gets for a behavioral run.
-
-    The skill under test, plus the cross-platform set from `engine/tools.py` --
-    inspect's own `bash()` and `text_editor()` assume a POSIX guest, which the
-    Windows legs do not have.
-    """
-    from inspect_ai.tool import skill
-
-    return [skill([skill_dir]), *tools.toolset()]
-
-
-def _prompt() -> str | None:
-    """Tell the agent where its work belongs, when that is not obvious.
-
-    A container sandbox starts at `/`, and an agent left to guess reasonably
-    tries `/app`, then `~`, and scatters its output. What a case produced then
-    depends on where the agent happened to `cd`, which is not something the
-    dataset should have to predict.
-    """
-    if not tools.containerized():
-        return None
-    return (
-        f"Your working directory is {tools.WORKDIR}. Create and edit files "
-        "there, using paths relative to it, so the work you produce can be "
-        "found afterwards."
-    )
-
-
 def build_task(
     skill: str,
     cases: list[Case],
     model: str,
     ctx: dict | None = None,
-    solver_factory=None,
+    *,
+    solver_factory,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
-    `solver_factory` swaps what drives the agent while everything around it --
-    scoring, judging, reporting -- stays the same. It receives the skill's
-    directory because staging is the driver's job: the react agent installs the
-    skill through inspect's `skill()` tool, and a solver that replaces the react
-    agent replaces that too.
+    `solver_factory` is what drives the agent; everything around it -- scoring,
+    judging, reporting -- stays the same whichever one is passed. It receives
+    the skill's directory because staging is the driver's job: each driver puts
+    the skill where the agent it runs will look for it.
+
+    Required, and keyword-only. It was optional while a built-in react agent
+    was the default, and a caller that forgot it silently graded a different
+    agent than it asked for.
     """
     from inspect_ai import Task
-    from inspect_ai.agent import react
 
     skill_dir = config.active().skill_path(skill)
     samples = [convert.sample_from_case(c, skill_dir, ctx) for c in cases]
@@ -127,11 +106,7 @@ def build_task(
     return Task(
         name=f"behavioral-{skill}",
         dataset=samples,
-        solver=(
-            solver_factory(skill_dir)
-            if solver_factory
-            else react(prompt=_prompt(), tools=_tools(skill_dir))
-        ),
+        solver=solver_factory(skill_dir),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=message_limit_for(model),
@@ -200,7 +175,8 @@ def run(
     cases: list[Case],
     model: str,
     effort: str,
-    solver_factory=None,
+    *,
+    solver_factory,
 ) -> list[BehaviorOutcome]:
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
     from inspect_ai import eval as inspect_eval

@@ -20,9 +20,9 @@ authors = [{ name = "Advanced Micro Devices, Inc." }]
 # evals/machine.yml, which only CI planning touches.
 dependencies = ["pyyaml>=6.0"]
 
-# The inspect-backed engine (`--engine inspect`). Kept an extra so the default
-# path keeps the stdlib-only property while both engines are shipped: a repo
-# that has not migrated installs nothing new.
+# The engines built on inspect_ai (`--engine claude-code`, `--engine
+# claude-cli`). Kept an extra so the default path keeps the stdlib-only
+# property: a repo that has not migrated installs nothing new.
 [project.optional-dependencies]
 # `anthropic` is listed explicitly: inspect-ai treats every model provider as
 # optional, so installing it alone gets you a harness that cannot reach a model.

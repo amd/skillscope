@@ -2,11 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""The inspect-backed eval engine (``--engine inspect``).
+"""The eval engines built on ``inspect_ai``.
 
-The legacy engine drives the `claude` CLI directly; this one hands the work to
-`inspect_ai`. Both produce the same outcome objects, so everything downstream --
-`summarize`, `render_markdown`, the report writers -- is shared.
+The legacy engine drives the `claude` CLI directly; these hand the work to
+`inspect_ai` -- ``claude-code`` runs the CLI inside the sandbox through
+`inspect_swe`, ``claude-cli`` runs it on the host. All of them produce the same
+outcome objects, so everything downstream -- `summarize`, `render_markdown`,
+the report writers -- is shared.
 
 `inspect_ai` is an optional dependency, so nothing here is imported at module
 scope by the rest of the package. Call `require()` before touching a submodule

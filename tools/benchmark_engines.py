@@ -21,14 +21,15 @@ is measured is what CI executes.
 
     tools/benchmark_engines.py routing --routing-room my-skill --noise
     tools/benchmark_engines.py behavioral --skill my-skill
-    tools/benchmark_engines.py --compare legacy.json inspect.json
+    tools/benchmark_engines.py --compare legacy.json candidate.json
 
 Which pair is compared is an argument, because the question changes over the
-migration. `legacy` against `inspect` asks whether a different agent reaches
-the same verdicts. `legacy` against `claude-cli` asks something narrower and
-sharper: both drive the same CLI, so agreement there says the framework around
-the agent is faithful, and disagreement is a defect in the crossing rather than
-a property of a different agent.
+migration. `legacy` against `claude-cli` asks the narrow, sharp question: both
+drive the same CLI, so agreement says the framework around the agent is
+faithful, and disagreement is a defect in the crossing rather than a property
+of a different agent. `claude-cli` against `claude-code` asks the other one --
+same agent, host against container, which is where a contaminated runner shows
+up as a disagreement neither engine could find alone.
 
     tools/benchmark_engines.py behavioral --candidate claude-cli --skill my-skill
 """
@@ -136,8 +137,8 @@ def _spend_caveats(spend: dict) -> list[str]:
     are not: the legacy engine reads them from assistant events, which exclude
     the system prompt and cached input, and a routing case is killed before the
     totals arrive -- so its figure is a floor, not a total. Cost is the legacy
-    engine's trustworthy number, and inspect only has one when the provider
-    supplies pricing, which a gateway generally does not.
+    engine's trustworthy number, and the inspect_ai-backed engines only have
+    one when the provider supplies pricing, which a gateway generally does not.
     """
     engines = {spend[label]["engine"] for label in ("baseline", "candidate")}
     notes = []
@@ -149,7 +150,8 @@ def _spend_caveats(spend: dict) -> list[str]:
         )
     if any(spend[label]["cost_usd"] is None for label in ("baseline", "candidate")):
         notes.append(
-            "> One engine reported no cost -- the inspect engines only have one "
+            "> One engine reported no cost -- the inspect_ai-backed engines only "
+            "have one "
             "when the model provider supplies pricing, which a gateway generally "
             "does not. Wall time and model calls are comparable on both sides; "
             "model calls in particular is the like-for-like measure of how "
@@ -225,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--compare",
         nargs=2,
-        metavar=("LEGACY", "INSPECT"),
+        metavar=("BASELINE", "CANDIDATE"),
         help="Compare two reports that already exist instead of running the legs.",
     )
     parser.add_argument(
@@ -236,9 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--candidate",
-        default="inspect",
+        default="claude-cli",
         choices=ENGINES,
-        help="The engine under test. Default: inspect.",
+        help="The engine under test. Default: claude-cli.",
     )
     parser.add_argument(
         "--noise",
@@ -273,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         "noise": noise,
         "spend": {
             "baseline": spend(baseline, getattr(args, "baseline", "legacy")),
-            "candidate": spend(candidate, getattr(args, "candidate", "inspect")),
+            "candidate": spend(candidate, getattr(args, "candidate", "claude-cli")),
         },
     }
 
