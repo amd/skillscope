@@ -53,7 +53,7 @@ from skillscope import (
 from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 from skillscope.engine import behavioral as engine_behavioral
-from skillscope.engine import cli_agent as engine_cli_agent
+from skillscope.engine import no_sandbox as engine_no_sandbox
 from skillscope.engine import judge as engine_judge
 from skillscope.engine import models as engine_models
 from skillscope.engine import sandbox as engine_sandbox
@@ -2659,7 +2659,7 @@ class TestEngineWorkdirPath(unittest.TestCase):
         self.assertIsNone(engine_tools.workdir_path())
 
 
-class TestEngineCliAgentInstallsSkill(unittest.TestCase):
+class TestEngineNoSandboxInstallsSkill(unittest.TestCase):
     """A driver that replaces the react agent must stage the skill itself.
 
     It did not, so the CLI ran with no skill and answered from the prompt
@@ -2676,7 +2676,7 @@ class TestEngineCliAgentInstallsSkill(unittest.TestCase):
             workspace = Path(tmp) / "ws"
             workspace.mkdir()
 
-            engine_cli_agent.install_skill(src, str(workspace))
+            engine_no_sandbox.install_skill(src, str(workspace))
 
             staged = workspace / ".claude" / "skills" / "my-skill"
             self.assertTrue((staged / "SKILL.md").is_file())
@@ -2758,7 +2758,7 @@ class TestShellPrefixProbe(unittest.TestCase):
         self.assertEqual(self._probe(None), engine_tools.POSIX_SHELL)
 
 
-class TestEngineCliAgentGuard(unittest.TestCase):
+class TestEngineNoSandboxGuard(unittest.TestCase):
     """The CLI runs on the host, so the sandbox has to be the host."""
 
     def setUp(self) -> None:
@@ -2770,7 +2770,7 @@ class TestEngineCliAgentGuard(unittest.TestCase):
         # reason nothing in the report explains.
         os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
         with self.assertRaises(SystemExit) as caught:
-            engine_cli_agent.require_local()
+            engine_no_sandbox.require_local()
         message = str(caught.exception)
         self.assertIn("podman", message)
         self.assertIn("--engine claude-code", message)
@@ -3255,7 +3255,7 @@ class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):
         cli._prepare_graded_run(self.args(engine))
         return self.probed
 
-    def test_claude_cli_probes_the_cli_as_well_as_the_provider(self) -> None:
+    def test_it_probes_the_cli_as_well_as_the_provider(self) -> None:
         self.assertEqual(sorted(self.run_preflight("claude-code-no-sandbox")), ["cli", "provider"])
 
     def test_a_sandboxed_engine_probes_only_the_provider(self) -> None:

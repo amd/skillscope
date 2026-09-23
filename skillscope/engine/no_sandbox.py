@@ -10,12 +10,10 @@ all. This runs the CLI on the host instead, the way the legacy engine does, and
 maps what it did into inspect's messages so the scorers, the judge and the
 `.eval` transcript all work unchanged.
 
-The point is fidelity. A skill is written for this harness, and an eval that
-grades a different agent is measuring something customers will not experience --
-which matters most for routing, where the whole question is what fires. So the
-real harness runs everywhere, and only the isolation differs by platform:
-`inspect_swe` in a container on Linux, this on Windows, where inspect's sandbox
-layer assumes a POSIX guest whichever agent drives it.
+The point is fidelity. A skill is written for this harness, so the real harness
+runs everywhere and only the isolation differs: `inspect_swe` in a container on
+Linux, this on any platform -- and on Windows this is the only option, because
+inspect's sandbox layer assumes a POSIX guest whichever agent drives it.
 
 Unsandboxed by construction: the CLI runs on the host, in the sample's own
 working directory. That is what the legacy engine already does, so it is not a
@@ -122,13 +120,13 @@ def install_skill(skill_dir: Path, workspace: str) -> None:
     shutil.copytree(skill_dir, dest, dirs_exist_ok=True)
 
 
-def claude_cli(model: str | None, effort: str | None, skill_dir: Path):
+def claude_code_no_sandbox(model: str | None, effort: str | None, skill_dir: Path):
     """Solver: install the skill, run the real CLI once, record what it did."""
     from inspect_ai.model import ModelOutput
     from inspect_ai.solver import solver
 
     @solver
-    def _claude_cli():
+    def _claude_code_no_sandbox():
         async def solve(state, generate):
             from inspect_ai.util import subprocess as sandbox_subprocess
 
@@ -179,4 +177,4 @@ def claude_cli(model: str | None, effort: str | None, skill_dir: Path):
 
         return solve
 
-    return _claude_cli()
+    return _claude_code_no_sandbox()

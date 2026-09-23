@@ -593,15 +593,15 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
             # The real CLI, driven on the host, inside inspect's framework.
             # `--model` stays the CLI's own alias here: this one does not go
             # through an inspect model provider.
-            from .engine import cli_agent
+            from .engine import no_sandbox
 
-            cli_agent.require_local()
+            no_sandbox.require_local()
             outcomes = inspect_behavioral.run(
                 skills,
                 gradable,
                 engine_models.resolve(args.model),
                 args.effort,
-                solver_factory=lambda d: cli_agent.claude_cli(
+                solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
                     args.model, args.effort, d
                 ),
             )
