@@ -55,9 +55,16 @@ name: reusable
 # could only see one skill would have to miss.
 #
 # The caller maps one secret onto `api_key`, so this workflow never learns
-# your provider, your gateway, or anything else in the vault. `secrets: inherit`
-# still works if you would rather pass the vault and name the key with
-# `api_key_secret`; it is more than this workflow needs.
+# anything else in the vault. `secrets: inherit` still works if you would rather
+# pass the vault and name the key with `api_key_secret`; it is more than this
+# workflow needs. A key issued by a gateway rather than the provider also needs
+# `api_base_url`, and `api_custom_headers` if the gateway reads the key from a
+# header of its own:
+#
+#       with:
+#         api_base_url: https://gateway.example.com/anthropic
+#         api_custom_headers: |
+#           Ocp-Apim-Subscription-Key: $API_KEY
 #
 # The `uses:` pin on this workflow is the harness that runs. GitHub does not
 # let a reusable workflow interpolate that pin into `uses: amd/skillscope@...`,
@@ -113,6 +120,20 @@ on:
           Blank means the runner is already authenticated and no key is exported.
         type: string
         default: ANTHROPIC_API_KEY
+      api_base_url:
+        description: >-
+          ANTHROPIC_BASE_URL for the routing and behavioral legs, for a key that
+          belongs to a gateway rather than to the provider. Blank uses the
+          provider default.
+        type: string
+        default: ""
+      api_custom_headers:
+        description: >-
+          ANTHROPIC_CUSTOM_HEADERS for the routing and behavioral legs, one
+          `Name: value` per line. `$API_KEY` is replaced with the key, so a
+          gateway that wants the key in its own header needs no second secret.
+        type: string
+        default: ""
 
     secrets:
       api_key:
@@ -298,17 +319,28 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .skillscope-action
 
-      - name: Check the model credentials
+      - name: Resolve the model credentials
         shell: python
         env:
           EXPECT_KEY: ${{ inputs.routing != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
         run: |
           import os
+          import subprocess
           import sys
 
+          gateway = os.environ["API_BASE_URL"].strip() or os.environ["API_CUSTOM_HEADERS"].strip()
           if os.environ.get("EXPECT_KEY") != "true":
+              if gateway:
+                  sys.exit(
+                      "error: api_base_url and api_custom_headers are for a "
+                      "gateway key, but no key is configured. Map the key onto "
+                      "'api_key', or name it with 'api_key_secret'."
+                  )
               sys.exit(0)
-          if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+          key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+          if not key:
               sys.exit(
                   "error: the model API key resolved to an empty value. GitHub "
                   "withholds secrets from pull requests opened from a fork, so "
@@ -316,6 +348,15 @@ jobs:
                   "that the secret is set and that the caller maps it onto "
                   "'api_key' (or passes 'secrets: inherit')."
               )
+          if not gateway:
+              sys.exit(0)
+
+          # Exports the base URL, and the headers with `$API_KEY` filled in.
+          completed = subprocess.run(
+              [sys.executable, ".skillscope-action/skillscope/credentials.py"],
+              env={**os.environ, "API_KEY": key},
+          )
+          raise SystemExit(completed.returncode)
 
       - name: Run the routing eval for ${{ matrix.skill }}
         uses: ./.skillscope-action
@@ -371,17 +412,28 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .skillscope-action
 
-      - name: Check the model credentials
+      - name: Resolve the model credentials
         shell: python
         env:
           EXPECT_KEY: ${{ inputs.behavioral != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
+          API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
         run: |
           import os
+          import subprocess
           import sys
 
+          gateway = os.environ["API_BASE_URL"].strip() or os.environ["API_CUSTOM_HEADERS"].strip()
           if os.environ.get("EXPECT_KEY") != "true":
+              if gateway:
+                  sys.exit(
+                      "error: api_base_url and api_custom_headers are for a "
+                      "gateway key, but no key is configured. Map the key onto "
+                      "'api_key', or name it with 'api_key_secret'."
+                  )
               sys.exit(0)
-          if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+          key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+          if not key:
               sys.exit(
                   "error: the model API key resolved to an empty value. GitHub "
                   "withholds secrets from pull requests opened from a fork, so "
@@ -389,6 +441,15 @@ jobs:
                   "that the secret is set and that the caller maps it onto "
                   "'api_key' (or passes 'secrets: inherit')."
               )
+          if not gateway:
+              sys.exit(0)
+
+          # Exports the base URL, and the headers with `$API_KEY` filled in.
+          completed = subprocess.run(
+              [sys.executable, ".skillscope-action/skillscope/credentials.py"],
+              env={**os.environ, "API_KEY": key},
+          )
+          raise SystemExit(completed.returncode)
 
       - name: Run the behavioral cases for ${{ matrix.skill }}
         uses: ./.skillscope-action
