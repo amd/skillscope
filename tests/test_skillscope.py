@@ -3311,6 +3311,24 @@ class TestTheTranscriptIsReadTooNotJustTheMessages(unittest.TestCase):
         self.assertIsNone(engine_routing._observe(sample, self.ROOM)[0])
         self.assertTrue(engine_routing._spoke(sample))
 
+    class Limit:
+        def __init__(self, type):
+            self.type = type
+
+    def test_a_sample_that_hit_a_limit_counts_as_having_run(self) -> None:
+        # When the message cap trips, what survives on the sample can be the
+        # prompt and nothing else. Calling that "never ran" is wrong and the
+        # opposite of useful: an agent that spent its whole budget without
+        # reaching for a skill is the clearest kind of missed trigger, which
+        # is how legacy grades its own `tool_budget` stop.
+        sample = self.Sample(messages=[self.Msg(role="user")])
+        sample.limit = self.Limit("message")
+        self.assertTrue(engine_routing._spoke(sample))
+
+    def test_a_prompt_with_no_limit_and_no_reply_still_never_ran(self) -> None:
+        sample = self.Sample(messages=[self.Msg(role="user")])
+        self.assertFalse(engine_routing._spoke(sample))
+
     def test_a_sample_with_neither_record_never_ran(self) -> None:
         # Preserved: this is the infrastructure failure the guard exists for,
         # and grading it as a miss would invent a routing result.

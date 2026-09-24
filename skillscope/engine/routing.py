@@ -349,7 +349,17 @@ def _spoke(sample) -> bool:
     bridged agent's conversation does not always land in `sample.messages`, and
     reading only that one graded a quarter of a real run as infrastructure
     failures.
+
+    A sample that hit a limit also ran, whatever survived of it. When the
+    message cap trips, what is left on the sample can be the prompt and
+    nothing else -- and calling that "the agent never ran" is both wrong and
+    the opposite of useful, because an agent that spent its whole budget
+    without reaching for a skill is the clearest kind of missed trigger. The
+    legacy engine draws the same line: `tool_budget` is a verdict there, not
+    an error.
     """
+    if getattr(sample, "limit", None) is not None:
+        return True
     return any(True for _ in _assistant_messages(sample))
 
 
