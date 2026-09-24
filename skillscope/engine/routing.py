@@ -705,21 +705,23 @@ def activation_from_limit(reason: str | None, room: list[str]) -> str | None:
 # How much more orientation a sandboxed run needs before it is rummaging.
 #
 # The budget asks one question -- is this agent still choosing, or has it
-# started work? -- and the answer depends on the environment. Measured over one
-# 67-case room: `legacy` averages 0.58 tool calls before it decides and peaks
-# at 4; the same agent in a container averages 2.46 and peaks at 10. It is not
-# worse at routing, it is orienting in a filesystem it has never seen.
+# started work? -- so the only statistic that can calibrate it is how many
+# calls a case makes *before it decides*. Measured over one 67-case room, on
+# the 39 sandboxed cases that reached a decision: 32 called the skill tool
+# first, with no preamble at all. Mean 0.31, median 0, peak 4.
 #
-# Against a flat cap of 4 that put 24 of 67 sandboxed cases within one call of
-# the threshold, so a third of the run was measuring the budget rather than the
-# agent -- and the leg then scored lower for it. A comparison whose engines are
-# held to the same number while doing different amounts of unavoidable work is
-# unfair by construction, and no amount of repetition fixes that.
+# An earlier revision put this at three on a mean of 2.46, which was two
+# populations added together: cases that decide immediately, and cases that
+# never find a skill and rummage until something stops them. Only the second
+# group is near the threshold, and more budget cannot rescue it -- those cases
+# score `no_activation` whether they are cut off at four calls or forty. The
+# scaling bought no accuracy and spent real money doing it.
 #
-# Three, because it clears the observed peak of 10 with room to spare while
-# still stopping an agent that is genuinely rummaging. Calibrate it again if
-# the room or the image changes; it is a measurement, not a constant of nature.
-SANDBOX_BUDGET_FACTOR = 3
+# Two, then: double the observed peak, which is headroom for a case that
+# orients before committing without funding one that is lost. The distribution
+# decays steeply enough (32 / 5 / 1 / 1) that the tail past four is thin.
+# Re-measure if the room or the image changes; it is not a constant of nature.
+SANDBOX_BUDGET_FACTOR = 2
 
 
 def budget_for(engine: str, cap: int | None) -> int | None:

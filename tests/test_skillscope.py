@@ -3487,18 +3487,19 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
 
 
 class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):
-    """The same cap means different things to engines doing different work.
+    """The cap exists to catch an agent that started working, not one thinking.
 
-    Measured over one 67-case room: `legacy` averages 0.58 tool calls before
-    it decides and peaks at 4; the same agent in a container averages 2.46 and
-    peaks at 10, because it is orienting in a filesystem it has never seen. It
-    is not worse at routing.
+    So it is calibrated on calls made *before a decision*, which is the only
+    span it can meaningfully cut short. Measured over one 67-case room, on the
+    39 sandboxed cases that decided: 32 called the skill tool first with no
+    preamble, mean 0.31, peak 4.
 
-    Held to a flat cap of 4, that put 24 of 67 sandboxed cases within one call
-    of the threshold -- a third of the run measuring the budget rather than the
-    agent, and the leg scoring lower for it. Two engines judged by one number
-    while doing different amounts of unavoidable work is unfair by
-    construction, and repeating the run only measures the bias more precisely.
+    An earlier revision read a mean of 2.46 off the same run and scaled by
+    three. That mean summed two populations -- cases that decide at once, and
+    cases that never find a skill and rummage until stopped. Only the second
+    sits near the threshold, and budget cannot rescue it: those score
+    `no_activation` at four calls or at forty. Headroom over the decision peak
+    is the thing worth buying; headroom over the rummaging is just spend.
     """
 
     def test_a_host_leg_is_held_to_the_cap_as_given(self) -> None:
@@ -3510,10 +3511,18 @@ class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):
         scaled = engine_routing.budget_for("claude-code", 4)
         self.assertEqual(scaled, 4 * engine_routing.SANDBOX_BUDGET_FACTOR)
 
-    def test_the_scaled_cap_clears_what_was_actually_observed(self) -> None:
-        # The peak measured on the sandboxed leg was 10 calls. A cap it cannot
-        # clear is the bug this fixes, not a stricter version of it.
-        self.assertGreater(engine_routing.budget_for("claude-code", 4), 10)
+    def test_the_scaled_cap_clears_the_observed_decision_peak(self) -> None:
+        # The slowest sandboxed case to decide took 4 calls. A cap that cannot
+        # clear that discards real activations, which is the bug being fixed.
+        self.assertGreater(engine_routing.budget_for("claude-code", 4), 4)
+
+    def test_the_headroom_is_proportionate_to_what_was_measured(self) -> None:
+        # Guards the other direction, which is the mistake that was made: a cap
+        # far above the decision peak only funds cases that will not activate.
+        observed_peak = 4
+        self.assertLessEqual(
+            engine_routing.budget_for("claude-code", 4), observed_peak * 2
+        )
 
     def test_the_callers_intent_survives_the_scaling(self) -> None:
         # Asking for a tighter budget still means tighter, on every leg.
