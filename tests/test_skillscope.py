@@ -3616,6 +3616,37 @@ class TestRoutingStopsAtTheDecision(unittest.TestCase):
     def test_ordinary_work_is_allowed_through(self) -> None:
         self.assertEqual(self.decide("Bash", {"command": "ls"})[0], "approve")
 
+    def test_a_skills_survey_spends_the_inspection_budget_not_the_work_one(self) -> None:
+        # Legacy's rule, and it matters: counting a survey against the work
+        # budget too ends a run mid-deliberation and scores it as a missed
+        # trigger. Observed doing exactly that on a real sandboxed run.
+        tally = engine_routing._Tally()
+        self.decide("Read", {"file_path": "/w/.claude/skills/alpha/SKILL.md"}, tally, 4, 8)
+        self.assertEqual((tally.tools, tally.inspections), (0, 1))
+
+    def test_unrelated_work_spends_the_work_budget(self) -> None:
+        tally = engine_routing._Tally()
+        self.decide("Bash", {"command": "pip install torch"}, tally, 4, 8)
+        self.assertEqual((tally.tools, tally.inspections), (1, 0))
+
+    def test_bookkeeping_spends_neither(self) -> None:
+        tally = engine_routing._Tally()
+        for name in sorted(routing.BOOKKEEPING_TOOLS):
+            self.decide(name, {}, tally, 4, 8)
+        self.assertEqual((tally.tools, tally.inspections), (0, 0))
+
+    def test_the_budget_is_counted_per_case_not_per_run(self) -> None:
+        # An approver is built once per task. A counter captured there counts
+        # every case in the run, creeping up until it crosses the budget and
+        # then terminating any case that makes a counted call before choosing.
+        # Seen as four cases terminated at tallies of 10, 11, 12 and 13 --
+        # consecutive across different prompts.
+        self.assertIn("store()", inspect.getsource(engine_routing.routing_approver))
+        self.assertNotIn(
+            "tally = _Tally()\n\n    @approver",
+            inspect.getsource(engine_routing.routing_approver),
+        )
+
     def test_the_tool_call_budget_stops_a_case_that_is_rummaging(self) -> None:
         tally = engine_routing._Tally()
         decisions = [

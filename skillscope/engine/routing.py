@@ -538,6 +538,11 @@ def _solver(
 # very tool call that revealed the decision may not be there afterwards. Two
 # sources, one of which cannot go missing.
 ACTIVATION_MARK = "skillscope-activated:"
+
+# Where the per-sample tally lives. inspect's store is scoped to the sample,
+# which is the scope a per-case budget needs.
+TOOLS_SEEN = "skillscope_routing_tools"
+INSPECTIONS_SEEN = "skillscope_routing_inspections"
 BUDGET_MARK = "skillscope-budget:"
 
 
@@ -576,10 +581,18 @@ def routing_decision(
         # The decision. Everything after it is paid for and unread.
         return "terminate", f"{ACTIVATION_MARK}{hit}"
 
+    # Bookkeeping is free, a survey of the installed skills spends the
+    # inspection budget, and anything else is the agent starting work. The
+    # three are exclusive, exactly as the legacy engine has them: counting a
+    # survey against the work budget too is what ends a run mid-deliberation
+    # and scores it as a missed trigger.
     if (function or "").lower() not in routing_core.BOOKKEEPING_TOOLS:
-        tally.tools += 1
-    if routing_core._is_skills_inspection(function, json.dumps(arguments or {})):
-        tally.inspections += 1
+        if routing_core._is_skills_inspection(
+            json.dumps(arguments or {}, ensure_ascii=False), room
+        ):
+            tally.inspections += 1
+        else:
+            tally.tools += 1
 
     over = (max_tool_calls is not None and tally.tools > max_tool_calls) or (
         max_inspection_calls is not None and tally.inspections > max_inspection_calls
@@ -611,16 +624,31 @@ def routing_approver(
     while there is still a run to stop.
     """
     from inspect_ai.approval import Approval, approver
-
-    tally = _Tally()
+    from inspect_ai.util import store
 
     @approver
     def _routing():
         async def approve(message, call, view, history) -> Approval:
+            # Per sample, not per approver. An approver is built once for the
+            # task, so a counter captured here counts every case in the run:
+            # it creeps up until it crosses the budget and then terminates any
+            # case that makes a counted call before reaching for a skill.
+            #
+            # Observed exactly that way -- four cases in one run terminated at
+            # tallies of 10, 11, 12 and 13, consecutive across different
+            # prompts, which is what a shared counter looks like from outside.
+            # inspect's store is scoped to the sample, so this is per case.
+            tally = _Tally()
+            tally.tools = store().get(TOOLS_SEEN, 0)
+            tally.inspections = store().get(INSPECTIONS_SEEN, 0)
+
             decision, reason = routing_decision(
                 call.function, call.arguments or {}, room,
                 tally, max_tool_calls, max_inspection_calls,
             )
+
+            store().set(TOOLS_SEEN, tally.tools)
+            store().set(INSPECTIONS_SEEN, tally.inspections)
             return Approval(decision=decision, explanation=reason)
 
         return approve
