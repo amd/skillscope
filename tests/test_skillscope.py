@@ -3486,6 +3486,53 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
                 self.assertNotIn("load_hooks", inspect.getsource(module))
 
 
+class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):
+    """The same cap means different things to engines doing different work.
+
+    Measured over one 67-case room: `legacy` averages 0.58 tool calls before
+    it decides and peaks at 4; the same agent in a container averages 2.46 and
+    peaks at 10, because it is orienting in a filesystem it has never seen. It
+    is not worse at routing.
+
+    Held to a flat cap of 4, that put 24 of 67 sandboxed cases within one call
+    of the threshold -- a third of the run measuring the budget rather than the
+    agent, and the leg scoring lower for it. Two engines judged by one number
+    while doing different amounts of unavoidable work is unfair by
+    construction, and repeating the run only measures the bias more precisely.
+    """
+
+    def test_a_host_leg_is_held_to_the_cap_as_given(self) -> None:
+        for engine in ("legacy", "claude-code-no-sandbox"):
+            with self.subTest(engine=engine):
+                self.assertEqual(engine_routing.budget_for(engine, 4), 4)
+
+    def test_the_sandboxed_leg_gets_room_to_orient(self) -> None:
+        scaled = engine_routing.budget_for("claude-code", 4)
+        self.assertEqual(scaled, 4 * engine_routing.SANDBOX_BUDGET_FACTOR)
+
+    def test_the_scaled_cap_clears_what_was_actually_observed(self) -> None:
+        # The peak measured on the sandboxed leg was 10 calls. A cap it cannot
+        # clear is the bug this fixes, not a stricter version of it.
+        self.assertGreater(engine_routing.budget_for("claude-code", 4), 10)
+
+    def test_the_callers_intent_survives_the_scaling(self) -> None:
+        # Asking for a tighter budget still means tighter, on every leg.
+        self.assertLess(
+            engine_routing.budget_for("claude-code", 2),
+            engine_routing.budget_for("claude-code", 4),
+        )
+
+    def test_no_cap_stays_no_cap(self) -> None:
+        for cap in (None, 0):
+            with self.subTest(cap=cap):
+                self.assertEqual(engine_routing.budget_for("claude-code", cap), cap)
+
+    def test_the_report_states_the_cap_that_was_enforced(self) -> None:
+        # Otherwise `near_limit` counts against a threshold that never applied.
+        source = inspect.getsource(cli.cmd_routing)
+        self.assertIn("budget_for(", source)
+
+
 class TestCasesDecidedByTheBudgetAreFlagged(unittest.TestCase):
     """A case that stopped on its cap measured the cap, not the agent.
 

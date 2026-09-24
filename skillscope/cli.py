@@ -570,8 +570,17 @@ def cmd_routing(args: argparse.Namespace) -> int:
         # recorded there would be a cap that never bit.
         extra: dict = {"case_timeout": args.case_timeout}
         if args.engine == "claude-code":
-            extra["max_tool_calls"] = args.max_tool_calls
-            extra["max_inspection_calls"] = args.max_inspection_calls
+            # The cap that was enforced, not the one asked for. A sandboxed
+            # run is held to a scaled budget because it needs more calls to
+            # orient, and reporting the request would make `near_limit` count
+            # against a threshold that never applied.
+            extra["max_tool_calls"] = inspect_routing.budget_for(
+                args.engine, args.max_tool_calls
+            )
+            extra["max_inspection_calls"] = inspect_routing.budget_for(
+                args.engine, args.max_inspection_calls
+            )
+            extra["budget_scaled_by"] = inspect_routing.SANDBOX_BUDGET_FACTOR
         else:
             # The CLI's own cap, passed through and only when the build
             # advertises it -- so this records what was actually enforced.

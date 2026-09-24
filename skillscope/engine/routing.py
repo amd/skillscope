@@ -702,6 +702,38 @@ def activation_from_limit(reason: str | None, room: list[str]) -> str | None:
     return None
 
 
+# How much more orientation a sandboxed run needs before it is rummaging.
+#
+# The budget asks one question -- is this agent still choosing, or has it
+# started work? -- and the answer depends on the environment. Measured over one
+# 67-case room: `legacy` averages 0.58 tool calls before it decides and peaks
+# at 4; the same agent in a container averages 2.46 and peaks at 10. It is not
+# worse at routing, it is orienting in a filesystem it has never seen.
+#
+# Against a flat cap of 4 that put 24 of 67 sandboxed cases within one call of
+# the threshold, so a third of the run was measuring the budget rather than the
+# agent -- and the leg then scored lower for it. A comparison whose engines are
+# held to the same number while doing different amounts of unavoidable work is
+# unfair by construction, and no amount of repetition fixes that.
+#
+# Three, because it clears the observed peak of 10 with room to spare while
+# still stopping an agent that is genuinely rummaging. Calibrate it again if
+# the room or the image changes; it is a measurement, not a constant of nature.
+SANDBOX_BUDGET_FACTOR = 3
+
+
+def budget_for(engine: str, cap: int | None) -> int | None:
+    """The per-case cap this engine is actually held to.
+
+    Scaled rather than replaced, so the caller's intent survives: passing
+    `--max-tool-calls 2` still means "stop this sooner than usual" on every
+    leg. `None` and non-positive values mean no cap and stay that way.
+    """
+    if cap is None or cap <= 0:
+        return cap
+    return cap * SANDBOX_BUDGET_FACTOR if engine == CLAUDE_CODE else cap
+
+
 def host_cost_flags(max_budget_usd: float | None) -> list[str]:
     """The CLI's own cost controls, for the leg that builds its command line.
 
@@ -781,7 +813,9 @@ def build_task(
             [
                 ApprovalPolicy(
                     approver=routing_approver(
-                        list(routing_set), max_tool_calls, max_inspection_calls
+                        list(routing_set),
+                        budget_for(engine, max_tool_calls),
+                        budget_for(engine, max_inspection_calls),
                     ),
                     tools="*",
                 )
