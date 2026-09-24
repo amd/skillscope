@@ -3570,6 +3570,92 @@ def _work_event(n: int) -> dict:
     }
 
 
+class _FakeCall:
+    def __init__(self, call_id: str, function: str = "Bash") -> None:
+        self.id = call_id
+        self.function = function
+        self.arguments: dict = {}
+
+
+class _FakeMessage:
+    def __init__(self, message_id: str, calls: list[_FakeCall]) -> None:
+        self.id = message_id
+        self.role = "assistant"
+        self.tool_calls = calls
+
+
+class _FakeEvent:
+    def __init__(self, message) -> None:
+        self.output = type("O", (), {"message": message})()
+
+
+class _FakeSample:
+    def __init__(self, messages, events) -> None:
+        self.messages = messages
+        self.events = events
+
+
+class TestOneTurnIsCountedOnce(unittest.TestCase):
+    """The same turn reaches this code twice and must be counted once.
+
+    A bridged agent's turn is both adopted onto `sample.messages` and carried by
+    a transcript `ModelEvent`, as two separate objects. De-duplicating them has
+    been wrong twice: first by object identity, which never matches, and then by
+    message id -- which looks right and is not, because the bridge *builds* the
+    adopted message rather than moving it, so the two copies carry
+    independently generated ids.
+
+    Measured on a real run: 23 reported against 12 actually made. Verdicts were
+    never affected -- an activation is detected by presence, not by count -- but
+    every tool-call column, the budget's headroom and `near_limit` all were.
+    """
+
+    def _sample(self, same_call_ids: bool):
+        first = [_FakeCall("toolu_1"), _FakeCall("toolu_2")]
+        second = (
+            [_FakeCall("toolu_1"), _FakeCall("toolu_2")]
+            if same_call_ids
+            else [_FakeCall("toolu_3"), _FakeCall("toolu_4")]
+        )
+        # Different message ids on purpose: that is what the bridge produces.
+        return _FakeSample(
+            messages=[_FakeMessage("adopted", first)],
+            events=[_FakeEvent(_FakeMessage("transcript", second))],
+        )
+
+    def test_the_same_turn_from_both_records_counts_once(self) -> None:
+        calls = list(engine_routing._tool_calls(self._sample(same_call_ids=True)))
+        self.assertEqual(
+            [c.id for c in calls],
+            ["toolu_1", "toolu_2"],
+            "a turn present in both records was counted twice",
+        )
+
+    def test_genuinely_different_turns_are_both_kept(self) -> None:
+        # The other direction: the transcript is the more complete record, and
+        # collapsing distinct turns would hide calls rather than duplicate them.
+        calls = list(engine_routing._tool_calls(self._sample(same_call_ids=False)))
+        self.assertEqual(
+            [c.id for c in calls], ["toolu_1", "toolu_2", "toolu_3", "toolu_4"]
+        )
+
+    def test_a_differing_message_id_does_not_defeat_the_dedup(self) -> None:
+        # The regression itself, stated directly.
+        sample = self._sample(same_call_ids=True)
+        self.assertNotEqual(
+            sample.messages[0].id,
+            sample.events[0].output.message.id,
+            "the fixture no longer reproduces the bridge's behaviour",
+        )
+        self.assertEqual(len(list(engine_routing._tool_calls(sample))), 2)
+
+    def test_turns_that_called_nothing_still_count_as_speech(self) -> None:
+        # `_spoke` rests on these, and they have no call ids to key on.
+        quiet = _FakeMessage("only-text", [])
+        sample = _FakeSample(messages=[quiet], events=[])
+        self.assertEqual(len(list(engine_routing._assistant_messages(sample))), 1)
+
+
 class TestTheHostLegStopsAtTheDecision(unittest.TestCase):
     """The host leg used to answer the question and then do the whole job.
 

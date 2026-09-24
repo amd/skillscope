@@ -265,13 +265,23 @@ def _assistant_messages(sample):
     for them, while the legacy engine saw those same cases activate a skill.
     The evidence was in the transcript the whole time.
 
-    Read in order and de-duplicated by message id, not by object identity. The
-    same turn arrives as two *different objects* -- one adopted onto the
-    sample, one carried by the transcript event -- so identity does not match
-    and every call gets counted twice. Measured: a sandboxed run reported ten
-    tool calls for cases the approver had terminated at five, and only the
-    sandboxed leg was affected, because the host leg has no bridge and so no
-    transcript events to duplicate.
+    Read in order and de-duplicated, because the same turn arrives twice -- once
+    adopted onto the sample, once carried by a transcript event -- as two
+    different objects, so identity does not match and every call would be
+    counted twice.
+
+    Keyed on the *tool call* ids rather than the message id. Both copies of a
+    turn carry a message id and the two do not match: the bridge builds a fresh
+    message when it adopts the turn, so the ids are independently generated and
+    the de-duplication silently failed. The provider's tool call ids survive the
+    crossing unchanged, which makes them the only stable name a turn has.
+
+    Measured twice, once per mistake. Keying on identity reported ten tool calls
+    for cases the approver had terminated at five. Keying on the message id
+    still reported 23 where the transcript held 12 -- a little under double,
+    because a turn with no calls at all has nothing else to key on and falls
+    back to the id. Only the sandboxed leg is affected either way: the host leg
+    has no bridge, so there is nothing to duplicate.
 
     That matters beyond the column. The routing decision is the *first* skill
     reached for, and a doubled sequence halves the effective budget.
@@ -279,15 +289,17 @@ def _assistant_messages(sample):
     seen: set[str] = set()
 
     def key(message) -> str:
-        ident = getattr(message, "id", None)
-        if ident:
-            return f"id:{ident}"
-        # No id to key on: fall back to the calls themselves, which is what
-        # the counting is about.
         calls = getattr(message, "tool_calls", None) or []
-        return "calls:" + "|".join(
-            f"{getattr(c, 'id', '')}/{getattr(c, 'function', '')}" for c in calls
-        )
+        if calls:
+            # Unique per call and assigned by the provider, so the adopted copy
+            # and the transcript copy of one turn agree on them.
+            return "calls:" + "|".join(
+                f"{getattr(c, 'id', '')}/{getattr(c, 'function', '')}" for c in calls
+            )
+        # A turn that called nothing contributes no count, only the evidence
+        # that the agent said something. The id is the best name available.
+        ident = getattr(message, "id", None)
+        return f"id:{ident}" if ident else f"obj:{id(message)}"
 
     def emit(message):
         if getattr(message, "role", None) != "assistant":
