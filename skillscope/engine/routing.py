@@ -265,26 +265,48 @@ def _assistant_messages(sample):
     for them, while the legacy engine saw those same cases activate a skill.
     The evidence was in the transcript the whole time.
 
-    Read in order and de-duplicated by identity, because the same assistant
-    turn appears in both records when both have it, and the routing decision is
-    the *first* skill reached for -- counting one turn twice could move it.
+    Read in order and de-duplicated by message id, not by object identity. The
+    same turn arrives as two *different objects* -- one adopted onto the
+    sample, one carried by the transcript event -- so identity does not match
+    and every call gets counted twice. Measured: a sandboxed run reported ten
+    tool calls for cases the approver had terminated at five, and only the
+    sandboxed leg was affected, because the host leg has no bridge and so no
+    transcript events to duplicate.
+
+    That matters beyond the column. The routing decision is the *first* skill
+    reached for, and a doubled sequence halves the effective budget.
     """
-    seen: set[int] = set()
+    seen: set[str] = set()
+
+    def key(message) -> str:
+        ident = getattr(message, "id", None)
+        if ident:
+            return f"id:{ident}"
+        # No id to key on: fall back to the calls themselves, which is what
+        # the counting is about.
+        calls = getattr(message, "tool_calls", None) or []
+        return "calls:" + "|".join(
+            f"{getattr(c, 'id', '')}/{getattr(c, 'function', '')}" for c in calls
+        )
+
+    def emit(message):
+        if getattr(message, "role", None) != "assistant":
+            return None
+        k = key(message)
+        if k in seen:
+            return None
+        seen.add(k)
+        return message
 
     for message in getattr(sample, "messages", None) or []:
-        if getattr(message, "role", None) == "assistant" and id(message) not in seen:
-            seen.add(id(message))
-            yield message
+        if (kept := emit(message)) is not None:
+            yield kept
 
     for event in getattr(sample, "events", None) or []:
         output = getattr(event, "output", None)
         message = getattr(output, "message", None) if output is not None else None
-        if message is None or getattr(message, "role", None) != "assistant":
-            continue
-        if id(message) in seen:
-            continue
-        seen.add(id(message))
-        yield message
+        if message is not None and (kept := emit(message)) is not None:
+            yield kept
 
 
 def _tool_calls(sample):

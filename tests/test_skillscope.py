@@ -3297,14 +3297,28 @@ class TestTheTranscriptIsReadTooNotJustTheMessages(unittest.TestCase):
         sample = self.Sample(events=[self.Event(self.Msg(tool_calls=[self.skill_call()]))])
         self.assertEqual(engine_routing._observe(sample, self.ROOM)[0], "alpha")
 
-    def test_a_turn_in_both_records_is_not_counted_twice(self) -> None:
-        # The routing decision is the first skill reached for, so double
-        # counting a turn could move it.
-        shared = self.Msg(tool_calls=[self.skill_call()])
-        sample = self.Sample(messages=[shared], events=[self.Event(shared)])
-        observed, tool_calls, _ = engine_routing._observe(sample, self.ROOM)
-        self.assertEqual(observed, "alpha")
-        self.assertEqual(tool_calls, 0)
+    def test_the_same_turn_as_two_objects_is_counted_once(self) -> None:
+        # What the bridge actually produces: the turn adopted onto the sample
+        # and the turn carried by the transcript event are different objects
+        # with the same id. De-duplicating by identity missed that and counted
+        # every call twice -- a sandboxed run reported ten tool calls for
+        # cases the approver had terminated at five, halving the effective
+        # budget.
+        calls = [self.Call("t1", "Bash", {"command": "ls"})]
+        adopted = self.Msg(tool_calls=calls)
+        adopted.id = "m1"
+        in_event = self.Msg(tool_calls=calls)
+        in_event.id = "m1"
+        sample = self.Sample(messages=[adopted], events=[self.Event(in_event)])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[1], 1)
+
+    def test_two_genuinely_different_turns_are_both_counted(self) -> None:
+        first = self.Msg(tool_calls=[self.Call("t1", "Bash", {"command": "ls"})])
+        first.id = "m1"
+        second = self.Msg(tool_calls=[self.Call("t2", "Bash", {"command": "pwd"})])
+        second.id = "m2"
+        sample = self.Sample(messages=[first, second])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[1], 2)
 
     def test_a_run_that_chose_nothing_is_still_a_run(self) -> None:
         sample = self.Sample(messages=[self.Msg(tool_calls=[])])
