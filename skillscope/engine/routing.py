@@ -419,7 +419,16 @@ def _limit_reason(sample) -> str | None:
     skill's recall looks worse here than on the legacy leg.
     """
     limit = getattr(sample, "limit", None)
-    return f"limit:{getattr(limit, 'type', 'unknown')}" if limit is not None else None
+    if limit is not None:
+        return f"limit:{getattr(limit, 'type', 'unknown')}"
+
+    # The host leg stops its own CLI rather than hitting an inspect limit, so a
+    # budgeted stop there leaves nothing on the sample to find. Reported as
+    # `result` it would read as an agent that considered the prompt and
+    # declined -- the opposite of one that was cut off mid-rummage.
+    store = getattr(sample, "store", None) or {}
+    reason = store.get(no_sandbox.STOP_REASON_KEY) if hasattr(store, "get") else None
+    return f"host:{reason}" if reason else None
 
 
 def _outcomes(log, cases: list[Case], skills: list[str]) -> list[routing_core.Outcome]:
@@ -525,6 +534,8 @@ def _solver(
     effort: str,
     config_dir: Path | None = None,
     max_budget_usd: float | None = None,
+    max_tool_calls: int | None = None,
+    max_inspection_calls: int | None = None,
 ):
     """The agent that drives one routing case, for the leg that was asked for.
 
@@ -532,6 +543,10 @@ def _solver(
     differ only in where that CLI runs, which is the entire reason both exist:
     when two legs disagree about a routing decision, the disagreement is a fact
     about the machine rather than about the skill.
+
+    The budgets arrive already scaled by `budget_for`, so the stop this leg
+    enforces for itself is the same number the approver would have enforced for
+    the other -- and the same number the report names.
     """
     from inspect_ai.solver import chain
 
@@ -558,7 +573,13 @@ def _solver(
     return chain(
         _install_room_solver(routing_set),
         no_sandbox.claude_code_no_sandbox(
-            model, effort, room[0], config_dir, host_cost_flags(max_budget_usd)
+            model, effort, room[0], config_dir, host_cost_flags(max_budget_usd),
+            # Names, not the paths `room` holds: the rule matches what a tool
+            # call named against the room's membership, which is how the
+            # approver is given it too.
+            stop_when_factory=host_stop_when_factory(
+                list(routing_set), max_tool_calls, max_inspection_calls
+            ),
         ),
     )
 
@@ -651,9 +672,10 @@ def routing_approver(
     `routing_decision` produced -- which is the same information legacy puts in
     `stop_reason`.
 
-    Only the sandboxed leg gets one. The host leg's CLI is a subprocess whose
-    stdout is buffered until exit, so nothing there can observe a decision
-    while there is still a run to stop.
+    Only the sandboxed leg gets one, because only its tool calls pass through
+    inspect's approval layer at all. The host leg reaches the same decision
+    from the other side of the same rule -- see `host_stop_when_factory`, which
+    reads it off the CLI's stream instead of intercepting a proposal.
     """
     from inspect_ai.approval import Approval, approver
     from inspect_ai.util import store
@@ -686,6 +708,58 @@ def routing_approver(
         return approve
 
     return _routing()
+
+
+def host_stop_when_factory(
+    room: list[str],
+    max_tool_calls: int | None,
+    max_inspection_calls: int | None,
+):
+    """The same stopping rule as the approver, for the leg that has no approver.
+
+    The sandboxed leg sees a tool call *proposed* and declines it, so the work
+    never happens. The host leg's CLI is a subprocess: nothing intercepts its
+    calls, and the only account of them is the `stream-json` it prints as it
+    goes. So the rule is applied a moment later -- the call has run by the time
+    its event arrives -- and the stop is a signal rather than a refusal. That is
+    exactly what the legacy engine does, and the same one call of overshoot.
+
+    Without it this leg answered the routing question on its first tool call and
+    then went on to do the whole job: downloading trace files, running the
+    analysis, writing reports. 152 of its 220 tool calls in one 67-case room
+    came after the decision it was being asked for, none of them read by
+    anything.
+
+    Returns a *factory*, because the budget is per case and the solver that
+    calls it is built once for the run.
+    """
+
+    def _build():
+        tally = _Tally()
+
+        def _stop(event: dict) -> str | None:
+            for function, encoded in routing_core._iter_tool_uses(event):
+                try:
+                    arguments = json.loads(encoded)
+                except json.JSONDecodeError:
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                decision, reason = routing_decision(
+                    function, arguments, room,
+                    tally, max_tool_calls, max_inspection_calls,
+                )
+                if decision == "terminate":
+                    return reason
+            if event.get("type") == "result":
+                # The CLI finished on its own. Nothing left to stop, but the
+                # loop should not sit waiting on a stream that has ended.
+                return no_sandbox.STOP_RESULT
+            return None
+
+        return _stop
+
+    return _build
 
 
 def activation_from_limit(reason: str | None, room: list[str]) -> str | None:
@@ -807,10 +881,14 @@ def build_task(
     return Task(
         name="routing",
         dataset=[_sample_from_case(case) for case in cases],
-        solver=_solver(engine, routing_set, model, effort, config_dir, max_budget_usd),
-        # Only the sandboxed leg. Its tool calls cross inspect's bridge, so an
-        # approver sees each one before it runs; the host leg's CLI buffers its
-        # stdout until exit, so there is nothing there to approve in time.
+        solver=_solver(
+            engine, routing_set, model, effort, config_dir, max_budget_usd,
+            budget_for(engine, max_tool_calls),
+            budget_for(engine, max_inspection_calls),
+        ),
+        # Only the sandboxed leg, because only its tool calls cross inspect's
+        # bridge for an approver to see. The host leg enforces the same rule
+        # from inside its own solver, against the CLI's stream.
         approval=(
             [
                 ApprovalPolicy(

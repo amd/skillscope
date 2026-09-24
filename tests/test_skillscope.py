@@ -3542,6 +3542,169 @@ class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):
         self.assertIn("budget_for(", source)
 
 
+def _activation_event(skill: str) -> dict:
+    """One `stream-json` assistant event in which the agent fires a skill."""
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "Skill", "input": {"skill": skill}}
+            ]
+        },
+    }
+
+
+def _work_event(n: int) -> dict:
+    """An event that is the agent doing work rather than choosing."""
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": f"echo {n}", "description": f"step {n}"},
+                }
+            ]
+        },
+    }
+
+
+class TestTheHostLegStopsAtTheDecision(unittest.TestCase):
+    """The host leg used to answer the question and then do the whole job.
+
+    It has no approver -- its CLI is a subprocess, so nothing intercepts a tool
+    call before it runs -- and it awaited that subprocess to completion. So a
+    case activated the right skill on its first call and then went on to
+    download trace files, run the analysis and write reports, none of which any
+    scorer read. Measured over one 67-case room: 152 of its 220 tool calls came
+    after the decision.
+
+    The rule here is the legacy engine's, applied to the CLI's stream as it
+    arrives, which is the only place this leg can see a decision in time.
+    """
+
+    def _rule(self, room=("alpha", "beta"), tools=4, inspections=4):
+        return engine_routing.host_stop_when_factory(list(room), tools, inspections)()
+
+    def test_an_activation_stops_the_run(self) -> None:
+        reason = self._rule()(_activation_event("alpha"))
+        self.assertIsNotNone(reason)
+        self.assertIn("alpha", reason)
+
+    def test_the_named_skill_survives_into_the_reason(self) -> None:
+        # The mapper reads the activation back off this string, so a reason
+        # that stops the run without naming what fired loses the verdict.
+        reason = self._rule()(_activation_event("beta"))
+        self.assertEqual(
+            engine_routing.activation_from_limit(reason, ["alpha", "beta"]), "beta"
+        )
+
+    def test_ordinary_work_does_not_stop_the_run(self) -> None:
+        self.assertIsNone(self._rule()(_work_event(1)))
+
+    def test_the_budget_stops_an_agent_that_never_chooses(self) -> None:
+        rule = self._rule(tools=2)
+        reasons = [rule(_work_event(n)) for n in range(6)]
+        self.assertTrue(
+            any(r and engine_routing.BUDGET_MARK in r for r in reasons),
+            f"budget never tripped: {reasons}",
+        )
+
+    def test_the_cli_finishing_ends_the_read(self) -> None:
+        # Not a stop we imposed, but the loop must not wait on a dead stream.
+        self.assertEqual(
+            self._rule()({"type": "result", "result": "done"}),
+            engine_no_sandbox.STOP_RESULT,
+        )
+
+    def test_each_case_gets_its_own_budget(self) -> None:
+        # The bug this guards against has been shipped here once already, in
+        # the approver: a counter built with the solver rather than per sample
+        # creeps up across the room until it terminates every later case
+        # mid-deliberation. Two independent rules from one factory must not
+        # share a tally.
+        factory = engine_routing.host_stop_when_factory(["alpha"], 2, 2)
+        first = factory()
+        for n in range(6):
+            first(_work_event(n))
+        second = factory()
+        self.assertIsNone(
+            second(_work_event(99)),
+            "a fresh case inherited the previous case's spent budget",
+        )
+
+
+class TestTheHostLegActuallyKillsTheProcess(unittest.IsolatedAsyncioTestCase):
+    """Deciding to stop is not stopping; the CLI has to actually die.
+
+    Worth an end-to-end check rather than a unit test of the rule, because the
+    failure mode is silent: a stop that breaks the read loop but leaves the
+    process running still pays for every call it goes on to make, and the
+    events simply stop being recorded. The run looks cheaper and is not.
+    """
+
+    async def _run(self, script: str, stop_after: int):
+        seen = {"n": 0}
+
+        def stop_when(event: dict) -> str | None:
+            seen["n"] += 1
+            return "stop" if seen["n"] >= stop_after else None
+
+        return await engine_no_sandbox._stream_until(
+            [sys.executable, "-u", "-c", script],
+            "prompt",
+            tempfile.gettempdir(),
+            dict(os.environ),
+            stop_when,
+        )
+
+    async def test_reading_stops_where_the_rule_says(self) -> None:
+        script = (
+            "import json,sys\n"
+            "for i in range(20):\n"
+            "    print(json.dumps({'type':'assistant','i':i}), flush=True)\n"
+        )
+        events, reason, _, _ = await self._run(script, stop_after=3)
+        self.assertEqual(reason, "stop")
+        self.assertEqual(len(events), 3)
+
+    async def test_the_work_after_the_decision_never_happens(self) -> None:
+        # The direct evidence: the child tries to leave a mark behind after the
+        # point we stop it. If the process outlived the stop, the mark is there.
+        #
+        # The wait afterwards is the whole test. Without it this passes even
+        # with the kill removed, because asyncio reaps surviving children when
+        # the loop closes -- which in a real run does not happen until the eval
+        # is over, long after the orphan has spent the budget. So the check has
+        # to happen while the loop is still up, exactly as it is mid-eval.
+        with tempfile.TemporaryDirectory() as tmp:
+            mark = Path(tmp) / "kept-working"
+            script = (
+                "import json,sys,time\n"
+                "print(json.dumps({'type':'assistant','i':0}), flush=True)\n"
+                "time.sleep(1.5)\n"
+                f"open({str(mark)!r},'w').write('x')\n"
+            )
+            started = time.perf_counter()
+            await self._run(script, stop_after=1)
+            elapsed = time.perf_counter() - started
+
+            self.assertLess(
+                elapsed, 1.4, "the stop waited for the process instead of killing it"
+            )
+            await asyncio.sleep(3.0)
+            self.assertFalse(
+                mark.exists(), "the CLI outlived the stop and kept working"
+            )
+
+    async def test_a_stream_that_ends_on_its_own_is_not_an_error(self) -> None:
+        script = "import json\nprint(json.dumps({'type':'result','result':'ok'}))\n"
+        events, reason, _, _ = await self._run(script, stop_after=99)
+        self.assertEqual(len(events), 1)
+        self.assertIsNone(reason)
+
+
 class TestCasesDecidedByTheBudgetAreFlagged(unittest.TestCase):
     """A case that stopped on its cap measured the cap, not the agent.
 

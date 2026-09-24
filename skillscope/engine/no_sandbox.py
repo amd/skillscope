@@ -23,15 +23,30 @@ a reader to assume otherwise.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import shutil
+import signal
+import subprocess
 from pathlib import Path
+from typing import Callable
 
 from .. import agent as legacy_agent
 
 # Tool calls and results are reconstructed from the stream, so they need ids
 # that are merely unique within a sample rather than meaningful.
 _CALL_PREFIX = "cli"
+
+# Where an early stop records why it happened, for a reader downstream. The
+# sample carries no inspect limit when this driver stops the run itself -- the
+# bound was enforced here, not by inspect -- so without this the report would
+# describe a budgeted stop as a run that ended on its own.
+STOP_REASON_KEY = "skillscope_host_stop_reason"
+
+# What `stop_when` returns when the stream reached the CLI's own ending. Named
+# rather than spelled inline because the mapper reads it back.
+STOP_RESULT = "result"
 
 
 def require_local() -> None:
@@ -137,6 +152,156 @@ def events_to_messages(events: list[dict], prompt: str) -> tuple[list, str]:
     return messages, final
 
 
+async def _terminate(proc) -> None:
+    """Kill the CLI and everything it started.
+
+    The CLI spawns helpers, and killing only the process we launched leaves
+    them running against the same budget the stop was meant to protect. The
+    legacy engine learned this and kills the whole group; this is that, in
+    asyncio's vocabulary. Spawned into its own session/group precisely so this
+    one signal can reach all of it.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "nt":
+            # No process groups to signal; the tree walk is taskkill's job.
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(proc.pid),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            await killer.wait()
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=15)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+
+
+def _subprocess_concurrency():
+    """inspect's own subprocess limiter, so this driver stays inside its budget.
+
+    Reached by name: `concurrency()` is keyed, so asking for "subprocesses"
+    joins the same semaphore `inspect_ai.util.subprocess` uses rather than
+    opening a second, unaccounted pool beside it. The size only matters to
+    whoever creates it first, and inspect normally has by the time a solver
+    runs. Defended anyway -- the limit is private, and a driver that refused to
+    run because an internal name moved would be worse than one that ran
+    unlimited.
+    """
+    import contextlib
+
+    from inspect_ai.util import concurrency
+
+    try:
+        from inspect_ai.util._subprocess import max_subprocesses_context_var
+
+        limit = max_subprocesses_context_var.get()
+    except Exception:  # pragma: no cover -- upstream internals moved
+        return contextlib.nullcontext()
+    return concurrency("subprocesses", limit, resizable=True)
+
+
+async def _stream_until(
+    cmd: list[str],
+    prompt: str,
+    workspace: str,
+    env: dict,
+    stop_when: Callable[[dict], str | None],
+) -> tuple[list[dict], str | None, int | None, str]:
+    """Run the CLI, reading its stream, and stop the moment `stop_when` says to.
+
+    The reason this exists rather than `inspect_ai.util.subprocess`: that call
+    returns once the process has exited, so nothing it gives back can arrive in
+    time to end the run early. For a behavioral case that is exactly right --
+    the skill has to finish for the scorers to have anything to read. For a
+    routing case it means the agent answers the question on its first tool call
+    and then does the entire job anyway, unwatched and paid for. Measured over
+    one 67-case room, 152 of this leg's 220 tool calls happened after the
+    decision it was being asked for.
+
+    So: read the stream line by line, hand each event to the caller's rule, and
+    kill the process group the first time it says stop. That is what the legacy
+    engine does, and this leg replaces the legacy engine.
+    """
+    spawn: dict = {}
+    if os.name == "nt":
+        spawn["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        spawn["start_new_session"] = True
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=workspace,
+        env=env,
+        **spawn,
+    )
+
+    errors: list[str] = []
+
+    async def _drain_stderr() -> None:
+        # Drained concurrently, not at the end: a full stderr pipe blocks the
+        # CLI, and a CLI blocked on a pipe nobody is reading never reaches the
+        # decision this function is waiting for.
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    return
+                errors.append(line.decode("utf-8", "replace"))
+        except (asyncio.CancelledError, ValueError):
+            return
+
+    stderr_task = asyncio.create_task(_drain_stderr())
+
+    events: list[dict] = []
+    stop_reason: str | None = None
+    try:
+        proc.stdin.write(prompt.encode("utf-8"))
+        await proc.stdin.drain()
+        proc.stdin.close()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        # The CLI rejected the prompt or died early. Whatever it managed to
+        # say is read below and reported the same way as any other short run.
+        pass
+
+    try:
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events.append(event)
+            stop_reason = stop_when(event)
+            if stop_reason is not None:
+                break
+    finally:
+        await _terminate(proc)
+        stderr_task.cancel()
+        try:
+            await stderr_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    return events, stop_reason, proc.returncode, "".join(errors)
+
+
 def install_skill(skill_dir: Path, workspace: str) -> None:
     """Put the skill where the real harness looks for it.
 
@@ -158,6 +323,7 @@ def claude_code_no_sandbox(
     skill_dir: Path,
     config_dir: Path | None = None,
     extra_flags: list[str] | None = None,
+    stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
 
@@ -174,6 +340,21 @@ def claude_code_no_sandbox(
     worst noise. A routing case grades *which* skill fired, and a stray one
     joins the room for every case -- so that caller passes it and refuses to
     run without it.
+
+    `stop_when_factory` builds the rule that decides, per stream event, whether
+    the run has answered the question being asked of it. Opt-in because the two
+    callers want opposite things from the same CLI: a behavioral case is graded
+    on what the skill *produced*, so it has to run to the end, and passing a
+    rule here would cut the work being measured. A routing case is graded on
+    which skill fired, and everything after that is paid for and unread. Left
+    `None`, this runs through `inspect_ai.util.subprocess` exactly as before.
+
+    A factory rather than the rule itself because the solver is built once and
+    run for every sample, while a budget counts *per case*. Handed a single
+    rule, its tally would carry from one case into the next and the room would
+    run out of budget partway through -- which has happened here before, and
+    reads as a skill that stopped triggering rather than a counter that never
+    reset.
     """
     from inspect_ai.model import ModelOutput
     from inspect_ai.solver import solver
@@ -203,24 +384,35 @@ def claude_code_no_sandbox(
             if config_dir is not None:
                 env["CLAUDE_CONFIG_DIR"] = str(config_dir)
 
-            result = await sandbox_subprocess(
-                cmd, input=prompt, cwd=workspace, env=env,
-            )
-
             events: list[dict] = []
-            for line in (result.stdout or "").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            if stop_when_factory is None:
+                result = await sandbox_subprocess(
+                    cmd, input=prompt, cwd=workspace, env=env,
+                )
+                returncode, stderr = result.returncode, result.stderr or ""
+                for line in (result.stdout or "").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            else:
+                async with _subprocess_concurrency():
+                    events, stop_reason, returncode, stderr = await _stream_until(
+                        cmd, prompt, workspace, env, stop_when_factory()
+                    )
+                # Recorded whatever it was, including `None` for a stream that
+                # ended on its own. A stop this driver performed leaves no
+                # inspect limit behind, so this is the only trace of it.
+                if stop_reason is not None and stop_reason != STOP_RESULT:
+                    state.store.set(STOP_REASON_KEY, stop_reason)
 
             if not events:
                 raise RuntimeError(
                     "claude produced no parseable stream-json output "
-                    f"(exit {result.returncode}). stderr: {(result.stderr or '')[:300]}"
+                    f"(exit {returncode}). stderr: {stderr[:300]}"
                 )
 
             for event in events:
