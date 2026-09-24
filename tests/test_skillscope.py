@@ -3486,6 +3486,66 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
                 self.assertNotIn("load_hooks", inspect.getsource(module))
 
 
+class TestCasesDecidedByTheBudgetAreFlagged(unittest.TestCase):
+    """A case that stopped on its cap measured the cap, not the agent.
+
+    Two runs of one engine disagreed on six cases where the noise floor was
+    one, and the explanation was that 26 of 67 cases sat within a single call
+    of a budget. Those are coin-flips: one more call either way moves them
+    across the line and takes the verdict with them. They look identical to
+    cases decided on their merits, which is what made the disagreement
+    unreadable.
+
+    Reported rather than corrected. The budget is doing its job; the reader
+    just has to know how much of the run it decided.
+    """
+
+    def outcome(self, tool_calls=0, inspection_calls=0):
+        return routing.Outcome(
+            id="a", category="c", skill="s", prompt="p", expect=None, observed=None,
+            verdict="true_negative", passed=True, stop_reason="result",
+            elapsed_s=0.0, tool_calls=tool_calls, inspection_calls=inspection_calls,
+        )
+
+    CAPS = {"max_tool_calls": 4, "max_inspection_calls": 8}
+
+    def test_a_case_that_stopped_on_the_cap_is_flagged(self) -> None:
+        self.assertTrue(routing.near_a_limit(self.outcome(tool_calls=4), self.CAPS))
+
+    def test_a_case_one_below_the_cap_is_flagged(self) -> None:
+        # One call is the resolution the threshold has.
+        self.assertTrue(routing.near_a_limit(self.outcome(tool_calls=3), self.CAPS))
+
+    def test_a_case_well_clear_of_the_cap_is_not(self) -> None:
+        self.assertFalse(routing.near_a_limit(self.outcome(tool_calls=1), self.CAPS))
+
+    def test_the_inspection_budget_counts_too(self) -> None:
+        self.assertTrue(routing.near_a_limit(self.outcome(inspection_calls=8), self.CAPS))
+
+    def test_a_cap_the_run_never_set_is_not_a_threshold(self) -> None:
+        # A leg that cannot enforce a budget reports none, and nothing should
+        # invent one for it.
+        self.assertFalse(routing.near_a_limit(self.outcome(tool_calls=99), {}))
+        self.assertFalse(
+            routing.near_a_limit(self.outcome(tool_calls=99), {"max_tool_calls": 0})
+        )
+
+    def test_the_totals_carry_the_count(self) -> None:
+        outs = [self.outcome(tool_calls=4), self.outcome(tool_calls=0)]
+        totals = routing.summarize(outs, ["s"], {"skills": ["s"], **self.CAPS})["totals"]
+        self.assertEqual(totals["near_limit"], 1)
+
+    def test_the_report_warns_before_the_reader_sees_the_score(self) -> None:
+        summary = routing.summarize(
+            [self.outcome(tool_calls=4)],
+            ["s"],
+            {"skills": ["s"], "model": "m", "effort": "e", **self.CAPS},
+        )
+        report = routing.render_markdown(summary)
+        self.assertIn("within one call of a budget", report)
+        self.assertLess(report.index("within one call"), report.index("| Verdict |"))
+
+
 class TestProviderFailuresAreMarked(unittest.TestCase):
     """A gateway error is not a routing result, and must not read as one.
 

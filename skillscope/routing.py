@@ -689,6 +689,28 @@ def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) ->
     return outcome
 
 
+def near_a_limit(outcome: "Outcome", meta: dict) -> bool:
+    """Whether this case stopped close enough to a cap to be decided by one.
+
+    A case that used one call of a budget of four is measuring the agent. A
+    case that used four is measuring the budget: ordinary run-to-run variation
+    moves it across the line, and the verdict flips with it. Those two look
+    identical in a report, and the difference is the whole of whether a flip
+    between two runs means anything.
+
+    Within one, because that is the resolution a single extra call has. Caps
+    the run did not set are not caps: a leg that could not enforce a budget
+    reports none, and nothing here should invent a threshold for it.
+    """
+    for used, cap in (
+        (outcome.tool_calls, meta.get("max_tool_calls")),
+        (outcome.inspection_calls, meta.get("max_inspection_calls")),
+    ):
+        if isinstance(cap, int) and cap > 0 and used >= cap - 1:
+            return True
+    return False
+
+
 def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
     verdicts = Counter(o.verdict for o in outcomes)
     graded = [o for o in outcomes if o.verdict != "error"]
@@ -761,6 +783,11 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
             # degraded has measured the gateway, and comparing it against
             # another run attributes an outage to whatever changed in between.
             "degraded": sum(1 for o in outcomes if o.degraded),
+            # Cases that stopped within one call of a cap. Not failures --
+            # a flag on how much of this run measured the agent and how much
+            # measured the budget. A flip on one of these between two runs is
+            # a threshold artefact before it is anything else.
+            "near_limit": sum(1 for o in outcomes if near_a_limit(o, meta)),
         },
         "verdicts": {name: verdicts.get(name, 0) for name in VERDICTS},
         "by_category": by_category,
@@ -796,6 +823,17 @@ def render_markdown(summary: dict) -> str:
     # score has formed a view, and a note underneath it does not undo that --
     # whereas a run with a tenth of its cases degraded is one whose score
     # should be read differently from the first glance.
+    near = totals.get("near_limit", 0)
+    if near:
+        lines += [
+            f"> **{near} of {totals['cases']} cases stopped within one call of "
+            "a budget.** Those measured the budget as much as the agent: one "
+            "more call either way moves them across the line and the verdict "
+            "with them. Compare two runs on these last, and expect them to "
+            "flip without meaning anything.",
+            "",
+        ]
+
     degraded = totals.get("degraded", 0)
     if degraded:
         share = degraded / totals["cases"] if totals["cases"] else 0
