@@ -573,9 +573,15 @@ def _solver(
         # installs and registers the room -- the point of this leg being that
         # its machinery, not ours, decides what happens. `cwd` is set for the
         # same reason `verify.build_task` sets it: a container starts at `/`.
+        #
+        # `effort` is passed because leaving it out does not mean "the same as
+        # everyone else", it means the model's own default. The other two legs
+        # send `--effort` to the CLI, so omitting it here compared a leg
+        # thinking as hard as it was told to against one thinking as hard as it
+        # liked, and called the difference sandboxing.
         return chain(
             verify._ensure_workdir(),
-            claude_code(skills=room, cwd=tools.workdir_path()),
+            claude_code(skills=room, cwd=tools.workdir_path(), effort=effort or None),
         )
 
     # The host leg stages the room itself, because the CLI reads it off the

@@ -103,7 +103,13 @@ def _ensure_workdir():
     return _ensure()
 
 
-def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = None):
+def build_task(
+    skill: str,
+    cases: list[Case],
+    model: str,
+    ctx: dict | None = None,
+    effort: str | None = None,
+):
     """One task per skill, solved by real Claude Code rather than our agent."""
     from inspect_ai import Task
     from inspect_ai.solver import chain
@@ -125,9 +131,14 @@ def build_task(skill: str, cases: list[Case], model: str, ctx: dict | None = Non
         # `skills=` installs into .claude/skills inside the sandbox, which is
         # where the real harness looks -- the point of this leg is that its
         # discovery machinery, not ours, decides what happens.
+        # `effort` reaches the agent rather than being dropped here: unset is
+        # not neutral, it is the model's own default, and the legs this one is
+        # compared against all pass the value they were given.
         solver=chain(
             _ensure_workdir(),
-            claude_code(skills=[skill_dir], cwd=tools.workdir_path()),
+            claude_code(
+                skills=[skill_dir], cwd=tools.workdir_path(), effort=effort or None
+            ),
         ),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
@@ -154,7 +165,7 @@ def run(
 
         print(f"[claude-code] {skill}: {len(skill_cases)} case(s)", flush=True)
         logs = inspect_eval(
-            build_task(skill, skill_cases, model),
+            build_task(skill, skill_cases, model, effort=effort),
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),

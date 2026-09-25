@@ -3570,6 +3570,60 @@ def _work_event(n: int) -> dict:
     }
 
 
+class TestEveryLegThinksAsHardAsItWasTold(unittest.TestCase):
+    """`--effort` has to reach all three legs or the comparison is not one.
+
+    `legacy` and `claude-code-no-sandbox` build the CLI's command line and pass
+    `--effort` into it. The sandboxed leg goes through `inspect_swe`, whose
+    `effort` argument defaults to `None` -- documented as leaving the model's
+    own default in place, which is emphatically not the same value.
+
+    So the trial was comparing a leg thinking at the effort it was given with
+    one thinking at whatever it liked, and attributing the difference to
+    isolation. Asserted against the source because the alternative is a live
+    sandboxed run, and a silent revert here looks like a finding about skills.
+    """
+
+    def _claude_code_call(self, func) -> str:
+        """The text of the `claude_code(...)` invocation in `func`.
+
+        Read by balancing parentheses rather than by regex: the arguments
+        contain calls of their own, so a non-greedy match ends at the wrong
+        bracket and the assertion fails on correct code.
+        """
+        source = inspect.getsource(func)
+        start = source.index("claude_code(") + len("claude_code(")
+        depth, end = 1, start
+        while depth:
+            depth += {"(": 1, ")": -1}.get(source[end], 0)
+            end += 1
+        return source[start : end - 1]
+
+    def test_the_sandboxed_routing_leg_is_given_the_effort(self) -> None:
+        self.assertIn(
+            "effort=",
+            self._claude_code_call(engine_routing._solver),
+            "the sandboxed routing leg drops --effort",
+        )
+
+    def test_the_sandboxed_behavioral_leg_is_given_the_effort(self) -> None:
+        self.assertIn(
+            "effort=",
+            self._claude_code_call(engine_verify.build_task),
+            "the sandboxed behavioral leg drops --effort",
+        )
+
+    def test_the_behavioral_runner_hands_the_effort_down(self) -> None:
+        # build_task grew the parameter once already without the caller
+        # filling it, which reads exactly like the bug it was meant to fix.
+        self.assertIn("effort", inspect.signature(engine_verify.build_task).parameters)
+        self.assertIn(
+            "effort=",
+            inspect.getsource(engine_verify.run).split("build_task(", 1)[1][:120],
+            "verify.run accepts an effort it never passes on",
+        )
+
+
 class _FakeCall:
     def __init__(self, call_id: str, function: str = "Bash") -> None:
         self.id = call_id
