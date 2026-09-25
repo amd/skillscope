@@ -320,19 +320,11 @@ jobs:
           path: .skillscope-action
 
       - name: Resolve the model credentials
-        shell: python
         env:
           EXPECT_KEY: ${{ inputs.routing != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
           API_BASE_URL: ${{ inputs.api_base_url }}
           API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
-        run: |
-          import subprocess
-          import sys
-
-          completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py", "--reusable"]
-          )
-          raise SystemExit(completed.returncode)
+        run: python .skillscope-action/skillscope/credentials.py --reusable
 
       - name: Run the routing eval for ${{ matrix.skill }}
         uses: ./.skillscope-action
@@ -389,19 +381,11 @@ jobs:
           path: .skillscope-action
 
       - name: Resolve the model credentials
-        shell: python
         env:
           EXPECT_KEY: ${{ inputs.behavioral != 'off' && (inputs.api_key_secret != '' || secrets.api_key != '') }}
           API_BASE_URL: ${{ inputs.api_base_url }}
           API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
-        run: |
-          import subprocess
-          import sys
-
-          completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py", "--reusable"]
-          )
-          raise SystemExit(completed.returncode)
+        run: python .skillscope-action/skillscope/credentials.py --reusable
 
       - name: Run the behavioral cases for ${{ matrix.skill }}
         uses: ./.skillscope-action

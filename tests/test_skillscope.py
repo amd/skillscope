@@ -212,9 +212,10 @@ class TestEveryRunStepIsPortable(unittest.TestCase):
 
     Which platforms a run lands on is the caller's to decide -- `runner` here,
     `behavior_os` and a skill's own `machine.yml` in the full pipeline -- so
-    every step that can reach one of them is written in Python. That is not a
-    taste in scripting languages; it is the only shell all three platforms are
-    guaranteed to agree on, and this test is what keeps the next step honest.
+    every step that can reach one of them either names Python as its shell or,
+    in a workflow, names none. That is not a taste in scripting languages; it
+    is the only shell all three platforms are guaranteed to agree on, and this
+    test is what keeps the next step honest.
     """
 
     # Every runner in these three is a caller's input -- `runner`,
@@ -243,10 +244,12 @@ class TestEveryRunStepIsPortable(unittest.TestCase):
     def test_no_run_step_names_a_shell_a_runner_might_not_have(self) -> None:
         import yaml
 
-        portable = {"python"}
         for relative in self.CI_FILES:
             path = REPO_ROOT / relative
             self.assertTrue(path.is_file(), f"{relative} is missing")
+            # A workflow step may leave `shell:` unset and get the runner's
+            # default; a composite action step has no default to fall back on.
+            portable = {"python"} if relative.name == "action.yml" else {"python", ""}
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
             for step in self.steps(document):
                 if "run" not in step:
