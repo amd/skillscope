@@ -326,35 +326,11 @@ jobs:
           API_BASE_URL: ${{ inputs.api_base_url }}
           API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
         run: |
-          import os
           import subprocess
           import sys
 
-          gateway = os.environ["API_BASE_URL"].strip() or os.environ["API_CUSTOM_HEADERS"].strip()
-          if os.environ.get("EXPECT_KEY") != "true":
-              if gateway:
-                  sys.exit(
-                      "error: api_base_url and api_custom_headers are for a "
-                      "gateway key, but no key is configured. Map the key onto "
-                      "'api_key', or name it with 'api_key_secret'."
-                  )
-              sys.exit(0)
-          key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-          if not key:
-              sys.exit(
-                  "error: the model API key resolved to an empty value. GitHub "
-                  "withholds secrets from pull requests opened from a fork, so "
-                  "re-run this from a branch in the repository; otherwise check "
-                  "that the secret is set and that the caller maps it onto "
-                  "'api_key' (or passes 'secrets: inherit')."
-              )
-          if not gateway:
-              sys.exit(0)
-
-          # Exports the base URL, and the headers with `$API_KEY` filled in.
           completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py"],
-              env={**os.environ, "API_KEY": key},
+              [sys.executable, ".skillscope-action/skillscope/credentials.py", "--reusable"]
           )
           raise SystemExit(completed.returncode)
 
@@ -419,35 +395,11 @@ jobs:
           API_BASE_URL: ${{ inputs.api_base_url }}
           API_CUSTOM_HEADERS: ${{ inputs.api_custom_headers }}
         run: |
-          import os
           import subprocess
           import sys
 
-          gateway = os.environ["API_BASE_URL"].strip() or os.environ["API_CUSTOM_HEADERS"].strip()
-          if os.environ.get("EXPECT_KEY") != "true":
-              if gateway:
-                  sys.exit(
-                      "error: api_base_url and api_custom_headers are for a "
-                      "gateway key, but no key is configured. Map the key onto "
-                      "'api_key', or name it with 'api_key_secret'."
-                  )
-              sys.exit(0)
-          key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-          if not key:
-              sys.exit(
-                  "error: the model API key resolved to an empty value. GitHub "
-                  "withholds secrets from pull requests opened from a fork, so "
-                  "re-run this from a branch in the repository; otherwise check "
-                  "that the secret is set and that the caller maps it onto "
-                  "'api_key' (or passes 'secrets: inherit')."
-              )
-          if not gateway:
-              sys.exit(0)
-
-          # Exports the base URL, and the headers with `$API_KEY` filled in.
           completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py"],
-              env={**os.environ, "API_KEY": key},
+              [sys.executable, ".skillscope-action/skillscope/credentials.py", "--reusable"]
           )
           raise SystemExit(completed.returncode)
 

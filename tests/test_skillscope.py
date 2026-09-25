@@ -926,6 +926,38 @@ class TestCredentialResolution(unittest.TestCase):
             self.assertIn("sk-ant-oat01-minted", written)
             self.assertNotIn("ANTHROPIC_API_KEY", written)
 
+    def test_a_gateway_key_reaches_the_env_file_but_never_stdout(self) -> None:
+        # GitHub masks the key only because it arrived as a secret, so nothing
+        # printed may carry it, substituted into a header or otherwise.
+        with tempfile.TemporaryDirectory() as tmp:
+            github_env = Path(tmp) / "github.env"
+            github_env.touch()
+            environment = {
+                "EXPECT_KEY": "true",
+                "ANTHROPIC_API_KEY": "the-gateway-key",
+                "API_BASE_URL": "https://gateway.example/anthropic",
+                "API_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: $API_KEY",
+                "GITHUB_ENV": str(github_env),
+            }
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(
+                stdout
+            ), contextlib.redirect_stderr(stderr):
+                self.assertEqual(credentials.main(["--reusable"]), 0)
+
+            self.assertNotIn("the-gateway-key", stdout.getvalue() + stderr.getvalue())
+            written = github_env.read_text(encoding="utf-8")
+            self.assertIn("ANTHROPIC_BASE_URL<<", written)
+            self.assertIn("Ocp-Apim-Subscription-Key: the-gateway-key", written)
+
+    def test_a_gateway_without_a_key_is_refused(self) -> None:
+        with self.assertRaises(credentials.CredentialError) as raised:
+            credentials.resolve_for_reusable(
+                {"EXPECT_KEY": "false", "API_BASE_URL": "https://gateway.example"}
+            )
+        self.assertIn("no key is configured", str(raised.exception))
+        self.assertEqual(credentials.resolve_for_reusable({"EXPECT_KEY": "false"}), {})
+
     def test_running_credentials_as_a_script_does_not_shadow_stdlib_select(self) -> None:
         # Graded jobs run this file by path, which puts the package directory on
         # sys.path. A module named select.py would shadow the stdlib and this

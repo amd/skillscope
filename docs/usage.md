@@ -270,6 +270,10 @@ address, and usually the key in a header of its own:
         Ocp-Apim-Subscription-Key: $API_KEY
 ```
 
+Setting either input without a key stops the run with an error rather than
+sending unauthenticated requests. Put the key in a header as `$API_KEY`, never
+as a literal: GitHub only masks values it received as secrets.
+
 `optional` is for a bar you have not met yet: the leg runs, the report lands in
 the step summary, and a red leg leaves the run green. `off` does not run it at
 all. Both are one-word diffs a reviewer can see, which is the point — a step
