@@ -36,7 +36,14 @@ podman = ["skillscope[inspect]", "inspect-podman"]
 # The Claude Code verification leg (`--engine claude-code`). Kept out of the
 # `inspect` extra because it is a reporting-only cross-check, not something a
 # graded run needs -- and because it only works on a POSIX guest.
-verify = ["skillscope[inspect]", "inspect-swe>=0.2.70"]
+#
+# 0.2.71 for `claude_code(effort=)`. Not cosmetic: without it this leg runs at
+# the model's default reasoning effort while every other leg runs at the one it
+# was given, and the gap between them reads as a fact about isolation. 0.2.70
+# raises `TypeError: Unexpected keyword argument(s): effort`, and a runner that
+# already had it satisfied the old floor and never upgraded -- so the trial
+# installed a version that could not run the leg.
+verify = ["skillscope[inspect]", "inspect-swe>=0.2.71"]
 
 [project.scripts]
 skillscope = "skillscope.cli:main"

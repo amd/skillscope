@@ -31,6 +31,7 @@ import runpy
 import subprocess
 import tempfile
 import time
+import types
 import unittest
 import urllib.error
 from pathlib import Path
@@ -3612,6 +3613,40 @@ class TestEveryLegThinksAsHardAsItWasTold(unittest.TestCase):
             self._claude_code_call(engine_verify.build_task),
             "the sandboxed behavioral leg drops --effort",
         )
+
+    def test_an_inspect_swe_without_effort_is_refused_up_front(self) -> None:
+        # The failure it replaces: a TypeError raised inside a task inspect had
+        # already started, leaving one leg of a three-leg comparison with no
+        # report while the run reported success.
+        def _no_effort(skills=None, cwd=None):  # pragma: no cover -- a stub
+            return None
+
+        fake = types.ModuleType("inspect_swe")
+        fake.claude_code = _no_effort
+        with mock.patch.dict(sys.modules, {"inspect_swe": fake}), mock.patch.object(
+            engine_verify.sandbox_spec, "provider", lambda: "podman"
+        ), mock.patch.object(engine_verify.sys, "platform", "linux"):
+            with self.assertRaises(SystemExit) as caught:
+                engine_verify.require()
+        self.assertIn("0.2.71", str(caught.exception))
+
+    def test_a_current_inspect_swe_is_accepted(self) -> None:
+        # The other direction, so the guard cannot pass by always raising.
+        def _with_effort(skills=None, cwd=None, effort=None):  # pragma: no cover
+            return None
+
+        fake = types.ModuleType("inspect_swe")
+        fake.claude_code = _with_effort
+        with mock.patch.dict(sys.modules, {"inspect_swe": fake}), mock.patch.object(
+            engine_verify.sandbox_spec, "provider", lambda: "podman"
+        ), mock.patch.object(engine_verify.sys, "platform", "linux"):
+            engine_verify.require()
+
+    def test_the_pin_matches_what_the_guard_demands(self) -> None:
+        # A guard naming a version the package does not require would send
+        # people to an upgrade their install then undoes.
+        pin = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        self.assertIn("inspect-swe>=0.2.71", pin)
 
     def test_the_behavioral_runner_hands_the_effort_down(self) -> None:
         # build_task grew the parameter once already without the caller

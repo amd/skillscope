@@ -81,6 +81,25 @@ def require() -> None:
     except ModuleNotFoundError as exc:  # pragma: no cover -- environment shape
         raise SystemExit(INSTALL_HINT) from exc
 
+    # Checked here rather than left to the call, because the call is inside a
+    # task inspect has already started: the failure arrives as a TypeError
+    # underneath a traceback, one leg of a three-leg comparison quietly
+    # produces no report, and the run carries on. Observed exactly that way on
+    # a runner whose inspect-swe predated the argument and so satisfied the
+    # old floor without upgrading.
+    import inspect as _inspect
+
+    from inspect_swe import claude_code
+
+    if "effort" not in _inspect.signature(claude_code).parameters:
+        raise SystemExit(
+            "error: --engine claude-code needs inspect-swe >= 0.2.71 for "
+            "claude_code(effort=). Without it this leg runs at the model's "
+            "default reasoning effort while the others run at the effort they "
+            "were given, so the two are not comparable. Upgrade with:\n"
+            "    pip install --upgrade 'inspect-swe>=0.2.71'"
+        )
+
 
 def _ensure_workdir():
     """Create the directory the scorers read, before the agent runs in it.
