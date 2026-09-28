@@ -101,6 +101,95 @@ def require() -> None:
         )
 
 
+# What `inspect_ai.tool`'s installer puts into a sandbox for a skill: `SKILL.md`,
+# plus anything under these three subdirectories. Named because the gap between
+# it and what a skill actually ships is what the staging below repairs.
+SANDBOX_SKILL_SUBDIRS = ("scripts", "references", "assets")
+
+
+# A skill's own test suite. Not part of the skill as anyone installs it, and
+# `evals/evals.json` holds each case's prompt *and the skill it expects* -- so
+# staging it would put the answers in the room the agent is being graded on
+# choosing from.
+EVAL_FIXTURE_DIR = "evals"
+
+
+def files_to_restore(skill_dir: Path) -> list[Path]:
+    """The files a sandboxed skill is missing, minus the ones it must not have.
+
+    `read_skills` collects `SKILL.md` and the contents of `scripts/`,
+    `references/` and `assets/`. Everything else is discarded, silently -- and
+    a skill's supporting material is not obliged to live in those three places.
+    Across the catalogue these legs run against, *no* skill has a `references/`
+    directory at all: they ship `reference.md`, `examples.md`, `skill-card.md`,
+    `templates/` and `agents/` at the top level, none of which the sandbox ever
+    saw.
+
+    So the room was whole on the host and partial in the container, and the
+    reports compared the two as though they were one room. The clearest case:
+    the agent opened the right skill's `SKILL.md`, followed it to
+    `reference.md`, found nothing, and stopped -- graded as a missed trigger,
+    which reads as a skill failing to attract the prompt it was written for.
+
+    `evals/` is excluded rather than restored, which makes this deliberately
+    *not* a faithful copy of what the host legs stage. They `copytree` the
+    whole directory and so carry the expectations into the room with it. No
+    agent has been observed opening them, but matching that would be copying a
+    mistake for the sake of symmetry.
+
+    Pure, and returning paths rather than copying, so the rule is testable
+    without a sandbox and the caller can say what it staged.
+    """
+    restore: list[Path] = []
+    for path in sorted(skill_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(skill_dir)
+        if rel.as_posix() == "SKILL.md":
+            continue
+        if rel.parts and rel.parts[0] in SANDBOX_SKILL_SUBDIRS:
+            continue
+        if rel.parts and rel.parts[0] == EVAL_FIXTURE_DIR:
+            continue
+        restore.append(path)
+    return restore
+
+
+def complete_skills_solver(skills: dict[str, Path]):
+    """Add the files inspect's installer drops, so the guest has a whole skill.
+
+    Chained *ahead* of `claude_code`, which installs its own half when the
+    agent starts. Safe in that order: the installer writes named files and
+    never clears the directory, so the two halves land side by side. Ordering
+    it after would be worse than useless -- `claude_code` runs the agent, so
+    anything staged behind it arrives once the run is over.
+
+    Additive on purpose. Discovery stays inspect's, which is the point of this
+    leg; the only difference is that a skill the agent chooses to open is all
+    there. The host legs need none of it -- they `copytree` the directory and
+    have always had the whole thing.
+    """
+    from inspect_ai.solver import solver
+
+    @solver
+    def _complete():
+        async def solve(state, generate):
+            from inspect_ai.util import sandbox
+
+            root = tools.workdir_path() or "."
+            for name, skill_dir in skills.items():
+                for path in files_to_restore(skill_dir):
+                    rel = path.relative_to(skill_dir).as_posix()
+                    await sandbox().write_file(
+                        f"{root}/.claude/skills/{name}/{rel}", path.read_bytes()
+                    )
+            return state
+
+        return solve
+
+    return _complete()
+
+
 def _ensure_workdir():
     """Create the directory the scorers read, before the agent runs in it.
 
@@ -153,8 +242,13 @@ def build_task(
         # `effort` reaches the agent rather than being dropped here: unset is
         # not neutral, it is the model's own default, and the legs this one is
         # compared against all pass the value they were given.
+        # A behavioral case has more riding on this than a routing one: it runs
+        # the skill to completion, so a `reference.md` the installer dropped is
+        # a step the agent cannot take, and the scorer records it as work the
+        # skill failed to do.
         solver=chain(
             _ensure_workdir(),
+            complete_skills_solver({skill_dir.name: skill_dir}),
             claude_code(
                 skills=[skill_dir], cwd=tools.workdir_path(), effort=effort or None
             ),

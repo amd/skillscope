@@ -28,6 +28,7 @@ import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import tempfile
 import time
@@ -3569,6 +3570,106 @@ def _work_event(n: int) -> dict:
             ]
         },
     }
+
+
+class TestTheSandboxedRoomHoldsWholeSkills(unittest.TestCase):
+    """inspect's skill installer carries less than a skill ships.
+
+    `read_skills` collects `SKILL.md` and the contents of `scripts/`,
+    `references/` and `assets/`; everything else is dropped without a word. The
+    catalogue these legs run against puts its supporting material at the top
+    level -- `reference.md`, `examples.md`, `skill-card.md`, `templates/`,
+    `agents/` -- and no skill in it has a `references/` directory at all.
+
+    So the container held `SKILL.md` and little else while the host legs held
+    the whole directory, and the two were compared as one room. Measured: the
+    agent opened the right skill's `SKILL.md`, followed it to `reference.md`,
+    found nothing, and stopped -- scored as a missed trigger.
+    """
+
+    def _skill(self, layout: dict[str, str]) -> Path:
+        root = Path(tempfile.mkdtemp())
+        for rel, body in layout.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def test_top_level_supporting_files_are_restored(self) -> None:
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "reference.md": "the details",
+                "examples.md": "worked examples",
+                "skill-card.md": "card",
+            }
+        )
+        restored = {
+            p.relative_to(skill).as_posix()
+            for p in engine_verify.files_to_restore(skill)
+        }
+        self.assertEqual(restored, {"reference.md", "examples.md", "skill-card.md"})
+
+    def test_nested_directories_the_installer_ignores_are_restored(self) -> None:
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "templates/rule.md": "t",
+                "agents/analyzer.md": "a",
+            }
+        )
+        restored = {
+            p.relative_to(skill).as_posix()
+            for p in engine_verify.files_to_restore(skill)
+        }
+        self.assertEqual(restored, {"templates/rule.md", "agents/analyzer.md"})
+
+    def test_what_the_installer_already_carries_is_not_duplicated(self) -> None:
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "scripts/detect.py": "print()",
+                "references/api.md": "r",
+                "assets/logo.png": "bytes",
+            }
+        )
+        self.assertEqual(engine_verify.files_to_restore(skill), [])
+
+    def test_the_skills_own_tests_are_never_staged(self) -> None:
+        # `evals/evals.json` pairs each prompt with the skill it expects. In
+        # the room, that is the answer sheet. The host legs copytree it in
+        # today; this deliberately does not match them.
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "evals/evals.json": '{"evaluations": [{"expect": "x"}]}',
+                "evals/files/input.hip": "kernel",
+                "reference.md": "keep me",
+            }
+        )
+        restored = {
+            p.relative_to(skill).as_posix()
+            for p in engine_verify.files_to_restore(skill)
+        }
+        self.assertEqual(restored, {"reference.md"})
+
+    def test_the_staging_runs_before_the_agent_not_after(self) -> None:
+        # Chained behind `claude_code` it would land after the run finished,
+        # which looks identical in the source and does nothing at all.
+        source = inspect.getsource(engine_routing._solver)
+        staged = source.index("complete_skills_solver")
+        agent = source.index("claude_code(skills=room")
+        self.assertLess(
+            staged, agent, "the room is completed after the agent has already run"
+        )
+
+    def test_the_behavioral_leg_completes_its_skill_too(self) -> None:
+        # It matters more there: a behavioral case runs the skill to the end,
+        # so a missing reference.md is a step the agent cannot take.
+        self.assertIn(
+            "complete_skills_solver", inspect.getsource(engine_verify.build_task)
+        )
 
 
 class TestEveryLegThinksAsHardAsItWasTold(unittest.TestCase):

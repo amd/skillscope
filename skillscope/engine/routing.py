@@ -581,6 +581,10 @@ def _solver(
         # liked, and called the difference sandboxing.
         return chain(
             verify._ensure_workdir(),
+            # Ahead of the agent, not behind it: `claude_code` runs the run.
+            # See `verify.files_to_restore` for what this adds
+            # and why the room was otherwise partial in the container only.
+            verify.complete_skills_solver(routing_set),
             claude_code(skills=room, cwd=tools.workdir_path(), effort=effort or None),
         )
 
