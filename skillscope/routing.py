@@ -172,21 +172,12 @@ class Outcome:
     degraded: bool = False
 
 
-def stage_workspace(skills: dict[str, Path]) -> Path:
-    """Install every skill in the routing set into a fresh temp workspace.
 
-    Claude Code loads ``.claude/skills/`` from a directory passed with
-    ``--add-dir``, which registers each skill's name and description in the
-    system prompt without injecting its body -- exactly the state a routing
-    decision is made from. One workspace per case keeps cases isolated (and
-    lets them run concurrently).
-    """
-    workspace = Path(tempfile.mkdtemp(prefix="routing-"))
-    dest_root = workspace / ".claude" / "skills"
-    dest_root.mkdir(parents=True, exist_ok=True)
-    for name, source in skills.items():
-        shutil.copytree(source, dest_root / name)
-    return workspace
+
+def _capped_timeout(seconds: float) -> float:
+    """``seconds``, or whatever the command's ``--timeout`` has left."""
+    bound = deadline.active()
+    return seconds if bound is None else bound.cap(seconds)
 
 
 def supported_flags(flags: list[str]) -> set[str]:
@@ -353,130 +344,18 @@ def detect_activation(event: dict, skills: list[str], allow_body_path: bool = Tr
     return None
 
 
-def _init_skills(event: dict, skills: list[str]) -> list[str] | None:
-    """Skill names the CLI reported at session init, if this is that event.
-
-    Used to prove the agent really saw the whole routing set (and nothing extra):
-    a stray user-level skill on the runner would change every routing decision.
-    """
-    if event.get("type") != "system" or event.get("subtype") != "init":
-        return None
-    seen: list[str] = []
-    for key in ("skills", "slash_commands", "slashCommands", "commands"):
-        entries = event.get(key)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            text = entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False)
-            hit = _match_skill(text, skills)
-            if hit and hit not in seen:
-                seen.append(hit)
-    return seen
 
 
-def _init_tools(event: dict) -> set[str] | None:
-    """Tool names the CLI reported at session init, if this is that event.
-
-    Used to decide whether the SKILL.md-path fallback in ``detect_activation``
-    applies to this build. An init event without a tool list leaves the
-    fallback on, which is how older builds behaved.
-    """
-    if event.get("type") != "system" or event.get("subtype") != "init":
-        return None
-    tools = event.get("tools")
-    if not isinstance(tools, list):
-        return set()
-    return {str(tool).lower() for tool in tools}
 
 
-def _init_extra_skills(event: dict, skills: list[str]) -> list[str] | None:
-    """Skills the CLI reported at init that this eval did not install.
-
-    A user-level skill on the runner is registered alongside the staged ones
-    and competes for every prompt, so the routing numbers describe a room
-    nobody asked for. The ``other:`` check only notices such a skill when it
-    actually fires; this notices it being installed at all.
-    """
-    if event.get("type") != "system" or event.get("subtype") != "init":
-        return None
-    entries = event.get("skills")
-    if not isinstance(entries, list):
-        return []
-    known = {skill.lower() for skill in skills}
-    extra: list[str] = []
-    for entry in entries:
-        if isinstance(entry, str):
-            name = entry
-        elif isinstance(entry, dict):
-            name = str(entry.get("name") or "")
-        else:
-            continue
-        name = name.strip().lstrip("/")
-        if name and name.lower() not in known and name not in extra:
-            extra.append(name)
-    return extra
 
 
-def _pump(stream, sink: queue.Queue) -> None:
-    try:
-        for line in stream:
-            sink.put(line)
-    finally:
-        sink.put(None)
 
 
-def _terminate(proc: subprocess.Popen) -> None:
-    """Kill the CLI and its children.
-
-    The `claude` process spawns helpers, so killing only the parent can leave
-    an orphan holding the API call open -- which is the cost this eval exists
-    to avoid. Kill the whole group/tree.
-    """
-    if proc.poll() is not None:
-        return
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                check=False,
-            )
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        pass
 
 
-def _capped_timeout(seconds: float) -> float:
-    """``seconds``, or whatever the command's ``--timeout`` has left."""
-    bound = deadline.active()
-    return seconds if bound is None else bound.cap(seconds)
 
 
-def _command_timeout_outcome(case: Case, bound: deadline.Deadline) -> Outcome:
-    print(f"  [FAIL] {case.id}: {bound.message()}", flush=True)
-    return Outcome(
-        id=case.id,
-        category=case.category,
-        skill=case.skill,
-        prompt=case.prompt,
-        expect=case.expect_skill,
-        observed=None,
-        verdict="error",
-        passed=False,
-        stop_reason="timeout",
-        elapsed_s=0.0,
-        tool_calls=0,
-        error=bound.message(),
-    )
 
 
 def classify(expect: str | None, observed: str | None) -> str:
@@ -487,206 +366,6 @@ def classify(expect: str | None, observed: str | None) -> str:
     return "correct_trigger" if observed == expect else "wrong_skill"
 
 
-def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) -> Outcome:
-    """Run one prompt, stopping as soon as the routing decision is known."""
-    bound = deadline.active()
-    if bound is not None and bound.expired():
-        return _command_timeout_outcome(case, bound)
-
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        raise SystemExit("error: 'claude' CLI not found on PATH")
-
-    skills = list(routing_set)
-    workspace = stage_workspace(routing_set)
-    # Outside the workspace: the agent can list its own cwd, and a config dir
-    # sitting in there would be one more thing for it to find.
-    config_dir = (
-        Path(tempfile.mkdtemp(prefix="routing-config-")) if config.isolate_config else None
-    )
-    cmd = [
-        claude_bin,
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--add-dir",
-        str(workspace),
-        "--model",
-        config.model,
-    ]
-    if config.effort:
-        cmd += ["--effort", config.effort]
-    # Dozens of throwaway sessions per run; don't leave them on disk.
-    if "--no-session-persistence" in config.available_flags:
-        cmd += ["--no-session-persistence"]
-    if config.max_budget_usd > 0 and "--max-budget-usd" in config.available_flags:
-        cmd += ["--max-budget-usd", str(config.max_budget_usd)]
-
-    spawn: dict = {}
-    if os.name == "nt":
-        spawn["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        spawn["start_new_session"] = True
-
-    env = claude_env()
-    if config_dir is not None:
-        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-
-    events: list[dict] = []
-    observed: str | None = None
-    visible: list[str] = []
-    extra: list[str] = []
-    stop_reason = "completed"
-    tool_calls = 0
-    inspection_calls = 0
-    allow_body_path = True
-    error: str | None = None
-    stderr_lines: list[str] = []
-
-    start = time.perf_counter()
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(workspace),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        env=env,
-        **spawn,
-    )
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(case.prompt)
-        proc.stdin.close()
-
-        stdout_q: queue.Queue = queue.Queue()
-        threading.Thread(target=_pump, args=(proc.stdout, stdout_q), daemon=True).start()
-        threading.Thread(
-            target=lambda: stderr_lines.extend(proc.stderr.readlines()), daemon=True
-        ).start()
-
-        case_deadline = time.perf_counter() + _capped_timeout(config.case_timeout)
-        while True:
-            remaining = case_deadline - time.perf_counter()
-            if remaining <= 0:
-                stop_reason = "timeout"
-                break
-            try:
-                line = stdout_q.get(timeout=min(1.0, remaining))
-            except queue.Empty:
-                continue
-            if line is None:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            events.append(event)
-            usage.record_stream_event(event)
-
-            reported = _init_skills(event, skills)
-            if reported is not None:
-                visible = reported
-            uninstalled = _init_extra_skills(event, skills)
-            if uninstalled is not None:
-                extra = uninstalled
-            tools = _init_tools(event)
-            if tools is not None:
-                allow_body_path = not (tools & SKILL_TOOLS)
-
-            hit = detect_activation(event, skills, allow_body_path=allow_body_path)
-            if hit:
-                observed = hit
-                stop_reason = "skill_activated"
-                break
-
-            if event.get("type") == "result":
-                stop_reason = "result"
-                usage.record_stream_event(event)
-                if event.get("is_error"):
-                    error = _result_error(event)
-                break
-
-            for name, tool_input in _iter_tool_uses(event):
-                if name.lower() in BOOKKEEPING_TOOLS:
-                    continue
-                if _is_skills_inspection(tool_input, skills):
-                    inspection_calls += 1
-                else:
-                    tool_calls += 1
-            # Inspection is exempt from the tool budget but not unbounded: an
-            # agent that has read every installed skill and still called none
-            # has made its decision, and the run should not idle to timeout.
-            if tool_calls >= config.max_tool_calls or inspection_calls >= config.max_inspection_calls:
-                stop_reason = "tool_budget"
-                break
-    finally:
-        _terminate(proc)
-        elapsed = time.perf_counter() - start
-        if config.keep_logs:
-            logs_dir = Path(config.keep_logs)
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            (logs_dir / f"{case.id}.jsonl").write_text(
-                "\n".join(json.dumps(e, ensure_ascii=False) for e in events),
-                encoding="utf-8",
-            )
-        shutil.rmtree(workspace, ignore_errors=True)
-        if config_dir is not None:
-            shutil.rmtree(config_dir, ignore_errors=True)
-
-    if not events:
-        error = ("".join(stderr_lines).strip() or "claude produced no stream-json output")[:400]
-
-    # "no skill activated" is only a real finding when the run got far enough to
-    # show a decision: the agent answered (`result`) or started doing the work
-    # itself (`tool_budget`). A stream that just ends, or a hang, means the run
-    # never made a routing decision -- grading that as a missed trigger would
-    # invent a result out of an infrastructure failure.
-    if observed is None and stop_reason in INCONCLUSIVE_STOPS:
-        verdict = "error"
-        detail = "".join(stderr_lines).strip()
-        error = error or (
-            f"run ended without a routing decision (stopped after: {stop_reason})"
-            + (f"; stderr: {detail[:300]}" if detail else "")
-        )
-    elif error and observed is None:
-        verdict = "error"
-    else:
-        verdict = classify(case.expect_skill, observed)
-
-    outcome = Outcome(
-        id=case.id,
-        category=case.category,
-        skill=case.skill,
-        prompt=case.prompt,
-        expect=case.expect_skill,
-        observed=observed,
-        verdict=verdict,
-        passed=verdict in PASSING_VERDICTS,
-        stop_reason=stop_reason,
-        elapsed_s=round(elapsed, 2),
-        tool_calls=tool_calls,
-        inspection_calls=inspection_calls,
-        visible_skills=visible,
-        extra_skills=extra,
-        error=error,
-        degraded=is_provider_error(error),
-    )
-    print(
-        f"  [{'PASS' if outcome.passed else 'FAIL'}] {case.id}: "
-        f"expected {case.expect_skill or 'no skill'} -> got {observed or 'no skill'} "
-        f"({verdict}, {stop_reason}, {outcome.elapsed_s}s)",
-        flush=True,
-    )
-    return outcome
 
 
 def near_a_limit(outcome: "Outcome", meta: dict) -> bool:

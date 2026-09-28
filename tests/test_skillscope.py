@@ -784,32 +784,7 @@ class TestDeadline(unittest.TestCase):
         self.assertEqual(bound.cap(240), 0.0)
         self.assertIn("--timeout of 1s", bound.message())
 
-    def test_an_expired_deadline_does_not_start_a_routing_case(self) -> None:
-        cases, errors = parse(triggers(id="hung", prompt="go"))
-        self.assertEqual(errors, [])
-        bound = deadline.Deadline(1, command="routing", start=time.perf_counter() - 2)
-        previous = deadline.use(bound)
-        try:
-            outcome = routing.run_case(
-                cases[0], {"demo-skill": Path(".")}, routing.RoutingConfig()
-            )
-        finally:
-            deadline.use(previous)
-        self.assertEqual(outcome.verdict, "error")
-        self.assertEqual(outcome.stop_reason, "timeout")
-        self.assertIn("routing exceeded --timeout", outcome.error)
 
-    def test_an_expired_deadline_does_not_start_a_behavioral_case(self) -> None:
-        cases, errors = parse(triggers(id="hung", prompt="go", logs_contain=["x"]))
-        self.assertEqual(errors, [])
-        bound = deadline.Deadline(1, command="behavioral", start=time.perf_counter() - 2)
-        previous = deadline.use(bound)
-        try:
-            outcome = behavior.run_case(cases[0], {}, None, "opus", "high")
-        finally:
-            deadline.use(previous)
-        self.assertFalse(outcome.passed)
-        self.assertIn("behavioral exceeded --timeout", outcome.error)
 
 
 class TestCredentialResolution(unittest.TestCase):
@@ -1509,19 +1484,6 @@ class TestWholeRepoStructure(unittest.TestCase):
         covered = {case.expect_skill for case in cases if case.expect_skill}
         self.assertEqual(sorted(covered), sorted(listed))
 
-    def test_hooks_are_importable_and_expose_known_entry_points(self) -> None:
-        known = {"setup_session", "setup", "teardown", "check"}
-        for skill in datasets.skills_with_datasets():
-            if not datasets.hooks_path(skill).is_file():
-                continue
-            with self.subTest(skill=skill):
-                module = behavior.load_hooks(skill)
-                exported = {
-                    name
-                    for name in dir(module)
-                    if not name.startswith("_") and callable(getattr(module, name))
-                }
-                self.assertTrue(exported & known, f"{skill} hooks export nothing usable")
 
     def test_the_shipped_negatives_pool_parses(self) -> None:
         shared = datasets.load_shared_negatives()
@@ -2193,24 +2155,6 @@ class TestActivationDetection(unittest.TestCase):
         self.assertFalse(routing._is_skills_inspection('{"path": "src/main.py"}', self.SKILLS))
 
 
-class TestRoutingStaging(unittest.TestCase):
-    def test_the_routing_set_lands_in_the_workspace_and_nothing_else(self) -> None:
-        repo = Repo(self)
-        repo.skill("one", dataset=tier0_dataset("one"))
-        repo.skill("two", dataset=tier0_dataset("two"))
-        repo.skill("unlisted", dataset=tier0_dataset("unlisted"))
-        cfg = repo.activate(routing_room="one,two")
-        workspace = routing.stage_workspace(cfg.routing_set)
-        try:
-            staged = sorted(p.name for p in (workspace / ".claude" / "skills").iterdir())
-            self.assertEqual(staged, ["one", "two"])
-            self.assertTrue(
-                (workspace / ".claude" / "skills" / "one" / "SKILL.md").is_file()
-            )
-        finally:
-            import shutil
-
-            shutil.rmtree(workspace, ignore_errors=True)
 
 
 class TestPromptTemplating(unittest.TestCase):
@@ -2347,162 +2291,8 @@ class FakeAgent:
         return agent.Run(workspace=self.workspace, events=self.events, judge_model=None)
 
 
-class TestBehaviorCaseFlow(unittest.TestCase):
-    """The hook contract and prompt templating, without spending tokens."""
-
-    def setUp(self) -> None:
-        self.repo = Repo(self)
-        self.repo.skill(
-            "demo-skill",
-            dataset=tier0_dataset("demo"),
-            workspace={"evals/files/stub/main.py": "print('hi')\n"},
-        )
-        self.repo.activate()
-
-    def run_case(self, case_payload: dict, hooks=None, events=None, skill="demo-skill"):
-        cases, errors = parse(triggers(**case_payload), skill=skill)
-        self.assertEqual(errors, [])
-        made: list[FakeAgent] = []
-
-        def fake_claude(model, *, skill, effort, seed=None):
-            made.append(FakeAgent(events or stream(), seed))
-            return made[-1]
-
-        original = behavior.claude
-        behavior.claude = fake_claude
-        try:
-            outcome = behavior.run_case(cases[0], {}, hooks, "opus", "high")
-        finally:
-            behavior.claude = original
-        return outcome, made[0]
-
-    def test_a_passing_case(self) -> None:
-        outcome, session = self.run_case(
-            {"id": "a", "prompt": "run it", "logs_contain": ["detect.py"]},
-            events=stream(("Bash", {"command": "detect.py"})),
-        )
-        self.assertTrue(outcome.passed)
-        self.assertEqual(session.prompts, ["run it"])
-
-    def test_a_failing_expectation_fails_the_case(self) -> None:
-        outcome, _ = self.run_case({"id": "a", "prompt": "run it", "logs_contain": ["nope"]})
-        self.assertFalse(outcome.passed)
-
-    def test_hooks_run_in_order_and_can_template_the_prompt(self) -> None:
-        calls: list[str] = []
-
-        class Hooks:
-            @staticmethod
-            def setup(workspace, case, ctx):
-                calls.append("setup")
-                return {"output_dir": workspace / "out"}
-
-            @staticmethod
-            def check(run, case, ctx):
-                calls.append("check")
-
-            @staticmethod
-            def teardown(workspace, case, ctx):
-                calls.append("teardown")
-
-        outcome, session = self.run_case(
-            {"id": "a", "prompt": "write to {output_dir}", "logs_contain": ["detect"]},
-            hooks=Hooks,
-            events=stream(("Bash", {"command": "detect"})),
-        )
-        self.assertEqual(calls, ["setup", "check", "teardown"])
-        self.assertNotIn("{output_dir}", session.prompts[0])
-        self.assertTrue(outcome.passed)
-
-    def test_a_raising_hook_check_fails_the_case_without_killing_the_run(self) -> None:
-        class Hooks:
-            @staticmethod
-            def check(run, case, ctx):
-                raise AssertionError("scorer reported 3 failures")
-
-        outcome, _ = self.run_case({"id": "a", "prompt": "p", "logs_contain": []}, hooks=Hooks)
-        self.assertFalse(outcome.passed)
-        self.assertTrue(any("scorer reported" in c["detail"] for c in outcome.checks))
-
-    def test_teardown_runs_even_when_the_agent_raises(self) -> None:
-        calls: list[str] = []
-
-        class Hooks:
-            @staticmethod
-            def teardown(workspace, case, ctx):
-                calls.append("teardown")
-
-        class Exploding(FakeAgent):
-            def prompt(self, text):
-                raise RuntimeError("claude produced no output")
-
-        cases, _ = parse(triggers(id="a", prompt="p", unexpected_behavior=["x"]))
-        original = behavior.claude
-        behavior.claude = lambda model, *, skill, effort, seed=None: Exploding(stream(), seed)
-        try:
-            outcome = behavior.run_case(cases[0], {}, Hooks, "opus", "high")
-        finally:
-            behavior.claude = original
-        self.assertEqual(calls, ["teardown"])
-        self.assertFalse(outcome.passed)
-        self.assertIn("claude produced no output", outcome.error)
-
-    def test_workspace_fixtures_are_staged(self) -> None:
-        outcome, _ = self.run_case(
-            {
-                "id": "a",
-                "prompt": "edit it",
-                "workspace": "evals/files/stub",
-                "files_exist": ["main.py"],
-            }
-        )
-        self.assertTrue(outcome.passed, outcome.checks)
 
 
-class TestBehaviorReporting(unittest.TestCase):
-    def test_summary_counts_cases_and_expectations(self) -> None:
-        outcomes = [
-            behavior.BehaviorOutcome(
-                id="a",
-                skill="s",
-                prompt="p",
-                passed=True,
-                elapsed_s=1.0,
-                checks=[
-                    {"kind": "logs_contain", "expectation": "x", "passed": True, "detail": ""}
-                ],
-            ),
-            behavior.BehaviorOutcome(
-                id="b",
-                skill="s",
-                prompt="p",
-                passed=False,
-                elapsed_s=1.0,
-                checks=[
-                    {
-                        "kind": "expected_behavior",
-                        "expectation": "y",
-                        "passed": False,
-                        "detail": "no",
-                    }
-                ],
-            ),
-        ]
-        summary = behavior.summarize(outcomes, {"model": "opus", "effort": "high"})
-        self.assertEqual(
-            summary["totals"],
-            {
-                "cases": 2,
-                "passed": 1,
-                "checks": 2,
-                "checks_passed": 1,
-                "errors": 0,
-                "degraded": 0,
-            },
-        )
-        report = behavior.render_markdown(summary)
-        self.assertIn("1/2 cases passed", report)
-        self.assertIn("`b`", report)
 
 
 class TestCaseFiltering(unittest.TestCase):
@@ -2619,23 +2409,27 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
 
 
 class TestBehavioralEngineDispatch(unittest.TestCase):
-    """Only `legacy` may bypass the inspect path.
+    """Every engine has a behavioral branch, and reaches its own runner.
 
-    `claude-code-no-sandbox` was added to the dispatch chain but not to the guard around
-    it, so it fell through to the legacy engine: runs that asked for one agent
-    silently got another, while the reports said `engine: claude-code-no-sandbox`
-    throughout. Nothing in the suite noticed, because nothing asserted which
-    runner a flag actually reaches.
+    `claude-code-no-sandbox` was once added to the dispatch chain but not to
+    the guard around it, so it fell through to the engine that no longer
+    exists: runs asked for one agent, silently got another, and the reports
+    said `engine: claude-code-no-sandbox` throughout. Nothing in the suite
+    noticed, because nothing asserted which runner a flag actually reaches.
     """
 
-    def test_the_guard_covers_every_engine_but_legacy(self) -> None:
-        self.assertEqual(set(cli.INSPECT_ENGINES), set(cli.ENGINES) - {"legacy"})
+    def test_every_engine_runs_under_inspect_now(self) -> None:
+        self.assertEqual(set(cli.INSPECT_ENGINES), set(cli.ENGINES))
 
     def test_the_dispatch_reads_that_set_rather_than_a_literal(self) -> None:
-        # The bug was a literal tuple that fell behind the choices list. A
-        # literal here is the defect itself, so the source is what to assert.
+        # The bug was a branch list that fell behind the choices list, so
+        # the source is what to assert: every engine named, and an `else`
+        # that raises rather than quietly picking one.
         source = inspect.getsource(cli.cmd_behavioral)
-        self.assertIn("if args.engine in INSPECT_ENGINES:", source)
+        for engine in cli.ENGINES:
+            with self.subTest(engine=engine):
+                self.assertIn(f'args.engine == "{engine}"', source)
+        self.assertIn("has no behavioral leg", source)
 
     def test_the_preflight_uses_the_same_set(self) -> None:
         # These disagreed: the preflight demanded the inspect extra for
@@ -3174,14 +2968,14 @@ class TestEngineSandboxSelection(unittest.TestCase):
 
 
 class TestRoutingRunsOnEveryEngine(unittest.TestCase):
-    """Routing has a leg for all three engines, and reaches the one asked for.
+    """Routing reaches the leg it was asked for, for every engine there is.
 
-    It used to have one. `claude-code` and `claude-code-no-sandbox` were
-    refused, because they named the real CLI as the agent and routing had no
-    path that drove it. Now they do, and the assertion that matters is no
-    longer the refusal -- it is that asking for a leg reaches that leg. The
-    defect this replaces was exactly the opposite: a run asked for one engine
-    silently got another, and the report named the one it had asked for.
+    It used to have one leg, and `claude-code` / `claude-code-no-sandbox` were
+    refused because routing had no path that drove the real CLI. Now both do,
+    and `legacy` -- the leg they were refused in favour of -- is gone. The
+    assertion that matters is that asking for a leg reaches that leg: the
+    defect this replaces was a run asking for one engine, silently getting
+    another, and the report naming the one it had asked for.
     """
 
     def setUp(self) -> None:
@@ -3198,21 +2992,9 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
             self.passed_kwargs = kwargs
             return []
 
-        def record_legacy(case, routing_set, cfg):
-            self.reached.append("legacy")
-            raise AssertionError("the legacy leg ran for an inspect engine")
-
-        for target, attr, fn in (
-            ("skillscope.engine.routing", "run", record_inspect),
-            (None, "run_case", record_legacy),
-        ):
-            patch = (
-                mock.patch(f"{target}.{attr}", fn)
-                if target
-                else mock.patch.object(routing, attr, fn)
-            )
-            patch.start()
-            self.addCleanup(patch.stop)
+        patch = mock.patch("skillscope.engine.routing.run", record_inspect)
+        patch.start()
+        self.addCleanup(patch.stop)
 
         for name in ("_write_report", "_prepare_graded_run"):
             patch = mock.patch.object(cli, name, lambda *a, **k: None)
@@ -3233,8 +3015,9 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
         self.assertEqual(self.reached, ["inspect:claude-code"])
 
     def test_asking_for_the_host_leg_reaches_it(self) -> None:
-        # The assertion that would have caught the original fallthrough: the
-        # legacy runner is patched to fail loudly if it is reached.
+        # The case that used to fall through: `claude-code-no-sandbox` was in
+        # the choices list but not in the dispatch guard, so it silently ran
+        # somewhere else while the report named what had been asked for.
         self.run_routing("claude-code-no-sandbox")
         self.assertEqual(self.reached, ["inspect:claude-code-no-sandbox"])
 
@@ -3242,16 +3025,26 @@ class TestRoutingRunsOnEveryEngine(unittest.TestCase):
         self.run_routing("claude-code")
         self.assertIn("case_timeout", self.passed_kwargs)
 
-    def test_the_guard_reads_the_engine_set_rather_than_a_literal(self) -> None:
-        # A literal tuple is the defect itself, so the source is what to assert.
-        self.assertIn(
-            "if args.engine in INSPECT_ENGINES:", inspect.getsource(cli.cmd_routing)
-        )
+    def test_the_dispatch_distinguishes_the_legs(self) -> None:
+        # Routing branches on the sandboxed leg and lets the host leg fall to
+        # the else, so there is no per-engine name to assert here as there is
+        # in `cmd_behavioral`. What must hold is that it branches at all: a
+        # dispatch that treated both alike would report a containment one of
+        # them never had.
+        source = inspect.getsource(cli.cmd_routing)
+        self.assertIn('args.engine == "claude-code"', source)
+        self.assertIn("sandbox_isolated", source)
 
-    def test_an_engine_that_no_longer_exists_is_refused_by_the_parser(self) -> None:
-        self.assertNotIn("inspect", cli.ENGINES)
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            cli.build_parser().parse_args(["routing", "--engine", "inspect"])
+    def test_the_removed_engines_are_refused_by_the_parser(self) -> None:
+        for engine in ("inspect", "legacy"):
+            with self.subTest(engine=engine):
+                self.assertNotIn(engine, cli.ENGINES)
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(
+                    io.StringIO()
+                ):
+                    cli.build_parser().parse_args(["routing", "--engine", engine])
+
+
 
 
 class TestTheTranscriptIsReadTooNotJustTheMessages(unittest.TestCase):
@@ -3445,7 +3238,8 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("hooks.py", message)
         self.assertIn("hooked", message)
-        self.assertIn("--engine legacy", message)
+        self.assertIn("No engine executes hooks", message)
+        self.assertIn("--engine claude-code", message)
 
     def test_the_refusal_names_every_skill_that_would_be_skipped(self) -> None:
         # Naming one of three sends someone round the loop twice.
@@ -3460,8 +3254,6 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
         self.assertIn("hooked", message)
         self.assertIn("also-hooked", message)
 
-    def test_legacy_runs_hooks_so_it_is_not_refused(self) -> None:
-        self.assertIsNone(self.refuse("legacy", ["hooked"]))
 
     def test_a_skill_without_a_hook_is_not_refused(self) -> None:
         self.assertIsNone(self.refuse("claude-code", ["plain"]))
@@ -3505,7 +3297,7 @@ class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):
     """
 
     def test_a_host_leg_is_held_to_the_cap_as_given(self) -> None:
-        for engine in ("legacy", "claude-code-no-sandbox"):
+        for engine in ("claude-code-no-sandbox",):
             with self.subTest(engine=engine):
                 self.assertEqual(engine_routing.budget_for(engine, 4), 4)
 
@@ -4384,7 +4176,9 @@ class TestRoutingReportsWhereItRan(unittest.TestCase):
         return self.written["meta"]
 
     def test_a_host_leg_says_host(self) -> None:
-        meta = self.meta("legacy", sandbox="host", sandbox_isolated=False)
+        meta = self.meta(
+            "claude-code-no-sandbox", sandbox="host", sandbox_isolated=False
+        )
         self.assertEqual(meta["sandbox"], "host")
         self.assertIs(meta["sandbox_isolated"], False)
 
@@ -4402,7 +4196,7 @@ class TestRoutingReportsWhereItRan(unittest.TestCase):
 
     def test_a_legs_own_meta_cannot_overwrite_what_contained_it(self) -> None:
         meta = self.meta(
-            "legacy", sandbox="host", sandbox_isolated=False,
+            "claude-code-no-sandbox", sandbox="host", sandbox_isolated=False,
         )
         self.assertEqual(meta["sandbox"], "host")
 

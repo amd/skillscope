@@ -86,27 +86,35 @@ from . import (
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
-# The engines a graded run can be driven by, in the order they were added.
-#   legacy                  -- the claude CLI, driven directly, no framework
+# The engines a graded run can be driven by.
 #   claude-code             -- the real CLI in a sandbox, via inspect_swe (Linux only)
 #   claude-code-no-sandbox  -- the real CLI on the host, under inspect_ai (any platform)
 #
-# All three drive the agent a skill is actually written for. A fourth,
-# `inspect`, drove a harness-independent agent instead, and was removed: it
-# carried a smaller tool set than the real harness, so a skill referring to a
-# tool it did not have failed the case for a reason that was the agent's rather
-# than the skill's -- and nothing in the report distinguished the two.
-ENGINES = ["legacy", "claude-code", "claude-code-no-sandbox"]
+# Both drive the agent a skill is actually written for; what differs is where
+# it runs. Two others have been removed. `inspect` drove a harness-independent
+# agent, and carried a smaller tool set than the real harness, so a skill
+# referring to a tool it did not have failed for a reason that was the agent's
+# rather than the skill's. `legacy` drove the CLI as a bare subprocess, and
+# `claude-code-no-sandbox` replaced it: measured per case against the run's own
+# noise floor, the two agreed on every routing case outside that floor, across
+# two runs, and on 12 of 13 behavioral cases.
+ENGINES = ["claude-code", "claude-code-no-sandbox"]
 
-# Every engine but the first runs under inspect_ai, and they share what follows
-# from that: a preflight of their own, and a report that names the engine.
-INSPECT_ENGINES = tuple(e for e in ENGINES if e != "legacy")
+# Every engine runs under inspect_ai now. Kept as its own name because the code
+# that branches on it is about what an inspect-based engine needs -- a preflight
+# of its own, a report that names the engine -- rather than about which engines
+# happen to exist today.
+INSPECT_ENGINES = tuple(ENGINES)
 
-# The engines routing has a leg for -- now every one of them. `legacy` drives
-# the CLI itself; the other two reach it through `skillscope.engine.routing`.
-# Derived rather than listed, because the last time two engine lists were kept
-# by hand one fell behind and the runs silently went somewhere else.
+# The engines routing has a leg for: all of them. Derived rather than listed,
+# because the last time two engine lists were kept by hand one fell behind and
+# the runs silently went somewhere else.
 ROUTING_ENGINES = tuple(ENGINES)
+
+# What a run uses when nobody says. The host leg rather than the sandboxed one:
+# it runs on every platform, where `claude-code` needs a POSIX guest and a
+# container runtime, and a default that refuses on Windows is not a default.
+DEFAULT_ENGINE = "claude-code-no-sandbox"
 
 # Where JSON reports land inside the repo under test. One gitignored directory
 # rather than a path per repo, so a report is always in the same place.
@@ -366,7 +374,7 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
-    if getattr(args, "engine", "legacy") in INSPECT_ENGINES:
+    if getattr(args, "engine", DEFAULT_ENGINE) in INSPECT_ENGINES:
         # The CLI-based reachability probe tests something these engines do not
         # use, but they still need one of their own: a graded run starts
         # containers and installs skills before it first reaches a provider, so
@@ -403,9 +411,9 @@ def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
     """Refuse a run whose skills ship hooks the chosen engine cannot execute.
 
     `evals/hooks.py` is environment plumbing -- clearing stale containers,
-    tearing down a service -- and only the legacy engine runs it. No engine
-    built on inspect_ai builds the `ctx` those hooks receive, so on those
-    engines the file is simply not read.
+    tearing down a service. No engine runs it any more: the legacy engine did,
+    and none built on inspect_ai constructs the `ctx` those hooks receive, so
+    the file is simply not read.
 
     Not read is the problem. A hook that did not run leaves no trace in the
     report: the case is graded as though its setup happened, and the failure
@@ -419,7 +427,7 @@ def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
     Routing never reads hooks on any engine, so it is exempt: a routing run
     installs the skills and asks which one fires, and executes nothing.
     """
-    if command != "behavioral" or engine not in INSPECT_ENGINES:
+    if command != "behavioral":
         return
 
     with_hooks = [s for s in skills if datasets.hooks_path(s).is_file()]
@@ -434,20 +442,23 @@ def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
         f"skills ship one:\n{listed}\n"
         "    Their setup and teardown would be skipped silently, and the "
         "cases graded as though it had run.\n"
-        "    Use --engine legacy, which executes hooks, or drop the hook if "
-        "it is no longer needed."
+        "    No engine executes hooks. `legacy` did, and has been removed.\n"
+        "    Either drop the hook if its work is no longer needed, or -- for "
+        "teardown of containers the agent started -- run the skill under "
+        "--engine claude-code, where the sandbox is torn down with the case "
+        "and the hook has nothing left to do."
     )
 
 
 def _sandbox_meta(args: argparse.Namespace) -> dict:
     """What contained this run, recorded so the report does not have to imply it.
 
-    The legacy engine runs the agent on the host with permissions bypassed, and
-    saying so in the artifact is the point: the same numbers mean different
-    things depending on whether anything was isolated.
+    Saying so in the artifact is the point: the same numbers mean different
+    things depending on whether anything was isolated, and one engine here
+    isolates nothing by construction. A report that left a reader to infer it
+    from the engine name is how a table of host results came to be read as
+    evidence about containers.
     """
-    if getattr(args, "engine", "legacy") == "legacy":
-        return {"sandbox": "host", "sandbox_isolated": False}
     from .engine import sandbox as engine_sandbox
 
     return engine_sandbox.describe()
@@ -531,66 +542,58 @@ def cmd_routing(args: argparse.Namespace) -> int:
         f"jobs={args.jobs}, engine={args.engine}"
     )
 
-    # INSPECT_ENGINES rather than a literal tuple, for the reason spelled out
-    # at the same guard in `cmd_behavioral`: a literal fell behind the choices
-    # list once, and every run that asked for one engine silently got another
-    # while the report named the one it had asked for.
-    if args.engine in INSPECT_ENGINES:
-        from .engine import routing as inspect_routing
-        from .engine import sandbox as engine_sandbox
+    from .engine import routing as inspect_routing
+    from .engine import sandbox as engine_sandbox
 
-        outcomes = inspect_routing.run(
-            cases,
-            routing_set,
-            args.model,
-            args.effort,
-            args.engine,
-            case_timeout=args.case_timeout,
-            max_tool_calls=args.max_tool_calls,
-            max_inspection_calls=args.max_inspection_calls,
-            max_budget_usd=args.max_budget_usd,
-        )
-        if args.engine == "claude-code":
-            # A container really was started: `verify.require()` refuses every
-            # provider that shares the host's filesystem, so `describe()`
-            # cannot report an isolation this leg did not have. The config dir
-            # is isolated structurally -- the guest has no `~/.claude` to keep
-            # out -- rather than conditionally on a credential.
-            box = engine_sandbox.describe()
-            isolated = True
-        else:
-            # The CLI on the host. `engine/routing.py` has already refused to
-            # start without the credential that lets it redirect the config
-            # dir, so reaching here means the room is the room that was asked
-            # for -- but nothing was contained, and the report says so.
-            box = {"sandbox": "host", "sandbox_isolated": False}
-            isolated = True
-        # Reported only where they bind. The host leg's CLI buffers until
-        # exit, so nothing can count its calls in time to stop it, and a cap
-        # recorded there would be a cap that never bit.
-        extra: dict = {"case_timeout": args.case_timeout}
-        if args.engine == "claude-code":
-            # The cap that was enforced, not the one asked for. A sandboxed
-            # run is held to a scaled budget because it needs more calls to
-            # orient, and reporting the request would make `near_limit` count
-            # against a threshold that never applied.
-            extra["max_tool_calls"] = inspect_routing.budget_for(
-                args.engine, args.max_tool_calls
-            )
-            extra["max_inspection_calls"] = inspect_routing.budget_for(
-                args.engine, args.max_inspection_calls
-            )
-            extra["budget_scaled_by"] = inspect_routing.SANDBOX_BUDGET_FACTOR
-        else:
-            # The CLI's own cap, passed through and only when the build
-            # advertises it -- so this records what was actually enforced.
-            flags = inspect_routing.host_cost_flags(args.max_budget_usd)
-            if flags:
-                extra["max_budget_usd"] = args.max_budget_usd
-            extra["optional_cli_flags_used"] = sorted(f for f in flags if f.startswith("--"))
+    outcomes = inspect_routing.run(
+        cases,
+        routing_set,
+        args.model,
+        args.effort,
+        args.engine,
+        case_timeout=args.case_timeout,
+        max_tool_calls=args.max_tool_calls,
+        max_inspection_calls=args.max_inspection_calls,
+        max_budget_usd=args.max_budget_usd,
+    )
+    if args.engine == "claude-code":
+        # A container really was started: `verify.require()` refuses every
+        # provider that shares the host's filesystem, so `describe()`
+        # cannot report an isolation this leg did not have. The config dir
+        # is isolated structurally -- the guest has no `~/.claude` to keep
+        # out -- rather than conditionally on a credential.
+        box = engine_sandbox.describe()
+        isolated = True
     else:
-        outcomes, isolated, extra = _routing_legacy(args, routing_set, cases)
+        # The CLI on the host. `engine/routing.py` has already refused to
+        # start without the credential that lets it redirect the config
+        # dir, so reaching here means the room is the room that was asked
+        # for -- but nothing was contained, and the report says so.
         box = {"sandbox": "host", "sandbox_isolated": False}
+        isolated = True
+    # Reported as enforced, per leg. Both legs stop at the decision now
+    # -- the sandboxed one by declining the call, the host one by reading
+    # the CLI's stream and killing the process group -- but they are held
+    # to different numbers, so the report names the one that applied.
+    extra: dict = {"case_timeout": args.case_timeout}
+    if args.engine == "claude-code":
+        # The cap that was enforced, not the one asked for. The sandboxed
+        # leg is held to a scaled budget, so reporting the request would
+        # make `near_limit` count against a threshold that never applied.
+        extra["max_tool_calls"] = inspect_routing.budget_for(
+            args.engine, args.max_tool_calls
+        )
+        extra["max_inspection_calls"] = inspect_routing.budget_for(
+            args.engine, args.max_inspection_calls
+        )
+        extra["budget_scaled_by"] = inspect_routing.SANDBOX_BUDGET_FACTOR
+    else:
+        # The CLI's own cap, passed through and only when the build
+        # advertises it -- so this records what was actually enforced.
+        flags = inspect_routing.host_cost_flags(args.max_budget_usd)
+        if flags:
+            extra["max_budget_usd"] = args.max_budget_usd
+        extra["optional_cli_flags_used"] = sorted(f for f in flags if f.startswith("--"))
 
     return _finish_routing(
         args,
@@ -601,57 +604,6 @@ def cmd_routing(args: argparse.Namespace) -> int:
         sandbox=box["sandbox"],
         sandbox_isolated=box["sandbox_isolated"],
         extra=extra,
-    )
-
-
-def _routing_legacy(
-    args: argparse.Namespace, routing_set: dict, cases: list
-) -> tuple[list, bool, dict]:
-    """The leg that has always existed: the `claude` CLI, driven directly.
-
-    Returns its outcomes, whether it kept the runner's own config dir out of
-    the session, and the per-case caps it enforced. Lifted out of `cmd_routing`
-    unchanged when the other two legs arrived, so the branch above reads as a
-    choice between three legs rather than as one leg with two exceptions.
-    """
-    routing_config = routing.RoutingConfig(
-        model=args.model,
-        effort=args.effort,
-        case_timeout=args.case_timeout,
-        max_tool_calls=args.max_tool_calls,
-        max_inspection_calls=args.max_inspection_calls,
-        max_budget_usd=args.max_budget_usd,
-        keep_logs=args.keep_logs,
-        available_flags=routing.supported_flags(
-            ["--no-session-persistence", "--max-budget-usd"]
-        ),
-        isolate_config=routing.can_isolate_config(),
-    )
-    if not routing_config.isolate_config:
-        print(
-            "[routing] warning: ANTHROPIC_API_KEY is not set, so the runner's "
-            "own config dir is used and any user-level skill in it joins the "
-            "room for every case. The report flags what was registered."
-        )
-
-    if args.jobs > 1 and len(cases) > 1:
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            outcomes = list(
-                pool.map(lambda c: routing.run_case(c, routing_set, routing_config), cases)
-            )
-    else:
-        outcomes = [routing.run_case(case, routing_set, routing_config) for case in cases]
-
-    return (
-        outcomes,
-        routing_config.isolate_config,
-        {
-            "case_timeout": args.case_timeout,
-            "max_tool_calls": args.max_tool_calls,
-            "max_inspection_calls": args.max_inspection_calls,
-            "max_budget_usd": args.max_budget_usd,
-            "optional_cli_flags_used": sorted(routing_config.available_flags),
-        },
     )
 
 
@@ -675,49 +627,40 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    # INSPECT_ENGINES rather than a literal tuple: a literal was already wrong
-    # once. `claude-code-no-sandbox` was added to the branch below but not to this guard,
-    # so it fell through to the legacy engine and every run that asked for it
-    # silently got something else -- while the preflight above, which does key
-    # off INSPECT_ENGINES, still demanded the inspect extra it never used.
-    if args.engine in INSPECT_ENGINES:
-        from .engine import models as engine_models
+    from .engine import behavioral as inspect_behavioral
+    from .engine import models as engine_models
 
-        from .engine import behavioral as inspect_behavioral
+    if args.engine == "claude-code":
+        from .engine import verify as runner
 
-        if args.engine == "claude-code":
-            from .engine import verify as runner
+        outcomes = runner.run(
+            skills, gradable, engine_models.resolve(args.model), args.effort
+        )
+    elif args.engine == "claude-code-no-sandbox":
+        # The real CLI, driven on the host, inside inspect's framework.
+        # `--model` stays the CLI's own alias here: this one does not go
+        # through an inspect model provider.
+        from .engine import no_sandbox
 
-            outcomes = runner.run(
-                skills, gradable, engine_models.resolve(args.model), args.effort
-            )
-        elif args.engine == "claude-code-no-sandbox":
-            # The real CLI, driven on the host, inside inspect's framework.
-            # `--model` stays the CLI's own alias here: this one does not go
-            # through an inspect model provider.
-            from .engine import no_sandbox
-
-            no_sandbox.require_local()
-            outcomes = inspect_behavioral.run(
-                skills,
-                gradable,
-                engine_models.resolve(args.model),
-                args.effort,
-                solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
-                    args.model, args.effort, d
-                ),
-            )
-        else:
-            # Not a fallthrough. An engine in INSPECT_ENGINES with no branch
-            # here is the bug this guard already had once, and a silent
-            # default is what made it survive: runs asked for one agent got
-            # another, and the report named the engine they had asked for.
-            raise SystemExit(
-                f"error: --engine {args.engine} has no behavioral leg. "
-                f"This is a bug in skillscope, not in how it was called."
-            )
+        no_sandbox.require_local()
+        outcomes = inspect_behavioral.run(
+            skills,
+            gradable,
+            engine_models.resolve(args.model),
+            args.effort,
+            solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
+                args.model, args.effort, d
+            ),
+        )
     else:
-        outcomes = behavior.run(skills, gradable, args.model, args.effort)
+        # Not a fallthrough. An engine in ENGINES with no branch here is a
+        # bug this dispatch has had once already, and a silent default is
+        # what let it survive: runs asked for one agent, got another, and
+        # the report named the one they had asked for.
+        raise SystemExit(
+            f"error: --engine {args.engine} has no behavioral leg. "
+            f"This is a bug in skillscope, not in how it was called."
+        )
 
     summary = behavior.summarize(
         outcomes,
@@ -846,15 +789,16 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--engine",
-        default=os.environ.get("SKILLSCOPE_ENGINE", "legacy"),
+        default=os.environ.get("SKILLSCOPE_ENGINE", DEFAULT_ENGINE),
         choices=ENGINES,
         help=(
-            "Which eval engine runs the cases. All three drive the real claude "
-            "CLI. `legacy` drives it directly; `claude-code` runs it inside a "
-            "sandbox via inspect_swe (Linux only); `claude-code-no-sandbox` "
-            "runs it on the host under inspect_ai (any platform). The last two "
-            "need `pip install 'skillscope[inspect]'`. All three run both "
-            "graded commands. Default: legacy, or $SKILLSCOPE_ENGINE."
+            "Which eval engine runs the cases. Both drive the real claude "
+            "CLI, under inspect_ai; what differs is where it runs. "
+            "`claude-code-no-sandbox` runs it on the host, on any platform. "
+            "`claude-code` runs it inside a container via inspect_swe, which "
+            "needs a POSIX guest and so is Linux only. Both need "
+            "`pip install 'skillscope[inspect]'`, and both run both graded "
+            "commands. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
         ),
     )
     _add_timeout_argument(parser)

@@ -216,11 +216,10 @@ changes.
 
 | `--engine` | What runs | Runs in | Needs |
 | --- | --- | --- | --- |
-| `legacy` (default) | The `claude` CLI, driven directly | the host | the CLI on `PATH` |
+| `claude-code-no-sandbox` (default) | The real CLI, under `inspect_ai` | the host | `skillscope[inspect]`, the CLI on `PATH` |
 | `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
-| `claude-code-no-sandbox` | The real CLI, under `inspect_ai` | the host | `skillscope[inspect]`, the CLI on `PATH` |
 
-All three drive the agent a skill is written for, so what differs between them
+Both drive the agent a skill is written for, so what differs between them
 is **where the agent runs**, not what it is. That is the axis worth choosing
 along: the host measures the machine as it is, with whatever else is installed
 on it, and the sandbox measures the skill alone. When the two disagree, the
@@ -231,31 +230,26 @@ about the skill -- which is a thing one engine on its own cannot tell you.
 nondeterministic and the harness is not what is being graded, so a divergence
 there is a question about the skill rather than a build failure.
 
-**Routing runs on all three**, and the choice matters more there than it does
+**Routing runs on both**, and the choice matters more there than it does
 for behavioral. A stray user-level skill on the runner does not spoil one
 case's grade -- it is offered for every prompt, so it changes every decision at
 once while the run still reports a clean accuracy. `claude-code` is the only
 leg immune by construction: its guest has no `~/.claude` to contribute.
 
-The host legs handle it differently. `legacy` redirects the CLI's config dir
-when it can, warns when it cannot, and names any gate-crashing skill in the
-report, because it reads the CLI's session-init event.
-`claude-code-no-sandbox` cannot read that event, so it has no way to notice the
-same contamination or report it -- and therefore refuses to run a routing leg
-at all unless `ANTHROPIC_API_KEY` is set, which is what lets it redirect the
-config dir. Refusing beats being quietly wrong about every case.
+The host leg cannot read the CLI's session-init event, so it has no way to
+notice such contamination or report it -- and therefore refuses to run a
+routing leg at all unless `ANTHROPIC_API_KEY` is set, which is what lets it
+redirect the CLI's config dir away from the runner's own. Refusing beats being
+quietly wrong about every case.
 
-Stopping at the decision differs by leg, and it is the difference that decides
-what a routing run costs. `legacy` sees the activation in the CLI's stream
-after the call has run, then kills the process. `claude-code` stops earlier:
-its calls cross inspect's bridge, so the one that reveals the decision is
-declined before it runs, and `--max-tool-calls` / `--max-inspection-calls` ride
-the same path. `claude-code-no-sandbox` cannot do either — its CLI's output is
-buffered until the process exits, so the decision is only visible once it has
-been paid for. There it runs to the message cap, bounded by `--case-timeout`
-and by the CLI's own `--max-budget-usd`, and is correspondingly dearer per
-case. The report records which caps actually applied rather than which were
-asked for.
+Both legs stop at the decision, by different routes. `claude-code`'s calls
+cross inspect's bridge, so the one that reveals the decision is declined
+*before* it runs, and `--max-tool-calls` / `--max-inspection-calls` ride the
+same path. `claude-code-no-sandbox` drives the CLI as a subprocess with nothing
+to intercept its calls, so it reads the `stream-json` the CLI prints as it goes
+and kills the process group the moment a skill fires -- one call of overshoot,
+and the same rule. The report records which caps actually applied rather than
+which were asked for.
 
 ### Where a sandboxed run is sandboxed
 
