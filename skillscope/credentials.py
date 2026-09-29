@@ -185,12 +185,46 @@ def resolve(env: Mapping[str, str], *, fetch: Fetch | None = None) -> dict[str, 
     return exported
 
 
+def resolve_for_reusable(env: Mapping[str, str]) -> dict[str, str]:
+    """What a reusable.yml job exports. Its key is already in the job's
+    environment, so only a gateway gives it anything to add."""
+    base_url = env.get("API_BASE_URL", "").strip()
+    headers = env.get("API_CUSTOM_HEADERS", "").strip()
+    if env.get("EXPECT_KEY") != "true":
+        if base_url or headers:
+            raise CredentialError(
+                "api_base_url and api_custom_headers are for a gateway key, but "
+                "no key is configured. Map the key onto 'api_key', or name it "
+                "with 'api_key_secret'."
+            )
+        return {}
+
+    key = env.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        raise CredentialError(
+            "the model API key resolved to an empty value. GitHub withholds "
+            "secrets from pull requests opened from a fork, so re-run this from "
+            "a branch in the repository; otherwise check that the secret is set "
+            "and that the caller maps it onto 'api_key' (or passes "
+            "'secrets: inherit')."
+        )
+    if not base_url and not headers:
+        return {}
+    return resolve(
+        {"API_KEY": key, "API_BASE_URL": base_url, "API_CUSTOM_HEADERS": headers}
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    pick = resolve_for_reusable if "--reusable" in argv else resolve
     try:
-        exported = resolve(os.environ)
+        exported = pick(os.environ)
     except CredentialError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    if not exported:
+        return 0
 
     # Minted during the run, so GitHub has never seen it and will not redact it.
     if "ANTHROPIC_AUTH_TOKEN" in exported:

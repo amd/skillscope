@@ -254,6 +254,25 @@ Naming several, and holding them to different bars:
 | `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
 | `api_key` | (none) | The model API key, mapped from the caller's vault. One secret, not the whole set. |
 | `api_key_secret` | `ANTHROPIC_API_KEY` | Name to look up under `secrets: inherit`, if you would rather pass the vault than map one key. |
+| `api_base_url` | (none) | Base URL of the gateway that issued the key. Blank talks to the provider directly. |
+| `api_custom_headers` | (none) | Extra headers for that gateway, one `Name: value` per line. `$API_KEY` is replaced with the key. |
+
+A key issued by an API gateway rather than by the provider needs the gateway's
+address, and usually the key in a header of its own:
+
+```yaml
+    secrets:
+      api_key: ${{ secrets.GATEWAY_API_KEY }}
+    with:
+      skills: path/to/my-skill
+      api_base_url: https://gateway.example.com/anthropic
+      api_custom_headers: |
+        Ocp-Apim-Subscription-Key: $API_KEY
+```
+
+Setting either input without a key stops the run with an error rather than
+sending unauthenticated requests. Put the key in a header as `$API_KEY`, never
+as a literal: GitHub only masks values it received as secrets.
 
 `optional` is for a bar you have not met yet: the leg runs, the report lands in
 the step summary, and a red leg leaves the run green. `off` does not run it at

@@ -533,7 +533,6 @@ jobs:
 
       - name: Resolve model credentials
         if: inputs.api_key_secret != '' || inputs.federation_rule_id != ''
-        shell: python
         env:
           API_KEY: ${{ secrets[inputs.api_key_secret] }}
           API_BASE_URL: ${{ inputs.api_base_url }}
@@ -544,14 +543,7 @@ jobs:
           FEDERATION_SERVICE_ACCOUNT_ID: ${{ inputs.federation_service_account_id }}
           FEDERATION_WORKSPACE_ID: ${{ inputs.federation_workspace_id }}
           FEDERATION_AUDIENCE: ${{ inputs.federation_audience }}
-        run: |
-          import subprocess
-          import sys
-
-          completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py"]
-          )
-          raise SystemExit(completed.returncode)
+        run: python .skillscope-action/skillscope/credentials.py
 
       - name: Run the routing eval
         uses: ./.skillscope-action
@@ -619,7 +611,6 @@ jobs:
 
       - name: Resolve model credentials
         if: inputs.api_key_secret != '' || inputs.federation_rule_id != ''
-        shell: python
         env:
           API_KEY: ${{ secrets[inputs.api_key_secret] }}
           API_BASE_URL: ${{ inputs.api_base_url }}
@@ -630,14 +621,7 @@ jobs:
           FEDERATION_SERVICE_ACCOUNT_ID: ${{ inputs.federation_service_account_id }}
           FEDERATION_WORKSPACE_ID: ${{ inputs.federation_workspace_id }}
           FEDERATION_AUDIENCE: ${{ inputs.federation_audience }}
-        run: |
-          import subprocess
-          import sys
-
-          completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py"]
-          )
-          raise SystemExit(completed.returncode)
+        run: python .skillscope-action/skillscope/credentials.py
 
       - name: Run behavioral cases for ${{ matrix.skill }}
         uses: ./.skillscope-action
@@ -683,7 +667,6 @@ jobs:
 
       - name: Resolve model credentials
         if: inputs.scoped_api_key_secret != '' || inputs.scoped_federation_rule_id != ''
-        shell: python
         env:
           API_KEY: ${{ secrets[inputs.scoped_api_key_secret] }}
           API_BASE_URL: ${{ inputs.scoped_api_base_url }}
@@ -695,14 +678,7 @@ jobs:
           FEDERATION_SERVICE_ACCOUNT_ID: ${{ inputs.scoped_federation_service_account_id }}
           FEDERATION_WORKSPACE_ID: ${{ inputs.scoped_federation_workspace_id }}
           FEDERATION_AUDIENCE: ${{ inputs.federation_audience }}
-        run: |
-          import subprocess
-          import sys
-
-          completed = subprocess.run(
-              [sys.executable, ".skillscope-action/skillscope/credentials.py"]
-          )
-          raise SystemExit(completed.returncode)
+        run: python .skillscope-action/skillscope/credentials.py
 
       - name: Run behavioral cases for ${{ matrix.skill }}
         uses: ./.skillscope-action
