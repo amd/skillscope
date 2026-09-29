@@ -35,6 +35,7 @@ from ..datasets import Case
 from . import (
     behavioral,
     convert,
+    hooks,
     models,
     sandbox as sandbox_spec,
     scorers,
@@ -232,9 +233,16 @@ def build_task(
     # sandbox, which reads as "the agent did nothing" rather than "the agent
     # worked somewhere else". `inspect_swe` takes a working directory rather
     # than instructions, so this is set rather than asked for.
+    # See `behavioral.build_task`: the sandboxed leg runs the same hooks, and
+    # a container the agent started on a shared runner outlives the sample
+    # whichever engine started it.
+    hook = hooks.load(skill)
+
     bound = deadline.active()
     return Task(
         name=f"claude-code-{skill}",
+        setup=hooks.setup_solver(hook, skill),
+        cleanup=hooks.cleanup_fn(hook, skill),
         dataset=samples,
         # `skills=` installs into .claude/skills inside the sandbox, which is
         # where the real harness looks -- the point of this leg is that its

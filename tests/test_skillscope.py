@@ -55,6 +55,7 @@ from skillscope import (
 from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
 from skillscope.engine import behavioral as engine_behavioral
+from skillscope.engine import hooks as engine_hooks
 from skillscope.engine import no_sandbox as engine_no_sandbox
 from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import judge as engine_judge
@@ -3211,19 +3212,81 @@ class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
         self.assertEqual(source.count('"(no final message)"'), 2)
 
 
-class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
-    """A skill's setup either runs, or the run stops. Not skipped quietly.
+class TestWhichHookEntryPointsSurvive(unittest.TestCase):
+    """The rule that decides refusal, tested without a task or a sandbox."""
 
-    `evals/hooks.py` is environment plumbing and only the legacy engine
-    executes it -- no inspect-backed engine builds the `ctx` those hooks take.
-    Skipping it leaves no trace: the case is graded as though the setup
-    happened, and the failure surfaces later as a skill that mysteriously does
-    not work on this runner.
+    def module(self, body: str):
+        import importlib.util
 
-    Not hypothetical. The catalogue this was written against ships a hook whose
-    `setup` clears stale vLLM containers and whose `teardown` removes them, so
-    skipping it leaks containers holding GPU memory into whatever runs next --
-    the same contamination the sandboxed engines exist to prevent.
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = root / "hooks.py"
+        path.write_text(body)
+        spec = importlib.util.spec_from_file_location("h_under_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_setup_and_teardown_are_not_blockers(self) -> None:
+        mod = self.module(
+            "def setup(w, c, x): pass\ndef teardown(w, c, x): pass\n"
+        )
+        self.assertEqual(engine_hooks.unsupported_entry_points(mod), [])
+
+    def test_check_and_setup_session_are(self) -> None:
+        mod = self.module(
+            "def check(r, c, x): pass\ndef setup_session(d): return {}\n"
+        )
+        self.assertEqual(
+            sorted(engine_hooks.unsupported_entry_points(mod)),
+            ["check", "setup_session"],
+        )
+
+    def test_a_skill_with_no_hook_blocks_nothing(self) -> None:
+        self.assertEqual(engine_hooks.unsupported_entry_points(None), [])
+
+    def test_a_non_callable_of_the_same_name_is_not_an_entry_point(self) -> None:
+        # `check = True` is a module constant, not a hook.
+        mod = self.module("check = True\nsetup_session = 3\n")
+        self.assertEqual(engine_hooks.unsupported_entry_points(mod), [])
+
+    def test_a_setup_that_returns_template_vars_is_refused(self) -> None:
+        # Dropping them would leave `{placeholder}` in the prompt the agent is
+        # graded on, which reads as a badly written case.
+        with self.assertRaises(SystemExit) as caught:
+            engine_hooks._returned_template_vars({"endpoint": "x"}, "skl")
+        message = str(caught.exception)
+        self.assertIn("endpoint", message)
+        self.assertIn("skl", message)
+
+    def test_a_setup_that_returns_nothing_is_fine(self) -> None:
+        for value in (None, {}, "", 0):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    engine_hooks._returned_template_vars(value, "skl")
+                )
+
+
+class TestHooksRunOrTheRunStops(unittest.TestCase):
+    """A skill's setup either runs, or the run stops. Never skipped quietly.
+
+    `setup` and `teardown` run on these engines: inspect's `Task.setup` and
+    `Task.cleanup` are the same two shapes, and `cleanup` runs inside a
+    `finally` under a shielded cancel scope, so teardown still happens when
+    the agent raises.
+
+    `check` and `setup_session` do not. `check` is handed the legacy engine's
+    `Run` object and these engines have inspect's `TaskState`; `setup_session`
+    returns template variables that are substituted into prompts before any
+    hook runs. Both are refused rather than skipped, because skipping leaves
+    no trace: the case is graded as though the hook had run, and the failure
+    surfaces later as a skill that mysteriously does not work on this runner.
+
+    Refused by entry point, not by the file existing. An earlier version
+    grounded any skill that shipped a hook at all -- which took the behavioral
+    leg away from the one skill in the catalogue whose hook these engines run
+    perfectly well: `setup` clears stale vLLM containers, `teardown` removes
+    them, and neither touches `ctx`.
     """
 
     def setUp(self) -> None:
@@ -3239,28 +3302,47 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
     def refuse(self, engine: str, skills: list[str], command: str = "behavioral"):
         return cli._require_hook_support(engine, skills, command)
 
-    def test_an_inspect_engine_refuses_a_skill_that_ships_a_hook(self) -> None:
-        with self.assertRaises(SystemExit) as caught:
-            self.refuse("claude-code-no-sandbox", ["hooked"])
-        message = str(caught.exception)
-        self.assertIn("hooks.py", message)
-        self.assertIn("hooked", message)
-        self.assertIn("No engine executes hooks", message)
-        self.assertIn("--engine claude-code", message)
+    def test_setup_and_teardown_are_supported_so_the_run_proceeds(self) -> None:
+        # The regression this replaces: the skill that ships exactly this hook
+        # lost its behavioral leg on every engine.
+        self.assertIsNone(self.refuse("claude-code-no-sandbox", ["hooked"]))
 
-    def test_the_refusal_names_every_skill_that_would_be_skipped(self) -> None:
-        # Naming one of three sends someone round the loop twice.
+    def test_a_check_hook_is_refused_by_name(self) -> None:
         self.repo.skill(
-            "also-hooked",
-            dataset=tier0_dataset("also"),
-            hooks="def teardown(workspace, case, ctx):\n    pass\n",
+            "checked",
+            dataset=tier0_dataset("checked"),
+            hooks="def check(run, case, ctx):\n    pass\n",
         )
         with self.assertRaises(SystemExit) as caught:
-            self.refuse("claude-code", ["hooked", "also-hooked", "plain"])
+            self.refuse("claude-code-no-sandbox", ["checked"])
         message = str(caught.exception)
-        self.assertIn("hooked", message)
-        self.assertIn("also-hooked", message)
+        self.assertIn("checked", message)
+        self.assertIn("check", message)
+        self.assertIn("setup", message)  # says what IS supported
 
+    def test_a_setup_session_hook_is_refused_by_name(self) -> None:
+        self.repo.skill(
+            "sessioned",
+            dataset=tier0_dataset("sessioned"),
+            hooks="def setup_session(cache_dir):\n    return {}\n",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code", ["sessioned"])
+        self.assertIn("setup_session", str(caught.exception))
+
+    def test_the_refusal_names_every_skill_it_blocks(self) -> None:
+        # Naming one of three sends someone round the loop twice.
+        for name in ("checked", "also-checked"):
+            self.repo.skill(
+                name,
+                dataset=tier0_dataset(name),
+                hooks="def check(run, case, ctx):\n    pass\n",
+            )
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code", ["checked", "also-checked", "plain"])
+        message = str(caught.exception)
+        self.assertIn("checked", message)
+        self.assertIn("also-checked", message)
 
     def test_a_skill_without_a_hook_is_not_refused(self) -> None:
         self.assertIsNone(self.refuse("claude-code", ["plain"]))
@@ -3270,21 +3352,30 @@ class TestHooksCannotBeSilentlySkipped(unittest.TestCase):
         # executes nothing, so there is no setup to skip.
         self.assertIsNone(self.refuse("claude-code", ["hooked"], command="routing"))
 
-    def test_every_inspect_engine_is_covered(self) -> None:
-        for engine in cli.INSPECT_ENGINES:
+    def test_every_engine_refuses_what_it_cannot_honour(self) -> None:
+        self.repo.skill(
+            "checked",
+            dataset=tier0_dataset("checked"),
+            hooks="def check(run, case, ctx):\n    pass\n",
+        )
+        for engine in cli.ENGINES:
             with self.subTest(engine=engine):
                 with self.assertRaises(SystemExit):
-                    self.refuse(engine, ["hooked"])
+                    self.refuse(engine, ["checked"])
 
-    def test_no_inspect_engine_has_quietly_gained_hook_support(self) -> None:
-        # If one ever does, this guard becomes wrong rather than merely
-        # unnecessary, and the failure would be a refusal nobody can explain.
+    def test_both_engines_wire_the_hook_into_their_task(self) -> None:
+        # The other half: refusing the unsupported ones is only correct if the
+        # supported ones actually run.
         import skillscope.engine.behavioral as eb
         import skillscope.engine.verify as ev
 
         for module in (eb, ev):
             with self.subTest(module=module.__name__):
-                self.assertNotIn("load_hooks", inspect.getsource(module))
+                source = inspect.getsource(module.build_task)
+                self.assertIn("setup=hooks.setup_solver", source)
+                self.assertIn("cleanup=hooks.cleanup_fn", source)
+
+
 
 
 class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):

@@ -22,7 +22,7 @@ from pathlib import Path
 from .. import agent, config, deadline, routing as routing_core, usage
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
-from . import convert, models, sandbox as sandbox_spec, scorers, stats
+from . import convert, hooks, models, sandbox as sandbox_spec, scorers, stats
 
 # An agent that never decides it is finished must still stop. The legacy engine
 # bounded this with `--case-timeout` and a process kill; inspect expresses it
@@ -102,11 +102,19 @@ def build_task(
     skill_dir = config.active().skill_path(skill)
     samples = [convert.sample_from_case(c, skill_dir, ctx) for c in cases]
 
+    # `evals/hooks.py`, where the skill ships one. `cleanup` rather than a
+    # trailing solver: inspect runs it in a `finally` under a shielded cancel
+    # scope, so teardown still happens when the agent raises -- which is the
+    # property a hook that removes containers exists for.
+    hook = hooks.load(skill)
+
     bound = deadline.active()
     return Task(
         name=f"behavioral-{skill}",
         dataset=samples,
+        setup=hooks.setup_solver(hook, skill),
         solver=solver_factory(skill_dir),
+        cleanup=hooks.cleanup_fn(hook, skill),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=message_limit_for(model),

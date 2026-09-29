@@ -408,45 +408,55 @@ def _prepare_graded_run(
 
 
 def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
-    """Refuse a run whose skills ship hooks the chosen engine cannot execute.
+    """Refuse a run whose hooks use entry points this engine cannot honour.
 
     `evals/hooks.py` is environment plumbing -- clearing stale containers,
-    tearing down a service. No engine runs it any more: the legacy engine did,
-    and none built on inspect_ai constructs the `ctx` those hooks receive, so
-    the file is simply not read.
+    tearing down a service. `setup` and `teardown` run here: inspect's
+    `Task.setup` and `Task.cleanup` are the same two shapes, and `cleanup`
+    runs inside a `finally` under a shielded cancel scope, so teardown still
+    happens when the agent raises.
 
-    Not read is the problem. A hook that did not run leaves no trace in the
-    report: the case is graded as though its setup happened, and the failure
+    `check` and `setup_session` do not, and this refuses rather than skipping
+    them. Skipping is the dangerous half: a hook that did not run leaves no
+    trace in the report, the case is graded as though it had, and the failure
     surfaces later as a skill that mysteriously does not work on this runner.
-    One skill in the catalogue this was written against uses `setup` to clear
-    stale vLLM containers and `teardown` to remove them -- on a shared GPU
-    runner, skipping that leaks containers holding GPU memory into whatever
-    runs next, which is the same class of contamination the sandboxed engines
-    exist to prevent.
 
-    Routing never reads hooks on any engine, so it is exempt: a routing run
-    installs the skills and asks which one fires, and executes nothing.
+    Refused by entry point, not by the file existing. An earlier version
+    grounded any skill that shipped a hook at all -- which took the behavioral
+    leg away from the one skill in the catalogue whose hook these engines can
+    run perfectly well.
+
+    Routing is exempt on every engine: it installs the skills, asks which one
+    fires, and executes nothing.
     """
     if command != "behavioral":
         return
 
-    with_hooks = [s for s in skills if datasets.hooks_path(s).is_file()]
-    if not with_hooks:
+    from .engine import hooks as engine_hooks
+
+    blocked: dict[str, list[str]] = {}
+    for skill in skills:
+        names = engine_hooks.unsupported_entry_points(engine_hooks.load(skill))
+        if names:
+            blocked[skill] = names
+    if not blocked:
         return
 
     listed = "\n".join(
-        f"    {s}: {datasets.hooks_path(s)}" for s in with_hooks
+        f"    {skill}: {datasets.hooks_path(skill)} defines "
+        f"{', '.join(names)}"
+        for skill, names in blocked.items()
     )
     raise SystemExit(
-        f"error: --engine {engine} cannot run evals/hooks.py, and these "
-        f"skills ship one:\n{listed}\n"
-        "    Their setup and teardown would be skipped silently, and the "
-        "cases graded as though it had run.\n"
-        "    No engine executes hooks. `legacy` did, and has been removed.\n"
-        "    Either drop the hook if its work is no longer needed, or -- for "
-        "teardown of containers the agent started -- run the skill under "
-        "--engine claude-code, where the sandbox is torn down with the case "
-        "and the hook has nothing left to do."
+        f"error: --engine {engine} cannot run every entry point these "
+        f"skills' hooks define:\n{listed}\n"
+        "    They would be skipped silently, and the cases graded as though "
+        "they had run.\n"
+        "    `setup` and `teardown` are supported. `check` needs the legacy "
+        "engine's Run object, and `setup_session` returns template variables "
+        "that are substituted before any hook runs -- neither has an "
+        "equivalent here.\n"
+        "    Move what they do into the dataset, or into setup/teardown."
     )
 
 
