@@ -3371,6 +3371,64 @@ def _work_event(n: int) -> dict:
     }
 
 
+class TestTheBehavioralReportActuallyRenders(unittest.TestCase):
+    """Both report writers get called, on a summary shaped like a real one.
+
+    Nothing exercised `behavior.render_markdown`, and a function it calls was
+    deleted with the legacy engine. Every unit test passed. The break surfaced
+    on a self-hosted MI300X, after two cases had been graded 4/4 and the agent
+    time paid for -- `NameError: _isolation_note` while writing the report --
+    and `continue-on-error` turned it into a green job.
+
+    The cheapest check there is: render it, and look at what came out.
+    """
+
+    def summary(self, **meta):
+        base = {
+            "model": "opus",
+            "engine": "claude-code",
+            "effort": "high",
+            "skills": ["alpha"],
+        }
+        return behavior.summarize([], {**base, **meta})
+
+    def test_it_renders_for_a_sandboxed_run(self) -> None:
+        out = behavior.render_markdown(
+            self.summary(sandbox="podman", sandbox_isolated=True)
+        )
+        self.assertIn("podman", out)
+        self.assertIn("isolated", out)
+
+    def test_it_renders_for_an_unsandboxed_run(self) -> None:
+        # The line that matters most, because its absence reads as isolation.
+        out = behavior.render_markdown(
+            self.summary(sandbox="host", sandbox_isolated=False)
+        )
+        self.assertIn("unsandboxed", out)
+
+    def test_it_renders_when_nothing_said_what_contained_it(self) -> None:
+        out = behavior.render_markdown(self.summary())
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.strip())
+
+    def test_the_routing_report_renders_too(self) -> None:
+        # Same class of gap, same cheap guard.
+        out = routing.render_markdown(
+            routing.summarize(
+                [],
+                ["alpha"],
+                {
+                    "model": "opus",
+                    "engine": "claude-code",
+                    "effort": "high",
+                    "skills": ["alpha"],
+                },
+            )
+        )
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.strip())
+
+
 class TestTheSandboxedRoomHoldsWholeSkills(unittest.TestCase):
     """inspect's skill installer carries less than a skill ships.
 
