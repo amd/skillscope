@@ -796,8 +796,8 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
             "CLI, under inspect_ai; what differs is where it runs. "
             "`claude-code-no-sandbox` runs it on the host, on any platform. "
             "`claude-code` runs it inside a container via inspect_swe, which "
-            "needs a POSIX guest and so is Linux only. Both need "
-            "`pip install 'skillscope[inspect]'`, and both run both graded "
+            "needs a POSIX guest and so is Linux only, and additionally "
+            "needs `pip install 'skillscope[verify]'`. Both run both graded "
             "commands. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
         ),
     )

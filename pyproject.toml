@@ -15,18 +15,31 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Advanced Micro Devices, Inc." }]
 
-# The legacy runner is standard library only, so a graded run needs no wheels
-# beyond this package. PyYAML is the one exception: it reads the optional
-# evals/machine.yml, which only CI planning touches.
-dependencies = ["pyyaml>=6.0"]
-
-# The engines built on inspect_ai (`--engine claude-code`, `--engine
-# claude-code-no-sandbox`). Kept an extra so the default path keeps the stdlib-only
-# property: a repo that has not migrated installs nothing new.
-[project.optional-dependencies]
+# Every engine runs under inspect_ai, so it is required rather than optional.
+#
+# It was an extra while `legacy` existed: that engine was standard library only,
+# so a repo that had not migrated installed nothing new. `legacy` is gone, and
+# keeping the extra would ship a tool whose two graded commands both fail on a
+# plain `pip install` -- which is what CI found, by running the suite without
+# extras and getting `ModuleNotFoundError: inspect_ai` from the default engine.
+#
+# The static commands -- `structural`, `references`, `select`, `list-skills` --
+# still import none of it; they are just no longer the only thing that works
+# out of the box.
+#
 # `anthropic` is listed explicitly: inspect-ai treats every model provider as
 # optional, so installing it alone gets you a harness that cannot reach a model.
-inspect = ["inspect-ai>=0.3.263", "anthropic>=0.40"]
+# PyYAML reads the optional evals/machine.yml, which only CI planning touches.
+dependencies = [
+    "pyyaml>=6.0",
+    "inspect-ai>=0.3.263",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+# Kept as a name so `skillscope[inspect]` in a downstream workflow or a pinned
+# requirements file keeps resolving. It adds nothing now.
+inspect = []
 
 # For a runner that has podman rather than docker. The provider registers
 # itself through an `inspect_ai` entry point, so installing it is the whole

@@ -2432,9 +2432,10 @@ class TestBehavioralEngineDispatch(unittest.TestCase):
         self.assertIn("has no behavioral leg", source)
 
     def test_the_preflight_uses_the_same_set(self) -> None:
-        # These disagreed: the preflight demanded the inspect extra for
-        # claude-code-no-sandbox while the dispatch sent it to an engine that never uses
-        # it, which is how a Windows job failed on a flag it had not passed.
+        # These once disagreed: the preflight demanded the inspect extra for
+        # claude-code-no-sandbox while the dispatch sent it somewhere that
+        # never used it, which is how a Windows job failed on a flag it had
+        # not passed. One set now, and the preflight reads it.
         self.assertIn("INSPECT_ENGINES", inspect.getsource(cli._prepare_graded_run))
 
 
@@ -2446,8 +2447,14 @@ class TestEngineInstallHint(unittest.TestCase):
         # it had never passed -- it had asked for claude-code-no-sandbox.
         self.assertIn("--engine claude-code-no-sandbox", engine_module.install_hint("claude-code-no-sandbox"))
 
-    def test_it_still_points_at_the_one_extra_that_fixes_all_of_them(self) -> None:
-        self.assertIn("skillscope[inspect]", engine_module.install_hint("claude-code"))
+    def test_it_points_at_a_command_that_would_actually_help(self) -> None:
+        # It used to say `pip install 'skillscope[inspect]'`. inspect_ai is a
+        # required dependency now, so that extra is empty and following the
+        # advice would change nothing -- reaching this error means a broken or
+        # partial install, and reinstalling is the fix.
+        hint = engine_module.install_hint("claude-code")
+        self.assertNotIn("skillscope[inspect]", hint)
+        self.assertIn("reinstall", hint.lower())
 
 
 class TestEngineWorkdirPath(unittest.TestCase):

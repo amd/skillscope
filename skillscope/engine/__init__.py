@@ -20,14 +20,17 @@ from __future__ import annotations
 def install_hint(engine: str) -> str:
     """Why this run cannot start, naming the engine that was actually asked for.
 
-    Every engine but `legacy` runs on inspect_ai, so any of them can raise
-    this. Required rather than defaulted: a default sent a CI job looking for a
-    flag it had not passed, and the value it defaulted to is now one argparse
-    rejects outright.
+    Every engine runs on inspect_ai, so any of them can raise this. It is a
+    required dependency now, so reaching here means a broken or partial
+    install rather than a missing extra -- reinstalling is the fix, and saying
+    "install the extra" would send someone to a no-op. Required rather than
+    defaulted: a default once sent a CI job looking for a flag it had not
+    passed, and the value it defaulted to is one argparse now rejects.
     """
     return (
-        f"error: --engine {engine} needs the inspect extra. Install it with:\n"
-        "    pip install 'skillscope[inspect]'"
+        f"error: --engine {engine} needs inspect_ai, which skillscope "
+        "requires but could not import. Reinstall with:\n"
+        "    pip install --force-reinstall skillscope"
     )
 
 

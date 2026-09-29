@@ -216,7 +216,7 @@ changes.
 
 | `--engine` | What runs | Runs in | Needs |
 | --- | --- | --- | --- |
-| `claude-code-no-sandbox` (default) | The real CLI, under `inspect_ai` | the host | `skillscope[inspect]`, the CLI on `PATH` |
+| `claude-code-no-sandbox` (default) | The real CLI, under `inspect_ai` | the host | the CLI on `PATH` |
 | `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
 
 Both drive the agent a skill is written for, so what differs between them
