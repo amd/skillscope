@@ -72,13 +72,35 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, deadline, references, routing, structure
+from . import agent, behavior, config, datasets, deadline, references, routing, structure
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
 # Where JSON reports land inside the repo under test. One gitignored directory
 # rather than a path per repo, so a report is always in the same place.
 RUNS_DIRNAME = Path(".skillscope") / "runs"
+
+
+# The only engine today, named rather than implied. A reader should not have to
+# date a report to work out what graded it.
+ENGINE = "legacy"
+
+
+def _provenance() -> dict:
+    """What produced a run's numbers, as opposed to what those numbers say.
+
+    Two scores are comparable only if the same engine, the same agent build
+    and the same model produced both. `model` in the meta block is the alias
+    the caller asked for, which is not enough on its own: the target moves
+    underneath it, as does the CLI that does the discovering. A report that
+    records neither cannot tell a skill that got worse from a dependency that
+    changed.
+    """
+    return {
+        "engine": ENGINE,
+        "agent_cli_version": agent.cli_version(),
+        "model_resolved": agent.resolved_model(),
+    }
 
 
 def _selected_skills(names: str) -> list[str]:
@@ -397,6 +419,7 @@ def cmd_routing(args: argparse.Namespace) -> int:
         list(routing_set),
         {
             "model": args.model,
+            **_provenance(),
             "effort": args.effort,
             "skills": list(routing_set),
             "extended": args.extended,
@@ -447,6 +470,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         outcomes,
         {
             "model": args.model,
+            **_provenance(),
             "effort": args.effort,
             "skills": skills,
             "extended": args.extended,

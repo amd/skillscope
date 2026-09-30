@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from . import datasets, deadline
@@ -94,6 +95,88 @@ def claude_env() -> dict[str, str]:
     return env
 
 
+# What `--model opus` actually resolved to, learned from the preflight call.
+# Ambient like the active deadline: every engine wants it in its report and
+# none of them should pay for a second call to find it out.
+_RESOLVED_MODEL: str | None = None
+
+
+@lru_cache(maxsize=1)
+def cli_version() -> str | None:
+    """The `claude` CLI's own version, or None if it cannot be read.
+
+    Part of a run's provenance. The CLI is what discovers and activates a
+    skill, so a routing score is only comparable to another taken on the same
+    build. `claude --version` prints `2.1.270 (Claude Code)`; the number is
+    the part worth recording.
+    """
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [claude_bin, "--version"], capture_output=True, text=True,
+            encoding="utf-8", timeout=30, env=claude_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = (proc.stdout or "").split()
+    return fields[0] if proc.returncode == 0 and fields else None
+
+
+def resolved_model() -> str | None:
+    """The model the API actually served, or None if nothing has asked it yet.
+
+    `opus` and `sonnet` are aliases whose target moves, so the alias a caller
+    passed does not identify the thing that produced a score. This is None
+    when the preflight was skipped, which is honest: nothing has spoken to the
+    API, so nothing knows.
+    """
+    return _RESOLVED_MODEL
+
+
+def _model_from_result(stdout: str, alias: str | None) -> str | None:
+    """Which model answered, read out of a `--output-format json` result.
+
+    The result reports usage per model rather than naming the one that ran,
+    and the CLI bills auxiliary work to a different model in the same block: a
+    preflight that asked for `sonnet` can come back with a session-title model
+    listed beside it. The alias is what disambiguates, since `sonnet` resolves
+    to a name containing `sonnet`. With no alias to match, the entry that did
+    the most work is the best available answer.
+    """
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None
+    usage = payload.get("modelUsage")
+    if not isinstance(usage, dict):
+        return None
+
+    # `canonicalModel` is the name the provider settled on; the key is the one
+    # the CLI asked under. Prefer the former, fall back to the latter.
+    served: dict[str, int] = {}
+    for name, detail in usage.items():
+        if not isinstance(name, str) or not name:
+            continue
+        tokens = 0
+        if isinstance(detail, dict):
+            if isinstance(detail.get("canonicalModel"), str) and detail["canonicalModel"]:
+                name = detail["canonicalModel"]
+            if isinstance(detail.get("outputTokens"), int):
+                tokens = detail["outputTokens"]
+        served[name] = max(served.get(name, 0), tokens)
+
+    if not served:
+        return None
+    if alias:
+        needle = alias.lower()
+        for name in served:
+            if needle in name.lower():
+                return name
+    return max(served, key=lambda name: served[name])
+
+
 def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: float = 60) -> tuple[bool, str]:
     """Preflight: confirm the `claude` CLI can actually reach the API.
 
@@ -129,6 +212,9 @@ def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: float = 60) 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
         return False, detail[:500]
+
+    global _RESOLVED_MODEL
+    _RESOLVED_MODEL = _model_from_result(proc.stdout or "", model)
     return True, "ok"
 
 
