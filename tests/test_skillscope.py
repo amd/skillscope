@@ -3212,6 +3212,102 @@ class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
         self.assertEqual(source.count('"(no final message)"'), 2)
 
 
+class TestTheDefaultsAgreeWithEachOther(unittest.TestCase):
+    """A default engine that fails under a default sandbox is not a default.
+
+    `claude-code-no-sandbox` became the default when `legacy` was retired, and
+    it required `SKILLSCOPE_SANDBOX=local` while the default provider is
+    `docker`. So a fresh install running `skillscope routing` stopped with
+    "needs SKILLSCOPE_SANDBOX=local, not 'docker'" -- the two defaults
+    contradicted each other, and every downstream repo that upgraded would
+    have met it, because the reusable workflow names no engine and takes
+    whatever the default is.
+
+    Found by running the default engine the way a product repo would, which is
+    the only way it could have been found: every test set the variable.
+    """
+
+    def setUp(self) -> None:
+        for name in ("SKILLSCOPE_SANDBOX",):
+            self.addCleanup(os.environ.pop, name, None)
+        os.environ.pop("SKILLSCOPE_SANDBOX", None)
+        patch = mock.patch("shutil.which", lambda _: "/usr/bin/claude")
+        patch.start(); self.addCleanup(patch.stop)
+
+    def test_nobody_asked_so_the_host_leg_settles_on_local(self) -> None:
+        engine_no_sandbox.require_local()
+        self.assertEqual(os.environ["SKILLSCOPE_SANDBOX"], "local")
+
+    def test_the_report_then_says_host_not_the_default_provider(self) -> None:
+        # The failure this avoids is worse than refusing: a report naming
+        # `docker` for a run that happened on the host filesystem.
+        engine_no_sandbox.require_local()
+        self.assertEqual(
+            engine_sandbox.describe(),
+            {"sandbox": "local", "sandbox_isolated": False},
+        )
+
+    def test_an_explicit_container_request_is_still_refused(self) -> None:
+        # Overriding it would answer a different question than the one put.
+        os.environ["SKILLSCOPE_SANDBOX"] = "docker"
+        with self.assertRaises(SystemExit) as caught:
+            engine_no_sandbox.require_local()
+        self.assertIn("docker", str(caught.exception))
+
+    def test_an_explicit_local_request_is_honoured(self) -> None:
+        os.environ["SKILLSCOPE_SANDBOX"] = "local"
+        engine_no_sandbox.require_local()
+        self.assertEqual(os.environ["SKILLSCOPE_SANDBOX"], "local")
+
+    def test_requested_tells_a_choice_from_a_default(self) -> None:
+        self.assertIsNone(engine_sandbox.requested())
+        os.environ["SKILLSCOPE_SANDBOX"] = "podman"
+        self.assertEqual(engine_sandbox.requested(), "podman")
+
+
+class TestAFederatedTokenCountsAsACredential(unittest.TestCase):
+    """Workload identity federation holds no API key, by design.
+
+    The host routing leg refuses when it cannot redirect the CLI away from the
+    runner's own config dir, and that turns on whether auth lives in the
+    environment. It tested for `ANTHROPIC_API_KEY` alone -- so every runner
+    authenticating by federation lost its routing leg, including the one the
+    reusable workflow offers downstream repos through `federation_rule_id`,
+    where `scoped_api_key_secret` is empty on purpose.
+    """
+
+    def setUp(self) -> None:
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ.pop(name, None)
+
+    def test_an_api_key_still_counts(self) -> None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-x"
+        self.assertTrue(routing.can_isolate_config())
+
+    def test_a_federated_token_counts_too(self) -> None:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "oat-x"
+        self.assertTrue(routing.can_isolate_config())
+
+    def test_neither_is_still_a_refusal(self) -> None:
+        self.assertFalse(routing.can_isolate_config())
+        with self.assertRaises(SystemExit):
+            engine_routing.require_isolated_room("claude-code-no-sandbox")
+
+    def test_blank_does_not_count_as_set(self) -> None:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "   "
+        self.assertFalse(routing.can_isolate_config())
+
+    def test_the_refusal_names_both_credentials(self) -> None:
+        # Naming one sends a federated runner looking for a key it will never
+        # have.
+        with self.assertRaises(SystemExit) as caught:
+            engine_routing.require_isolated_room("claude-code-no-sandbox")
+        message = str(caught.exception)
+        for name in routing.ENV_CREDENTIALS:
+            self.assertIn(name, message)
+
+
 class TestTheFederatedTokenSaysHowLongItLasts(unittest.TestCase):
     """The exchange knows the lifetime. It used to throw it away.
 

@@ -205,6 +205,12 @@ def supported_flags(flags: list[str]) -> set[str]:
     return {flag for flag in flags if flag in text}
 
 
+# The credentials that live in the environment rather than in the CLI's own
+# config dir. Either can be carried into a throwaway config dir; a login stored
+# in the real one cannot, which is the whole distinction this turns on.
+ENV_CREDENTIALS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
 def can_isolate_config() -> bool:
     """Whether the runner's own ``~/.claude`` can be kept out of the session.
 
@@ -213,8 +219,15 @@ def can_isolate_config() -> bool:
     Pointing the CLI at a throwaway config dir achieves that, but only when
     auth comes from the environment -- if the login lives in the real config
     dir, hiding it means no case even starts.
+
+    `ANTHROPIC_AUTH_TOKEN` counts for the same reason `ANTHROPIC_API_KEY`
+    does: it is in the environment, so it survives the redirect. Testing only
+    for the key refused every runner that authenticates by workload identity
+    federation -- which holds no key at all, by design, and is what the
+    reusable workflow offers downstream repos through `federation_rule_id`.
+    Found by running the default engine the way a product repo would.
     """
-    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    return any(os.environ.get(name, "").strip() for name in ENV_CREDENTIALS)
 
 
 def _iter_tool_uses(obj) -> list[tuple[str, str]]:

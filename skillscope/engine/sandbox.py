@@ -94,9 +94,21 @@ def require_provider(resolve=None) -> None:
         ) from exc
 
 
+def requested() -> str | None:
+    """What was asked for by name, or `None` when nobody said.
+
+    Split from `provider()` so a caller can tell a deliberate choice from a
+    default. The host leg needs that distinction: running under `local` is
+    what it does, so falling back to it is right, but overriding someone who
+    explicitly asked for a container would be answering a different question
+    than the one they put.
+    """
+    return os.environ.get(SANDBOX_ENV, "").strip() or None
+
+
 def provider() -> str:
     """The sandbox provider for this run."""
-    override = os.environ.get(SANDBOX_ENV, "").strip()
+    override = requested()
     if override:
         return override
     if is_windows():

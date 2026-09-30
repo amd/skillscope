@@ -50,15 +50,36 @@ STOP_RESULT = "result"
 
 
 def require_local() -> None:
-    """This driver runs on the host, so the sandbox has to be the host."""
+    """This driver runs on the host, so settle the sandbox on the host.
+
+    Two cases, and they are not the same question.
+
+    Nobody asked: take `local`. This engine is unsandboxed by construction, so
+    there is nothing to decide, and refusing here would have meant a default
+    engine that fails under a default sandbox setting -- which it did. A fresh
+    install running `skillscope routing` stopped with "needs
+    SKILLSCOPE_SANDBOX=local, not 'docker'", because the two defaults
+    contradicted each other and the engine was the one that changed.
+
+    Somebody asked for a container: refuse. Overriding an explicit request
+    would answer a different question than the one that was put, and the
+    report would name a containment the run never had.
+
+    Exported rather than merely returned, so `describe()` and `for_skill()`
+    agree with what actually happened. A report that says `docker` about a run
+    on the host filesystem is the failure this whole engine exists to avoid.
+    """
     from . import sandbox as sandbox_spec
 
-    provider = sandbox_spec.provider()
-    if provider not in sandbox_spec.NOT_ISOLATED:
+    asked = sandbox_spec.requested()
+    if asked is None:
+        os.environ[sandbox_spec.SANDBOX_ENV] = "local"
+    elif asked not in sandbox_spec.NOT_ISOLATED:
         raise SystemExit(
-            f"error: --engine claude-code-no-sandbox runs the CLI on the host, so it needs "
-            f"SKILLSCOPE_SANDBOX=local, not {provider!r}. For a sandboxed run of "
-            "the real harness on Linux, use --engine claude-code."
+            f"error: --engine claude-code-no-sandbox runs the CLI on the host, "
+            f"but {sandbox_spec.SANDBOX_ENV}={asked!r} asks for a container. "
+            "Unset it to run on the host, or use --engine claude-code for a "
+            "sandboxed run of the real harness on Linux."
         )
     if not shutil.which("claude"):
         raise SystemExit("error: 'claude' CLI not found on PATH")

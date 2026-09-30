@@ -134,15 +134,16 @@ def require_isolated_room(engine: str) -> None:
         return
     if routing_core.can_isolate_config():
         return
+    named = " or ".join(routing_core.ENV_CREDENTIALS)
     raise SystemExit(
         "error: --engine claude-code-no-sandbox cannot run a routing leg "
-        "without ANTHROPIC_API_KEY. Routing needs the room to hold exactly "
+        f"without {named}. Routing needs the room to hold exactly "
         "the skills that were asked for, and redirecting the CLI away from "
         "the runner's own config dir only works when auth comes from the "
         "environment. Without it every user-level skill on this machine joins "
-        "the room for every case -- and unlike the legacy engine, this leg "
-        "cannot see that happen or say so in the report.\n"
-        "    Set ANTHROPIC_API_KEY, or use --engine claude-code, whose guest "
+        "the room for every case -- and this leg cannot see that happen or "
+        "say so in the report.\n"
+        f"    Set {named}, or use --engine claude-code, whose guest "
         "has no user-level skills at all."
     )
 
