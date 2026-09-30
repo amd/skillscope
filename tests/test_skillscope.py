@@ -3212,6 +3212,49 @@ class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
         self.assertEqual(source.count('"(no final message)"'), 2)
 
 
+class TestTheFederatedTokenSaysHowLongItLasts(unittest.TestCase):
+    """The exchange knows the lifetime. It used to throw it away.
+
+    A graded run on an MI300X spent twenty minutes and failed with `401 OAuth
+    access token has expired`, forty-eight times, and nothing in the job said
+    the token had ever had a deadline. Measured afterwards from the transcript:
+    minted 14:01:41, first 401 at 14:14:20 -- about twelve and a half minutes,
+    a number that was in the exchange response all along.
+    """
+
+    def exchange(self, payload: dict) -> str:
+        import json as _json
+
+        captured: list[str] = []
+        with mock.patch("builtins.print", lambda *a, **k: captured.append(" ".join(map(str, a)))):
+            credentials.anthropic_access_token(
+                "assertion",
+                rule_id="fdrl_x",
+                organization_id="org",
+                service_account_id="svc",
+                fetch=lambda *a, **k: _json.dumps(payload).encode(),
+            )
+        return "\n".join(captured)
+
+    def test_it_reports_the_lifetime_it_was_given(self) -> None:
+        out = self.exchange({"access_token": "t", "expires_in": 750})
+        self.assertIn("12m 30s", out)
+        self.assertIn("401", out)  # says what failure to expect
+
+    def test_it_stays_quiet_when_the_exchange_does_not_say(self) -> None:
+        self.assertEqual(self.exchange({"access_token": "t"}), "")
+
+    def test_a_missing_token_is_still_the_louder_failure(self) -> None:
+        import json as _json
+
+        with self.assertRaises(credentials.CredentialError):
+            credentials.anthropic_access_token(
+                "assertion", rule_id="r", organization_id="o",
+                service_account_id="s",
+                fetch=lambda *a, **k: _json.dumps({"expires_in": 750}).encode(),
+            )
+
+
 class TestWhichHookEntryPointsSurvive(unittest.TestCase):
     """The rule that decides refusal, tested without a task or a sandbox."""
 
