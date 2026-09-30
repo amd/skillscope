@@ -3212,6 +3212,84 @@ class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
         self.assertEqual(source.count('"(no final message)"'), 2)
 
 
+class TestTheRoomHoldsTheSkillNotItsTests(unittest.TestCase):
+    """`evals/` is the answer key, and it was in the room on one leg.
+
+    `evals/evals.json` pairs each prompt with `skill_should_trigger` -- the
+    routing answer -- and with the `expected_behavior` a behavioral case is
+    graded against. The host leg copied the skill directory wholesale, so that
+    file sat inside the room the agent was being asked to choose from. The
+    sandboxed leg never had it, which meant the two legs whose agreement the
+    legacy retirement rests on were choosing from different rooms.
+
+    No agent was ever observed opening it -- every case in a 67-case run was
+    checked. That is why this is a removal plus a detector rather than a
+    removal alone: "nobody reads it" is a belief, and the detector is what
+    would notice if it stopped being true.
+    """
+
+    def staged(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        skill = root / "src" / "demo"
+        (skill / "evals" / "files").mkdir(parents=True)
+        (skill / "scripts").mkdir()
+        (skill / "SKILL.md").write_text("---\nname: demo\n---\n")
+        (skill / "reference.md").write_text("details")
+        (skill / "scripts" / "run.py").write_text("print()")
+        (skill / "evals" / "evals.json").write_text('{"evaluations": []}')
+        (skill / "evals" / "files" / "seed.txt").write_text("fixture")
+        workspace = root / "ws"
+        workspace.mkdir()
+        engine_no_sandbox.install_skill(skill, str(workspace))
+        return workspace / ".claude" / "skills" / "demo"
+
+    def test_the_answer_key_is_not_staged(self) -> None:
+        self.assertFalse((self.staged() / "evals").exists())
+
+    def test_the_skill_itself_still_is(self) -> None:
+        room = self.staged()
+        for rel in ("SKILL.md", "reference.md", "scripts/run.py"):
+            with self.subTest(rel=rel):
+                self.assertTrue((room / rel).is_file(), rel)
+
+    def test_both_legs_now_exclude_the_same_directory(self) -> None:
+        # The asymmetry was the point: one leg had it, the other never did.
+        self.assertEqual(
+            engine_no_sandbox.EVAL_FIXTURE_DIRNAME, engine_verify.EVAL_FIXTURE_DIR
+        )
+
+
+class TestReadingTheAnswerKeyIsReported(unittest.TestCase):
+    """Removing the file is the fix; noticing a read is how we would know."""
+
+    def sample(self, *arguments: dict):
+        calls = [_FakeCall(f"t{i}") for i, _ in enumerate(arguments)]
+        for call, args in zip(calls, arguments):
+            call.arguments = args
+        return _FakeSample([_FakeMessage("m", calls)], [])
+
+    def test_a_case_that_opened_the_dataset_is_flagged(self) -> None:
+        sample = self.sample({"file_path": ".claude/skills/x/evals/evals.json"})
+        self.assertTrue(engine_routing.read_the_answer_key(sample))
+
+    def test_the_extended_dataset_counts_too(self) -> None:
+        sample = self.sample({"command": "cat evals/extended_evals.json"})
+        self.assertTrue(engine_routing.read_the_answer_key(sample))
+
+    def test_ordinary_work_is_not_flagged(self) -> None:
+        sample = self.sample(
+            {"command": "ls /workspace"}, {"file_path": "reference.md"}
+        )
+        self.assertFalse(engine_routing.read_the_answer_key(sample))
+
+    def test_it_matches_wherever_the_copy_came_from(self) -> None:
+        # Matched on the filename, because the route by which a copy reaches
+        # the agent is exactly what is not known in advance.
+        sample = self.sample({"command": "cat /some/other/checkout/evals.json"})
+        self.assertTrue(engine_routing.read_the_answer_key(sample))
+
+
 class TestTheDefaultsAgreeWithEachOther(unittest.TestCase):
     """A default engine that fails under a default sandbox is not a default.
 

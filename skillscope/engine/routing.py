@@ -335,6 +335,36 @@ def _tool_calls(sample):
             yield call
 
 
+# The dataset filenames, as they would appear in a tool argument. A case that
+# opened one would be reading the answer to the question it is being asked.
+ANSWER_KEY_NAMES = ("evals.json", "extended_evals.json")
+
+
+def read_the_answer_key(sample) -> bool:
+    """Whether this case's agent opened a dataset file.
+
+    The staged room holds the skill, not its tests: `evals/evals.json` pairs
+    each prompt with `skill_should_trigger` and with the `expected_behavior` a
+    behavioral case is graded against, so a room containing it hands the agent
+    the answer. The host leg used to stage it, because it copied the skill
+    directory wholesale; it no longer does.
+
+    This is the part that makes that checkable rather than believed. Removing
+    the file is the fix; noticing if one is read anyway is how anyone would
+    learn that the fix regressed, or that a copy reached the agent by a route
+    nobody modelled -- a fixture directory, a repo checkout the skill asked
+    for, a path a skill's own instructions name.
+
+    Pure, and matched on the filename rather than a full path, because the
+    route by which a copy arrives is exactly what is not known in advance.
+    """
+    for call in _tool_calls(sample):
+        blob = json.dumps(getattr(call, "arguments", {}) or {}, ensure_ascii=False)
+        if any(name in blob for name in ANSWER_KEY_NAMES):
+            return True
+    return False
+
+
 def _observe(sample, skills: list[str]) -> tuple[str | None, int, int]:
     """What this sample routed to, and what it spent getting there.
 
@@ -513,7 +543,13 @@ def _outcomes(log, cases: list[Case], skills: list[str]) -> list[routing_core.Ou
                     verdict=verdict,
                     passed=verdict in routing_core.PASSING_VERDICTS,
                     stop_reason=(
-                        "skill_activated"
+                        # A case that opened a dataset file read the answer to
+                        # the question it was asked, so its verdict cannot be
+                        # taken at face value. Said in the column a reader is
+                        # already looking at rather than in a log.
+                        "answer_key_read"
+                        if read_the_answer_key(sample)
+                        else "skill_activated"
                         if observed
                         else (_limit_reason(sample) or "result")
                     ),

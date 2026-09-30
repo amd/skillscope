@@ -48,6 +48,10 @@ STOP_REASON_KEY = "skillscope_host_stop_reason"
 # rather than spelled inline because the mapper reads it back.
 STOP_RESULT = "result"
 
+# The skill's own test suite, which is not part of the skill as anyone installs
+# it. Kept out of the staged room: see `install_skill`.
+EVAL_FIXTURE_DIRNAME = "evals"
+
 
 def require_local() -> None:
     """This driver runs on the host, so settle the sandbox on the host.
@@ -327,15 +331,36 @@ def install_skill(skill_dir: Path, workspace: str) -> None:
     """Put the skill where the real harness looks for it.
 
     `.claude/skills/<name>` inside a directory the CLI is given with
-    `--add-dir`, which is what the legacy engine has always done and what
-    `inspect_swe` does via its own `skills=` argument. Staging is the driver's
-    job, and this driver is the one that has to do it by hand: skip it and the
-    agent runs with no skill at all, answering from the prompt and scoring like
-    it -- which looks like a bad skill rather than a missing one.
+    `--add-dir`, which is what `inspect_swe` does via its own `skills=`
+    argument. Staging is the driver's job, and this driver is the one that has
+    to do it by hand: skip it and the agent runs with no skill at all,
+    answering from the prompt and scoring like it -- which looks like a bad
+    skill rather than a missing one.
+
+    Everything except the skill's own test suite. This used to copy the
+    directory wholesale, which put `evals/evals.json` inside the room the agent
+    is being asked to choose from -- a file pairing each prompt with
+    `skill_should_trigger`, and with the `expected_behavior` a behavioral case
+    is graded against. The answer key, in the room.
+
+    No agent has been observed opening it: every case in a 67-case run was
+    checked and none touched it. But a user installing this skill does not
+    receive its tests, so the room was not the room it claimed to model, and
+    the sandboxed leg never had them -- so the two legs whose agreement the
+    legacy retirement rests on were choosing from different rooms.
+
+    Nothing depends on them being here. Workspace fixtures under `evals/files`
+    are read from the skill directory on disk and seeded into the *workspace*,
+    which is a different path.
     """
     dest = Path(workspace) / ".claude" / "skills" / skill_dir.name
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(skill_dir, dest, dirs_exist_ok=True)
+    shutil.copytree(
+        skill_dir,
+        dest,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(EVAL_FIXTURE_DIRNAME),
+    )
 
 
 def claude_code_no_sandbox(
