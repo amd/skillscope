@@ -1014,7 +1014,9 @@ def sandbox_cost_limit(
     `inspect_swe.claude_code()` builds its command line from a closed set of
     arguments and takes no passthrough, so the flag has nowhere to go -- it was
     accepted here and silently dropped, while `--help` claimed the CLI enforced
-    it.
+    it. Raised upstream as meridianlabs-ai/inspect_swe#178; if a passthrough
+    lands, this leg can hand the CLI the same flag the host leg does and stop
+    depending on inspect being able to price the model.
 
     inspect's own `cost_limit` is the equivalent, and is per *sample*, which is
     the per-case unit the flag has always meant. So the budget is handed to the
