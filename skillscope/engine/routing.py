@@ -899,19 +899,37 @@ def budget_for(engine: str, cap: int | None) -> int | None:
 
 
 def host_cost_flags(max_budget_usd: float | None) -> list[str]:
-    """The CLI's own cost controls, for the leg that builds its command line.
+    """The CLI's own controls, for the leg that builds its command line.
 
     The host leg cannot count tool calls in time to stop a case -- its stdout
-    is buffered until exit -- so the one bound it can enforce mid-run is the
-    CLI's, passed straight through the way legacy does. Probed first, because
-    an older build rejects an unknown flag and every case then fails the same
-    way, which reads as a routing collapse rather than a missing flag.
+    is buffered until exit -- so the one spend bound it can enforce mid-run is
+    the CLI's, passed straight through the way the retired engine did. Probed
+    first, because an older build rejects an unknown flag and every case then
+    fails the same way, which reads as a routing collapse rather than a missing
+    flag.
+
+    `--no-session-persistence` rides along for the reason the retired engine
+    passed it: a routing run is dozens of throwaway sessions, and there is no
+    reason to leave any of them on disk. It went missing in the move to inspect
+    -- `no_sandbox` still named it in a docstring as something this list
+    carries, while nothing supplied it. The config dir is a
+    `TemporaryDirectory` now, so the sessions were being removed with it rather
+    than accumulating; this is belt and braces, and it costs a probe that is
+    already being made.
+
+    Both are probed in one `--help` call. `supported_flags` shells out, and
+    doing it twice per run to ask about two flags is two subprocesses where one
+    will do.
     """
-    if not max_budget_usd or max_budget_usd <= 0:
-        return []
-    if "--max-budget-usd" not in routing_core.supported_flags(["--max-budget-usd"]):
-        return []
-    return ["--max-budget-usd", str(max_budget_usd)]
+    wanted = ["--max-budget-usd", "--no-session-persistence"]
+    available = routing_core.supported_flags(wanted)
+
+    flags: list[str] = []
+    if max_budget_usd and max_budget_usd > 0 and "--max-budget-usd" in available:
+        flags += ["--max-budget-usd", str(max_budget_usd)]
+    if "--no-session-persistence" in available:
+        flags.append("--no-session-persistence")
+    return flags
 
 
 def case_time_limit(case_timeout: float | None) -> int | None:

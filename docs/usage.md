@@ -60,6 +60,41 @@ whole command. Routing adds `--jobs`, `--case-timeout`, `--max-tool-calls`,
 `--max-budget-usd`, `--keep-logs`, and `--min-accuracy`. `--help` is the
 authority on all of them.
 
+### Making `--max-budget-usd` bind on `claude-code`
+
+The two engines enforce the spend cap differently, and only one of them works
+out of the box.
+
+`claude-code-no-sandbox` hands `--max-budget-usd` to the `claude` CLI, which
+knows what it bills and stops by itself. `claude-code` cannot: `inspect_swe`
+builds its command line from a closed set of arguments and takes no
+passthrough ([inspect_swe#178][swe178]), so that leg uses inspect's own
+per-sample `cost_limit` instead — and inspect computes a cost only when its
+model registry knows the rate. **It ships no rates for any model**, so on that
+leg the cap is inert until you supply them.
+
+`SKILLSCOPE_MODEL_PRICING` is how. Point it at a JSON file — or pass the JSON
+directly — mapping each model to its rates in **dollars per million tokens**:
+
+```json
+{
+  "opus": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
+}
+```
+
+Keys may be skillscope aliases (`opus`) or inspect model strings;
+`cache_read` and `cache_write` default to `0`. A malformed table fails the
+command in the preflight rather than one sample into a graded run.
+
+skillscope deliberately ships no price list of its own. Rates change without
+notice and differ by contract, and a stale table would hold a run to a number
+nobody agreed while the report claimed the budget was enforced — worse than no
+cap at all. Whatever you configure is recorded in the report as
+`meta.max_budget_pricing`, beside `max_budget_can_bind`, so a reader can tell a
+cap backed by your figures from one that cannot fire.
+
+[swe178]: https://github.com/meridianlabs-ai/inspect_swe/issues/178
+
 ### Where the skills are
 
 Every path in the table is relative to the repository root, which is the only

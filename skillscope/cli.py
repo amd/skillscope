@@ -385,6 +385,14 @@ def _prepare_graded_run(
         _require_hook_support(
             args.engine, selected, getattr(args, "command", "")
         )
+        # Also before the probe, and for the same reason: a malformed price
+        # table should fail the command, not one sample into a graded run.
+        # Registered here rather than in the engine because both graded
+        # commands come through this function and inspect's registry is
+        # process-global -- setting it twice would be the same work.
+        from .engine import pricing as engine_pricing
+
+        args.pricing_note = engine_pricing.apply()
         if not args.skip_preflight:
             from .engine import models as engine_models
 
@@ -623,11 +631,24 @@ def cmd_routing(args: argparse.Namespace) -> int:
             extra["max_budget_usd"] = args.max_budget_usd
             extra["max_budget_enforced_by"] = "inspect cost_limit"
             extra["max_budget_can_bind"] = engine_models.cost_limit_binds(args.model)
+            # Where the rates came from, when any did. A cap backed by an
+            # operator's own figures and one backed by inspect's registry are
+            # not the same claim, and only one of them is currently possible.
+            from .engine import pricing as engine_pricing
+
+            extra["max_budget_pricing"] = getattr(
+                args, "pricing_note", engine_pricing.NO_PRICING
+            )
     else:
         # The CLI's own cap, passed through and only when the build
         # advertises it -- so this records what was actually enforced.
+        #
+        # Keyed on the budget flag itself, not on the list being non-empty:
+        # the list also carries `--no-session-persistence`, which says nothing
+        # about spend, so `if flags:` would claim an enforced budget for a run
+        # that passed none.
         flags = inspect_routing.host_cost_flags(args.max_budget_usd)
-        if flags:
+        if "--max-budget-usd" in flags:
             extra["max_budget_usd"] = args.max_budget_usd
             extra["max_budget_enforced_by"] = "claude --max-budget-usd"
             extra["max_budget_can_bind"] = True

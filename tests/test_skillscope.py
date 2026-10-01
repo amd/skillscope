@@ -68,6 +68,7 @@ from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import tools as engine_tools
 from skillscope.engine import scorers as engine_scorers
 from skillscope.engine import stats as engine_stats
+from skillscope.engine import pricing as engine_pricing
 from skillscope import usage
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -5301,6 +5302,151 @@ class TestTheWatchdogSaysWhatItSkipped(unittest.TestCase):
         # A bounded total, so a hung cleanup cannot turn a bounded command
         # into an unbounded one.
         self.assertLessEqual(deadline.EXPIRE_CLEANUP_BUDGET_S, 30)
+
+
+class TestOperatorSuppliedPricingMakesTheCapBind(unittest.TestCase):
+    """Without rates, `cost_limit` is inert for every model inspect ships.
+
+    inspect checks a cost limit only after computing a cost, and computes one
+    only when its registry supplies a rate -- which it does for none of its 796
+    entries. So the sandboxed leg's budget could not fire at all. skillscope
+    will not ship a price list of its own (a stale one holds a run to a number
+    nobody agreed, while the report says the budget was enforced), so the rates
+    are the operator's and the report says so.
+    """
+
+    def setUp(self) -> None:
+        patch = mock.patch.dict(os.environ, {}, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop(engine_pricing.PRICING_ENV, None)
+        from inspect_ai.model._model_info import clear_model_info_cache
+        self.addCleanup(clear_model_info_cache)
+
+    TABLE = {"opus": {"input": 5.0, "output": 25.0,
+                      "cache_read": 0.5, "cache_write": 6.25}}
+
+    def test_no_configuration_registers_nothing(self) -> None:
+        self.assertEqual(engine_pricing.apply(), engine_pricing.NO_PRICING)
+
+    def test_the_report_says_a_cap_cannot_bind_rather_than_omitting_it(self) -> None:
+        # A missing key reads as an oversight. This is a deliberate state with
+        # a consequence, so it is spelled out.
+        self.assertIn("cannot bind", engine_pricing.NO_PRICING)
+
+    def test_inline_json_is_accepted(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.TABLE)
+        note = engine_pricing.apply()
+        self.assertIn("1 model(s)", note)
+        self.assertIn("inline JSON", note)
+
+    def test_a_file_path_is_accepted(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "rates.json"
+        path.write_text(json.dumps(self.TABLE), encoding="utf-8")
+        os.environ[engine_pricing.PRICING_ENV] = str(path)
+        note = engine_pricing.apply()
+        self.assertIn("1 model(s)", note)
+        self.assertIn(str(path), note)
+
+    def test_applying_rates_makes_a_cost_limit_able_to_fire(self) -> None:
+        # The end-to-end point. Before: inert for every model. After: binds.
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.TABLE)
+        engine_pricing.apply()
+        self.assertTrue(engine_models.cost_limit_binds("opus"))
+
+    def test_an_alias_is_resolved_the_way_model_is(self) -> None:
+        # The table may say `opus`; inspect wants `anthropic/claude-opus-5`.
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.TABLE)
+        engine_pricing.apply()
+        from inspect_ai.model import get_model_info
+        info = get_model_info(engine_models.resolve("opus"))
+        self.assertEqual(info.cost.input, 5.0)
+        self.assertEqual(info.cost.output, 25.0)
+
+    def test_cache_rates_default_to_zero_rather_than_being_required(self) -> None:
+        # A deployment that does not bill cache separately is a normal one.
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(
+            {"opus": {"input": 1.0, "output": 2.0}}
+        )
+        engine_pricing.apply()
+        from inspect_ai.model import get_model_info
+        self.assertEqual(get_model_info(engine_models.resolve("opus")).cost.input_cache_read, 0.0)
+
+    def test_a_missing_required_rate_names_the_key(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps({"opus": {"input": 1.0}})
+        with self.assertRaises(SystemExit) as caught:
+            engine_pricing.apply()
+        self.assertIn("output", str(caught.exception))
+
+    def test_malformed_json_fails_the_command_not_a_sample(self) -> None:
+        # Checked in the preflight, so a bad table costs nothing. Discovering
+        # it one sample into a graded run would cost a container and a model
+        # call per case already run.
+        os.environ[engine_pricing.PRICING_ENV] = "{not json"
+        with self.assertRaises(SystemExit):
+            engine_pricing.apply()
+
+    def test_a_non_object_table_is_refused(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(["opus"])
+        with self.assertRaises(SystemExit):
+            engine_pricing.apply()
+
+    def test_the_preflight_registers_before_the_model_probe(self) -> None:
+        # Order matters: a run that cannot honour its price table should not
+        # first spend a round trip finding out the credentials are fine.
+        source = inspect.getsource(cli._prepare_graded_run)
+        self.assertLess(
+            source.index("pricing.apply" if "pricing.apply" in source else "pricing_note"),
+            source.index("check_reachable"),
+        )
+
+
+class TestThrowawaySessionsAreNotLeftOnDisk(unittest.TestCase):
+    """`--no-session-persistence` was passed by the retired engine, then lost.
+
+    A routing run is dozens of throwaway sessions. The retired engine passed
+    the flag for exactly that reason; the host leg stopped, and
+    `engine/no_sandbox.py` went on naming it in a docstring as something
+    `extra_flags` carries while nothing supplied it.
+    """
+
+    def _flags(self, budget, advertised):
+        with mock.patch.object(
+            engine_routing.routing_core, "supported_flags", lambda wanted: set(advertised)
+        ):
+            return engine_routing.host_cost_flags(budget)
+
+    BOTH = ["--max-budget-usd", "--no-session-persistence"]
+
+    def test_the_session_flag_is_passed_when_the_build_has_it(self) -> None:
+        self.assertIn("--no-session-persistence", self._flags(0.75, self.BOTH))
+
+    def test_it_is_passed_even_with_no_budget(self) -> None:
+        # The two are unrelated: not capping spend is not a reason to litter.
+        flags = self._flags(0, self.BOTH)
+        self.assertEqual(flags, ["--no-session-persistence"])
+
+    def test_an_older_build_gets_neither(self) -> None:
+        # An unknown flag makes every case fail identically, which reads as a
+        # routing collapse rather than a flag problem.
+        self.assertEqual(self._flags(0.75, []), [])
+
+    def test_the_budget_is_still_passed_when_advertised(self) -> None:
+        self.assertEqual(self._flags(0.75, self.BOTH)[:2], ["--max-budget-usd", "0.75"])
+
+    def test_one_help_probe_covers_both_flags(self) -> None:
+        # `supported_flags` shells out; asking twice per run is two
+        # subprocesses where one will do.
+        seen = []
+
+        def record(wanted):
+            seen.append(list(wanted))
+            return set(wanted)
+
+        with mock.patch.object(engine_routing.routing_core, "supported_flags", record):
+            engine_routing.host_cost_flags(0.75)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(sorted(seen[0]), sorted(self.BOTH))
 
 
 if __name__ == "__main__":

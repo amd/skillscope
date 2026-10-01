@@ -406,12 +406,16 @@ def claude_code_no_sandbox(
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
 
-    `extra_flags` are the CLI's own cost controls -- `--max-budget-usd`,
-    `--no-session-persistence` -- which the legacy engine passes and this
-    driver could not, because it did not build that part of the command line.
-    The caller probes for them with `routing.supported_flags` first: an older
-    build rejects an unknown flag and every case fails identically, which reads
-    as a routing collapse rather than a flag problem.
+    `extra_flags` are the CLI's own controls -- `--max-budget-usd` and
+    `--no-session-persistence` -- built by `routing.host_cost_flags`, which
+    probes `--help` first: an older build rejects an unknown flag and every
+    case fails identically, which reads as a routing collapse rather than a
+    flag problem.
+
+    Supplied by the routing caller only. A behavioral case has no per-case
+    spend cap to pass, and it is graded on what the agent *produced*, so
+    nothing here should shorten it. Its sessions do land in the runner's own
+    config dir, because that leg passes no `config_dir` -- see the note there.
 
     `config_dir` redirects the CLI away from the runner's own `~/.claude`, the
     way the legacy engine does. Optional because a behavioral case installs one
