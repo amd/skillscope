@@ -66,6 +66,9 @@ from skillscope.engine import routing as engine_routing
 from skillscope.engine import no_sandbox as engine_no_sandbox
 from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import tools as engine_tools
+from skillscope.engine import scorers as engine_scorers
+from skillscope.engine import stats as engine_stats
+from skillscope import usage
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
 SCHEMA_DIR = datasets.PACKAGE_DIR / "schema"
@@ -4243,36 +4246,6 @@ class TestProviderFailuresAreMarked(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertFalse(routing.is_provider_error(message))
 
-    def test_the_reason_a_result_event_gave_is_kept(self) -> None:
-        # It was being discarded. A 504 arrived as "result event reported an
-        # error", which no classifier and no reader can do anything with.
-        self.assertIn(
-            "504",
-            routing._result_error({"is_error": True, "result": "API Error: 504 upstream"}),
-        )
-
-    def test_the_subtype_is_kept_when_there_is_no_body(self) -> None:
-        # The CLI puts the reason in one field or the other depending on how
-        # it failed, and only one of them is ever populated.
-        self.assertIn(
-            "error_max_turns",
-            routing._result_error({"is_error": True, "subtype": "error_max_turns"}),
-        )
-
-    def test_an_agent_failure_is_not_blamed_on_the_provider(self) -> None:
-        # `error_max_turns` is the agent running out of road, not the gateway.
-        # Marking it degraded would excuse a real failure.
-        self.assertFalse(routing.is_provider_error(
-            routing._result_error({"is_error": True, "subtype": "error_max_turns"})
-        ))
-
-    def test_an_error_with_no_reason_is_not_guessed_at(self) -> None:
-        # Neither marked nor excused: we do not know, and saying so is the
-        # only honest option.
-        self.assertFalse(routing.is_provider_error(
-            routing._result_error({"is_error": True})
-        ))
-
     def test_routing_totals_report_how_many_were_degraded(self) -> None:
         # Beside the score, because it decides whether the score can be read.
         outcomes = [
@@ -4787,6 +4760,547 @@ class TestTheShippedSandboxExample(unittest.TestCase):
         # Egress is granted by *not* setting this, which is worth asserting:
         # an example that carried it would grant nothing and say it did.
         self.assertNotIn("network_mode", default)
+
+
+class TestModelCallsAreCountedOnce(unittest.TestCase):
+    """The default engine counted every model reply twice.
+
+    `no_sandbox` records each `assistant` stream event through
+    `usage.record_stream_event`, and those same events then become the
+    sample's assistant messages, which `engine.stats.record_log` counts again.
+    `claude-code` has no stream to read and so was only ever counted once.
+
+    The two sit in neighbouring columns of `tools/benchmark_engines.py`, where
+    the whole point is that the numbers mean the same thing. A host leg
+    reporting 2x the calls for identical work does not read as a bug, it reads
+    as the sandbox being cheaper.
+    """
+
+    def setUp(self) -> None:
+        usage.reset()
+        self.addCleanup(usage.reset)
+
+    @staticmethod
+    def _assistant(tokens: int) -> dict:
+        return {
+            "type": "assistant",
+            "message": {"usage": {"input_tokens": tokens, "output_tokens": tokens}},
+        }
+
+    def test_a_stream_event_adds_tokens_but_not_a_call(self) -> None:
+        usage.record_stream_event(self._assistant(5))
+        usage.record_stream_event(self._assistant(5))
+        snapshot = usage.snapshot()
+        self.assertEqual(snapshot.input_tokens, 10, "tokens must still be recorded")
+        self.assertEqual(
+            snapshot.calls, 0, "the stream must not also count calls -- stats does"
+        )
+
+    def test_the_log_is_the_only_thing_that_counts_calls(self) -> None:
+        # Two assistant events, which become two assistant messages. One run,
+        # counted by both paths the way a real host-leg case is: the answer
+        # has to be 2, not 4.
+        for _ in range(2):
+            usage.record_stream_event(self._assistant(1))
+        engine_stats.record_log(_UsageLog(assistant_messages=2))
+        self.assertEqual(usage.snapshot().calls, 2)
+
+    def test_the_result_event_still_carries_the_cost(self) -> None:
+        # The one thing only the stream knows: `total_cost_usd` arrives on the
+        # result event and nowhere else.
+        usage.record_stream_event({"type": "result", "total_cost_usd": 0.25})
+        self.assertAlmostEqual(usage.snapshot().cost_usd, 0.25)
+
+
+class _UsageMessage:
+    def __init__(self, role: str) -> None:
+        self.role = role
+
+
+class _UsageSample:
+    def __init__(self, assistant_messages: int = 0, store: dict | None = None) -> None:
+        self.messages = [_UsageMessage("assistant") for _ in range(assistant_messages)]
+        self.store = store or {}
+
+
+class _UsageLog:
+    def __init__(self, assistant_messages: int = 0) -> None:
+        self.stats = None
+        self.samples = [_UsageSample(assistant_messages)]
+
+
+class TestTheDefaultEngineReportsTheCapsItEnforces(unittest.TestCase):
+    """`near_limit` was structurally zero on the engine that is the default.
+
+    `cli.cmd_routing` recorded `max_tool_calls` / `max_inspection_calls` into
+    the report's `meta` only for `claude-code`. `routing.near_a_limit` reads
+    those two keys and treats a missing one as "no cap was set", so the host
+    leg reported `near_limit: 0` for every run -- including cases that stopped
+    *on* the cap, which is precisely what the column exists to flag.
+
+    The host leg does enforce them: `host_stop_when_factory` applies the same
+    rule as the sandboxed leg's approver, one call later, against the CLI's
+    stream.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate(routing_room="alpha")
+        self.captured: dict = {}
+
+        def capture(args, outcomes, routing_set, started, **kwargs):
+            self.captured = kwargs.get("extra") or {}
+            return 0
+
+        for target, replacement in (
+            ("skillscope.engine.routing.run", lambda *a, **k: []),
+            ("skillscope.cli._finish_routing", capture),
+        ):
+            patch = mock.patch(target, replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _meta_for(self, engine: str, extra_argv: list[str] | None = None) -> dict:
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", engine, "--skip-preflight", "--model", "mockllm/model"]
+            + (extra_argv or [])
+        )
+        cli.cmd_routing(args)
+        return self.captured
+
+    def test_the_host_leg_records_its_tool_call_cap(self) -> None:
+        meta = self._meta_for("claude-code-no-sandbox", ["--max-tool-calls", "4"])
+        self.assertEqual(meta.get("max_tool_calls"), 4)
+
+    def test_the_host_leg_records_its_inspection_cap(self) -> None:
+        meta = self._meta_for("claude-code-no-sandbox", ["--max-inspection-calls", "8"])
+        self.assertEqual(meta.get("max_inspection_calls"), 8)
+
+    def test_near_a_limit_can_now_fire_on_the_host_leg(self) -> None:
+        # The end-to-end point: with the caps in `meta`, a case that stopped
+        # one call short of one is counted. With the old `meta` this outcome
+        # scored zero however close it ran.
+        meta = self._meta_for("claude-code-no-sandbox", ["--max-tool-calls", "4"])
+        outcome = routing.Outcome(
+            id="c", category="k", skill="alpha", prompt="p", expect="alpha",
+            observed="alpha", verdict="correct_trigger", passed=True,
+            stop_reason="skill_activated", elapsed_s=1.0, tool_calls=4,
+        )
+        self.assertTrue(routing.near_a_limit(outcome, meta))
+
+    def test_the_sandboxed_leg_still_reports_its_scaled_cap(self) -> None:
+        # Unchanged, and asserted so the fix cannot have flattened the two legs
+        # onto one number: the sandboxed leg is held to a scaled budget, and
+        # reporting the request would measure against a threshold nobody used.
+        meta = self._meta_for("claude-code", ["--max-tool-calls", "4"])
+        self.assertEqual(
+            meta.get("max_tool_calls"), 4 * engine_routing.SANDBOX_BUDGET_FACTOR
+        )
+
+    def test_the_reported_case_timeout_is_the_one_that_was_enforced(self) -> None:
+        # `case_time_limit` clips the request to whatever `--timeout` has left,
+        # so reporting the raw argument named a cap longer than any case was
+        # actually held to.
+        bound = deadline.Deadline(30.0, command="routing")
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        meta = self._meta_for("claude-code-no-sandbox", ["--case-timeout", "9000"])
+        self.assertLess(meta["case_timeout"], 9000)
+
+
+class TestTheSandboxedLegsBudgetIsNotSilentlyDropped(unittest.TestCase):
+    """`--max-budget-usd` reached nothing at all on `claude-code`.
+
+    The host leg passes `--max-budget-usd` to the CLI, which enforces it.
+    `inspect_swe.claude_code()` builds its command line from a closed set of
+    arguments and accepts no passthrough, so on the sandboxed leg the value was
+    taken, carried as far as `_solver`, and dropped -- while `--help` said the
+    CLI enforced it.
+
+    inspect's own per-sample `cost_limit` is the equivalent, so that is what
+    the task now carries. It binds only where inspect can price the model,
+    which is reported rather than assumed: as of 0.3.266 inspect ships no
+    priced models at all, so a cap that reads as enforced and cannot fire is
+    the exact failure this is replacing.
+    """
+
+    def test_the_sandboxed_leg_gets_a_cost_limit(self) -> None:
+        self.assertEqual(
+            engine_routing.sandbox_cost_limit("claude-code", "opus", 0.75), 0.75
+        )
+
+    def test_the_host_leg_does_not(self) -> None:
+        # It has a real one already: the CLI's own flag, which actually binds.
+        # Two limits for one budget would stop a case at half of it.
+        self.assertIsNone(
+            engine_routing.sandbox_cost_limit("claude-code-no-sandbox", "opus", 0.75)
+        )
+
+    def test_a_disabled_budget_sets_no_limit(self) -> None:
+        self.assertIsNone(engine_routing.sandbox_cost_limit("claude-code", "opus", 0))
+
+    def test_the_task_carries_the_limit(self) -> None:
+        self.assertIn("cost_limit=", inspect.getsource(engine_routing.build_task))
+
+    def test_an_unpriced_model_is_reported_as_unenforceable(self) -> None:
+        # Not refused -- an inert limit harms nothing. What must not happen is
+        # a report that implies it fired.
+        self.assertFalse(engine_models.cost_limit_binds("mockllm/model"))
+
+
+class TestKeepLogsKeepsLogs(unittest.TestCase):
+    """`--keep-logs` was declared, passed by CI, and read by nothing.
+
+    Both workflows pass `--keep-logs routing-logs` and then upload that folder,
+    so a job that asked to keep its transcripts uploaded whatever
+    `.skillscope/logs` happened to hold -- and the step stayed green either
+    way, which is why it survived.
+    """
+
+    def setUp(self) -> None:
+        self.seen: dict = {}
+
+        def fake_eval(task, **kwargs):
+            self.seen = kwargs
+            return []
+
+        self.fake_eval = fake_eval
+
+    def _log_dir_for(self, log_dir: str | None) -> str:
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        engine_routing._evaluate(
+            self.fake_eval, [case], {"alpha": Path("alpha")}, "mockllm/model",
+            "high", "claude-code-no-sandbox", "mockllm/model", None,
+            log_dir=log_dir,
+        )
+        return self.seen["log_dir"]
+
+    def test_the_flag_chooses_the_transcript_directory(self) -> None:
+        self.assertEqual(self._log_dir_for("routing-logs"), "routing-logs")
+
+    def test_without_the_flag_the_default_is_unchanged(self) -> None:
+        self.assertEqual(
+            self._log_dir_for(None), str(Path(".skillscope") / "logs")
+        )
+
+    def test_the_cli_hands_the_flag_down(self) -> None:
+        self.assertIn("log_dir=args.keep_logs", inspect.getsource(cli.cmd_routing))
+
+
+class TestOneBadSampleDoesNotFailTheWholeBatch(unittest.TestCase):
+    """A behavioral batch discarded every case it had already graded.
+
+    inspect sets `log.status` to `error` when any sample raises, and
+    `behavioral._outcomes` returned one failure per case on that condition --
+    so a single container that would not start turned a skill's whole report
+    into a total failure, including cases that had already scored and been
+    paid for. `engine/routing.py` never did this, for the same reason.
+    """
+
+    @staticmethod
+    def _case(case_id: str):
+        return datasets.Case(
+            id=case_id, skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+
+    def _log(self, status: str):
+        log = types.SimpleNamespace()
+        log.status = status
+        log.error = None
+        good = types.SimpleNamespace(
+            id="good", scores={"s": types.SimpleNamespace(
+                metadata={engine_scorers.CHECKS: [{"passed": True, "kind": "k",
+                                                   "detail": "d"}]}
+            )}, error=None, total_time=1.0,
+        )
+        bad = types.SimpleNamespace(
+            id="bad", scores={}, error=types.SimpleNamespace(message="boom"),
+            total_time=0.0,
+        )
+        log.samples = [good, bad]
+        return log
+
+    def test_a_graded_case_survives_its_neighbour_erroring(self) -> None:
+        outcomes = engine_behavioral._outcomes(
+            self._log("error"), "alpha", [self._case("good"), self._case("bad")]
+        )
+        passed = {o.id: o.passed for o in outcomes}
+        self.assertTrue(passed["good"], "a case that scored must keep its result")
+        self.assertFalse(passed["bad"])
+
+    def test_a_task_with_no_samples_still_fails_every_case(self) -> None:
+        # The other direction. An infrastructure failure that produced nothing
+        # must not render as "every expectation met".
+        log = types.SimpleNamespace(status="error", error=None, samples=[])
+        outcomes = engine_behavioral._outcomes(
+            log, "alpha", [self._case("a"), self._case("b")]
+        )
+        self.assertEqual(len(outcomes), 2)
+        self.assertFalse(any(o.passed for o in outcomes))
+
+    def test_a_case_inspect_never_reported_is_still_accounted_for(self) -> None:
+        # Silence would read as a smaller, cleaner run rather than a partial
+        # one -- now that a partial log is kept, this is the gap that opens.
+        outcomes = engine_behavioral._outcomes(
+            self._log("error"),
+            "alpha",
+            [self._case("good"), self._case("bad"), self._case("never-ran")],
+        )
+        missing = [o for o in outcomes if o.id == "never-ran"]
+        self.assertEqual(len(missing), 1)
+        self.assertFalse(missing[0].passed)
+        self.assertIn("no sample", missing[0].error or "")
+
+    def test_inspect_is_told_not_to_abandon_the_task(self) -> None:
+        # The other half: without this inspect stops the task at the first bad
+        # sample, so the later cases never run at all and `_outcomes` has
+        # nothing to keep.
+        self.assertIn("fail_on_error=False", inspect.getsource(engine_behavioral.run))
+
+
+class TestTheHookContractSurvivedTheMigration(unittest.TestCase):
+    """All three hook arguments changed meaning without the contract changing.
+
+    `workspace` became `tools.workdir()` -- `None` off-container, the *string*
+    `/workspace` on it -- where the retired engine passed a real local
+    directory and asserted it was not `None`. `case` became `state.metadata`,
+    a dict, where the retired engine passed the `Case` object: `case.id` and
+    `case.prompt` are both documented, and both raised `AttributeError`.
+
+    The example in `docs/authoring-evals.md` calls
+    `sources.resolve(skill, workspace)`, whose parameter is annotated `Path`.
+    It raised `TypeError` on both engines.
+    """
+
+    def setUp(self) -> None:
+        self.store = _FakeStore()
+        patch = mock.patch("inspect_ai.util.store", lambda: self.store)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(engine_hooks._discard_workspace)
+
+    def test_the_workspace_is_a_real_directory(self) -> None:
+        workspace = engine_hooks.case_workspace()
+        self.assertIsInstance(workspace, Path)
+        self.assertTrue(workspace.is_dir())
+
+    def test_the_same_case_gets_the_same_directory(self) -> None:
+        # `setup` and `teardown` must agree about where the hook worked.
+        self.assertEqual(
+            engine_hooks.case_workspace(), engine_hooks.case_workspace()
+        )
+
+    def test_the_directory_supports_what_the_docs_do_with_it(self) -> None:
+        # The documented example is `sources.resolve(skill, workspace)`, which
+        # does `cache_dir / name`. That is the operation that was raising.
+        workspace = engine_hooks.case_workspace()
+        self.assertTrue(str(workspace / "clone"))
+
+    def test_the_directory_is_removed_afterwards(self) -> None:
+        workspace = engine_hooks.case_workspace()
+        engine_hooks._discard_workspace()
+        self.assertFalse(workspace.exists())
+
+    def test_the_case_argument_is_the_case_object(self) -> None:
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="the prompt",
+            skill_should_trigger=True,
+        )
+        state = types.SimpleNamespace(sample_id="c1", metadata={})
+        resolved = engine_hooks._case_for(state, [case])
+        self.assertIs(resolved, case)
+        self.assertEqual(resolved.id, "c1")
+        self.assertEqual(resolved.prompt, "the prompt")
+
+    def test_a_hook_with_only_setup_still_gets_its_directory_cleaned(self) -> None:
+        # `setup` is handed a real path now, so something has to delete it.
+        # Without this a run of N cases left N temp directories behind.
+        module = types.ModuleType("hooks_setup_only")
+        module.setup = lambda workspace, case, ctx: None
+        self.assertIsNotNone(engine_hooks.cleanup_fn(module, "alpha", []))
+
+    def test_a_hook_with_neither_entry_point_gets_nothing(self) -> None:
+        self.assertIsNone(
+            engine_hooks.cleanup_fn(types.ModuleType("empty"), "alpha", [])
+        )
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self._data: dict = {}
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value) -> None:
+        self._data[key] = value
+
+
+class TestTheRoomCheckIsBackAndSaysWhenItDidNotRun(unittest.TestCase):
+    """Nothing verified that the skills a run asked for were installed.
+
+    `Outcome.visible_skills` and `extra_skills` were read in three places and
+    assigned in none, so both warnings were structurally unreachable: a skill
+    that failed to install scored as `missed_trigger`, which reads as a
+    description that did not attract its prompt, and a stray `~/.claude/skills`
+    entry joining every case went unmentioned.
+
+    Only the host leg can answer -- the check reads the CLI's session-init
+    event, and `claude-code` drives the CLI through `inspect_swe`, which does
+    not surface one. So the report says the check did not run rather than
+    letting its silence read as a verified room.
+    """
+
+    ROOM = ["alpha", "beta"]
+    META = {"skills": ROOM, "model": "mockllm/model", "effort": "high"}
+
+    def _init_event(self, skills: list[str]) -> dict:
+        return {"type": "system", "subtype": "init", "skills": skills}
+
+    def test_the_installed_skills_are_recorded(self) -> None:
+        self.assertEqual(
+            routing.init_skills(self._init_event(["alpha", "beta"]), self.ROOM),
+            ["alpha", "beta"],
+        )
+
+    def test_a_skill_that_did_not_install_is_missing_from_the_report(self) -> None:
+        visible = routing.init_skills(self._init_event(["alpha"]), self.ROOM)
+        self.assertEqual(visible, ["alpha"])
+        summary = routing.summarize(
+            [self._an_outcome(visible_skills=visible)], self.ROOM, self.META
+        )
+        self.assertEqual(summary["skills_missing_from_session"], ["beta"])
+
+    def test_a_stray_runner_skill_is_reported(self) -> None:
+        extra = routing.init_extra_skills(
+            self._init_event(["alpha", "beta", "someones-own-skill"]), self.ROOM
+        )
+        self.assertEqual(extra, ["someones-own-skill"])
+
+    def test_a_leg_that_cannot_look_is_not_reported_as_clean(self) -> None:
+        # The distinction the whole thing turns on. With no `visible_skills`,
+        # `skills_missing_from_session` is empty -- and an empty list looked
+        # exactly like a verified room.
+        summary = routing.summarize(
+            [self._an_outcome(visible_skills=[])], self.ROOM, self.META
+        )
+        self.assertEqual(summary["skills_missing_from_session"], [])
+        self.assertEqual(summary["room_checked_cases"], 0)
+        self.assertIn("the room was not verified", routing.render_markdown(summary).lower())
+
+    def test_a_leg_that_did_look_is_not_told_the_room_was_unverified(self) -> None:
+        summary = routing.summarize(
+            [self._an_outcome(visible_skills=["alpha", "beta"])], self.ROOM, self.META
+        )
+        self.assertEqual(summary["room_checked_cases"], 1)
+        self.assertNotIn(
+            "the room was not verified", routing.render_markdown(summary).lower()
+        )
+
+    def test_the_host_leg_records_the_room_off_the_stream(self) -> None:
+        state = types.SimpleNamespace(store=_FakeStore())
+        engine_no_sandbox._record_room(
+            state, self._init_event(["alpha", "extra-one"]), self.ROOM
+        )
+        self.assertEqual(
+            state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY), ["alpha"]
+        )
+        self.assertEqual(
+            state.store.get(engine_no_sandbox.EXTRA_SKILLS_KEY), ["extra-one"]
+        )
+
+    def test_a_non_init_event_records_nothing(self) -> None:
+        state = types.SimpleNamespace(store=_FakeStore())
+        engine_no_sandbox._record_room(
+            state, {"type": "assistant", "message": {}}, self.ROOM
+        )
+        self.assertIsNone(state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY))
+
+    def test_the_host_routing_leg_is_given_the_room(self) -> None:
+        self.assertIn("room_names=", inspect.getsource(engine_routing._solver))
+
+    @staticmethod
+    def _an_outcome(**kwargs):
+        defaults = dict(
+            id="c", category="k", skill="alpha", prompt="p", expect="alpha",
+            observed="alpha", verdict="correct_trigger", passed=True,
+            stop_reason="skill_activated", elapsed_s=1.0, tool_calls=1,
+        )
+        defaults.update(kwargs)
+        return routing.Outcome(**defaults)
+
+
+class TestTheBenchmarkNamesAnEngineThatExists(unittest.TestCase):
+    """`--baseline` defaulted to `legacy` after `legacy` was removed.
+
+    Both examples in the tool's own docstring take the default, so both failed
+    against an engine the CLI no longer accepts.
+    """
+
+    def _defaults(self):
+        import tools.benchmark_engines as benchmark
+
+        return benchmark.build_parser().parse_args(["routing"])
+
+    def test_the_default_baseline_is_an_engine_the_cli_accepts(self) -> None:
+        self.assertIn(self._defaults().baseline, cli.ENGINES)
+
+    def test_the_default_candidate_is_an_engine_the_cli_accepts(self) -> None:
+        self.assertIn(self._defaults().candidate, cli.ENGINES)
+
+    def test_the_default_pair_is_actually_a_comparison(self) -> None:
+        # The same engine twice measures run-to-run variance, which `--noise`
+        # already reports and labels correctly.
+        args = self._defaults()
+        self.assertNotEqual(args.baseline, args.candidate)
+
+    def test_the_docstring_examples_still_name_runnable_engines(self) -> None:
+        # Both examples take the defaults, which is how the stale `legacy`
+        # default went unnoticed: nothing executed them.
+        import tools.benchmark_engines as benchmark
+
+        parser = benchmark.build_parser()
+        for argv in (["routing"], ["behavioral"]):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertIn(args.baseline, cli.ENGINES)
+
+
+class TestTheWatchdogSaysWhatItSkipped(unittest.TestCase):
+    """`--timeout` expiring kills the process with `os._exit`, skipping cleanup.
+
+    That is deliberate -- the watchdog exists for a hung process, which will
+    not unwind on `sys.exit` -- but it also skips the shielded scope inspect
+    runs `Task.cleanup` in, so the run most likely to have left a container
+    behind is the one that gets no `teardown`.
+    """
+
+    def setUp(self) -> None:
+        deadline._expire_callbacks.clear()
+        self.addCleanup(deadline._expire_callbacks.clear)
+
+    def test_a_registered_cleanup_runs(self) -> None:
+        ran = []
+        deadline.on_expire(lambda: ran.append(True))
+        self.assertEqual(deadline._run_expire_callbacks(), 0)
+        self.assertEqual(ran, [True])
+
+    def test_a_cleanup_that_raises_is_counted_not_propagated(self) -> None:
+        # This is the last code to run before the process dies; there is
+        # nobody left to handle an exception raised here.
+        def boom():
+            raise RuntimeError("no")
+
+        deadline.on_expire(boom)
+        self.assertEqual(deadline._run_expire_callbacks(), 1)
+
+    def test_one_cleanup_cannot_defeat_the_watchdog(self) -> None:
+        # A bounded total, so a hung cleanup cannot turn a bounded command
+        # into an unbounded one.
+        self.assertLessEqual(deadline.EXPIRE_CLEANUP_BUDGET_S, 30)
 
 
 if __name__ == "__main__":

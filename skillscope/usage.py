@@ -76,14 +76,20 @@ def record(
 def record_stream_event(event: dict) -> None:
     """Record what one `claude` stream-json event says the run has spent.
 
-    Shared by both legacy commands, because they read the same stream and a
-    column that means "responses" in one and "cases" in the other is worse than
-    no column at all.
+    Tokens come from assistant events, one per model reply, and are the only
+    source this leg has: its CLI runs as a subprocess, so nothing reaches
+    inspect's model layer and `log.stats.model_usage` is empty. Cost comes only
+    from the result event, where it is a run total -- and a routing case is
+    normally killed before that event arrives, so it reports responses with no
+    cost. That is what driving a CLI can actually observe.
 
-    Tokens and responses come from assistant events, one per model reply. Cost
-    comes only from the result event, where it is a run total -- and a routing
-    case is normally killed before that event arrives, so it reports responses
-    with no cost. That is what the legacy engine can actually observe.
+    **Calls are deliberately not counted here.** `engine.stats.record_log`
+    counts one call per assistant message off the `EvalLog`, and it does that
+    for every engine. This function's events become those same messages
+    (`events_to_messages` in `engine/no_sandbox.py`), so counting in both
+    places reported the host leg's `model_calls` at twice the sandboxed leg's
+    for identical work -- and the two sit side by side in the benchmark, which
+    is the comparison the column exists for.
     """
     kind = event.get("type")
     if kind == "assistant":
@@ -92,6 +98,7 @@ def record_stream_event(event: dict) -> None:
         record(
             input_tokens=(counts or {}).get("input_tokens", 0),
             output_tokens=(counts or {}).get("output_tokens", 0),
+            calls=0,
         )
     elif kind == "result":
         record(cost_usd=event.get("total_cost_usd"), calls=0)

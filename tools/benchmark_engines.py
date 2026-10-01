@@ -21,17 +21,24 @@ is measured is what CI executes.
 
     tools/benchmark_engines.py routing --routing-room my-skill --noise
     tools/benchmark_engines.py behavioral --skill my-skill
-    tools/benchmark_engines.py --compare legacy.json candidate.json
+    tools/benchmark_engines.py --compare baseline.json candidate.json
 
 Which pair is compared is an argument, because the question changes over the
-migration. `legacy` against `claude-code-no-sandbox` asks the narrow, sharp question: both
-drive the same CLI, so agreement says the framework around the agent is
-faithful, and disagreement is a defect in the crossing rather than a property
-of a different agent. `claude-code-no-sandbox` against `claude-code` asks the other one --
+migration. The default pair is `claude-code-no-sandbox` against `claude-code`:
 same agent, host against container, which is where a contaminated runner shows
 up as a disagreement neither engine could find alone.
 
-    tools/benchmark_engines.py behavioral --candidate claude-code-no-sandbox --skill my-skill
+The narrower question -- is the framework around the agent faithful? -- was
+asked of `legacy` against `claude-code-no-sandbox`, both driving the same CLI
+so that any disagreement was a defect in the crossing rather than a property of
+a different agent. That pair cannot be run any more: `legacy` is gone, and it
+was the answer to this question that retired it. `--baseline legacy` stayed the
+default for a while afterwards, which made both examples above fail on an
+engine the CLI no longer accepts. The result it produced is in the PR that
+removed it; re-deriving it means checking out a commit that still has the
+engine.
+
+    tools/benchmark_engines.py behavioral --candidate claude-code --skill my-skill
 """
 
 from __future__ import annotations
@@ -114,7 +121,7 @@ def compare(baseline: dict, candidate: dict) -> dict:
     }
 
 
-def spend(report: dict, engine: str = "legacy") -> dict:
+def spend(report: dict, engine: str = "") -> dict:
     meta = report.get("meta", {})
     return {
         "engine": meta.get("engine", engine),
@@ -132,22 +139,20 @@ def _cell(value) -> str:
 def _spend_caveats(spend: dict) -> list[str]:
     """Say which columns are comparable, because not all of them are.
 
-    The two engines count different things and silently tabulating them side by
-    side invites the wrong conclusion. Wall time is always comparable. Tokens
-    are not: the legacy engine reads them from assistant events, which exclude
-    the system prompt and cached input, and a routing case is killed before the
-    totals arrive -- so its figure is a floor, not a total. Cost is the legacy
-    engine's trustworthy number, and the inspect_ai-backed engines only have
-    one when the provider supplies pricing, which a gateway generally does not.
+    Wall time is always comparable, and so is `model_calls` now that both
+    engines count it the same way -- the host leg used to count each assistant
+    stream event *and* the message it became, reporting twice the sandboxed
+    leg's figure for identical work.
+
+    Cost is the column that still is not: the inspect_ai-backed engines have
+    one only when the model provider supplies pricing, which a gateway
+    generally does not, and which inspect's own model registry currently does
+    not supply for any model.
+
+    The caveat about the retired `legacy` engine's token floor is gone with the
+    engine; both remaining engines read tokens the same way.
     """
-    engines = {spend[label]["engine"] for label in ("baseline", "candidate")}
     notes = []
-    if "legacy" in engines:
-        notes.append(
-            "> Legacy token counts are a floor: they omit the system prompt and "
-            "cached input, and a killed case never reports its totals. Compare "
-            "cost and wall time, not tokens."
-        )
     if any(spend[label]["cost_usd"] is None for label in ("baseline", "candidate")):
         notes.append(
             "> One engine reported no cost -- the inspect_ai-backed engines only "
@@ -261,7 +266,14 @@ def cli_routing_engines() -> tuple[str, ...]:
     return ROUTING_ENGINES
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, separately from running it.
+
+    Split out so the defaults can be asserted without running a leg. They have
+    been wrong before: `--baseline` went on naming `legacy` after `legacy` was
+    removed, which made both examples in the docstring above fail against an
+    engine the CLI no longer accepts.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("leg", nargs="?", choices=["routing", "behavioral"])
     parser.add_argument(
@@ -272,15 +284,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--baseline",
-        default="legacy",
+        default="claude-code-no-sandbox",
         choices=ENGINES,
-        help="The engine to measure against. Default: legacy.",
+        help="The engine to measure against. Default: claude-code-no-sandbox.",
     )
     parser.add_argument(
         "--candidate",
-        default="claude-code-no-sandbox",
+        default="claude-code",
         choices=ENGINES,
-        help="The engine under test. Default: claude-code-no-sandbox.",
+        help="The engine under test. Default: claude-code.",
     )
     parser.add_argument(
         "--noise",
@@ -292,6 +304,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--output", default="", help="Write the JSON result here.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args, passthrough = parser.parse_known_args(argv)
 
     if args.compare:
@@ -315,8 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         "comparison": compare(baseline, candidate),
         "noise": noise,
         "spend": {
-            "baseline": spend(baseline, getattr(args, "baseline", "legacy")),
-            "candidate": spend(candidate, getattr(args, "candidate", "claude-code-no-sandbox")),
+            "baseline": spend(baseline, args.baseline),
+            "candidate": spend(candidate, args.candidate),
         },
     }
 

@@ -15,17 +15,7 @@ The CLI lives in ``skillscope/cli.py``; this module is the engine.
 
 from __future__ import annotations
 
-import importlib.util
-import shutil
-import tempfile
-import time
-import traceback
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from types import ModuleType
-
-from . import datasets, deadline
-from .datasets import Case
 
 
 @dataclass

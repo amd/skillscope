@@ -188,8 +188,8 @@ Two failure modes are worth knowing before reading a report. A routing case that
 ends without the agent either activating a skill or answering is reported as an
 **error** rather than a missed trigger. And if the runner has its own skills
 installed (usually `~/.claude/skills`), they join the room for every case and
-the report says so — set `ANTHROPIC_API_KEY` so the run can use an isolated
-config dir.
+the report says so — set `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` so the
+run can use an isolated config dir.
 
 ## Hardware a skill needs
 
@@ -238,8 +238,9 @@ leg immune by construction: its guest has no `~/.claude` to contribute.
 
 The host leg cannot read the CLI's session-init event, so it has no way to
 notice such contamination or report it -- and therefore refuses to run a
-routing leg at all unless `ANTHROPIC_API_KEY` is set, which is what lets it
-redirect the CLI's config dir away from the runner's own. Refusing beats being
+routing leg at all unless `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
+set, which is what lets it redirect the CLI's config dir away from the
+runner's own. Refusing beats being
 quietly wrong about every case.
 
 Both legs stop at the decision, by different routes. `claude-code`'s calls

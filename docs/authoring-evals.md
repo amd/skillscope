@@ -158,7 +158,25 @@ def teardown(workspace, case, ctx): ...  # after it, even if the agent blew up
 
 `teardown` runs even when the agent itself blew up: it is wired to inspect's
 `Task.cleanup`, which runs inside a `finally` under a shielded cancel scope, so
-an exception or a cancelled sample does not skip it.
+an exception or a cancelled sample does not skip it. The one exception is
+`--timeout` expiring: that kills the process outright, and nothing shielded
+survives it. Keep a case inside its own `--case-timeout` if a teardown is
+load-bearing.
+
+The three arguments:
+
+| | |
+|---|---|
+| `workspace` | A fresh per-case directory **on the host**, removed after `teardown`. Yours to write in. |
+| `case` | The `Case` being run — `case.id`, `case.prompt`, and the rest of the dataset row. |
+| `ctx` | Always `{}`. It carried `setup_session`'s return value, and that entry point is gone. |
+
+`workspace` is on the host under every engine, including `claude-code`, where
+the agent itself works inside a container. It is scratch space for the hook's
+own use — fetching a source tree, holding a scoring script — not the agent's
+room. A hook that needs to put a file where the *agent* will see it should use
+[inspect's sandbox API](https://inspect.aisi.org.uk/sandboxing.html), which can
+address the guest; writing to `workspace` will not reach it.
 
 **Two entry points are no longer supported**, and a skill that defines either
 is refused rather than having it silently skipped:

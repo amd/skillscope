@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import agent as legacy_agent
+from .. import routing as routing_core
 
 # Tool calls and results are reconstructed from the stream, so they need ids
 # that are merely unique within a sample rather than meaningful.
@@ -47,6 +48,15 @@ STOP_REASON_KEY = "skillscope_host_stop_reason"
 # What `stop_when` returns when the stream reached the CLI's own ending. Named
 # rather than spelled inline because the mapper reads it back.
 STOP_RESULT = "result"
+
+# The room check, read off the CLI's `system/init` event: which of the skills
+# this run installed the agent actually reported seeing, and which it reported
+# that nobody installed. Only this leg can answer -- `claude-code` drives the
+# CLI through `inspect_swe`, which does not surface the init event -- so these
+# stay unset there and `cli.cmd_routing` says the check did not run rather than
+# letting an empty list read as a clean room.
+VISIBLE_SKILLS_KEY = "skillscope_visible_skills"
+EXTRA_SKILLS_KEY = "skillscope_extra_skills"
 
 # The skill's own test suite, which is not part of the skill as anyone installs
 # it. Kept out of the staged room: see `install_skill`.
@@ -363,6 +373,28 @@ def install_skill(skill_dir: Path, workspace: str) -> None:
     )
 
 
+def _record_room(state, event: dict, room_names: list[str] | None) -> None:
+    """Record the room check off one stream event, if it is the init one.
+
+    The CLI announces at session init which skills it registered. Comparing
+    that against what this run installed is the only direct evidence that the
+    agent was asked the question in the room the report describes -- everything
+    else infers the room from how the agent behaved in it.
+
+    Written to the sample store rather than returned, because the init event
+    arrives in the middle of a stream whose other events are already being
+    folded into messages, and `engine/routing.py:_outcomes` reads the sample
+    rather than the stream.
+    """
+    if not room_names:
+        return
+    visible = routing_core.init_skills(event, room_names)
+    if visible is None:
+        return
+    state.store.set(VISIBLE_SKILLS_KEY, visible)
+    state.store.set(EXTRA_SKILLS_KEY, routing_core.init_extra_skills(event, room_names))
+
+
 def claude_code_no_sandbox(
     model: str | None,
     effort: str | None,
@@ -370,6 +402,7 @@ def claude_code_no_sandbox(
     config_dir: Path | None = None,
     extra_flags: list[str] | None = None,
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
+    room_names: list[str] | None = None,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
 
@@ -463,6 +496,7 @@ def claude_code_no_sandbox(
 
             for event in events:
                 legacy_agent.usage.record_stream_event(event)
+                _record_room(state, event, room_names)
 
             messages, final = events_to_messages(events, prompt)
             state.messages.extend(messages)

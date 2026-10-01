@@ -64,8 +64,64 @@ class Deadline:
 
     def _expire(self) -> None:
         print(f"error: {self.message()}", file=sys.stderr)
+        # `os._exit` is the point of the watchdog -- it is reached only when
+        # something is hung, and a hung process is exactly the one that will
+        # not unwind on `sys.exit`. But it also skips every `finally`,
+        # including the shielded scope inspect runs `Task.cleanup` in. So a run
+        # that hits the wall clock gets no `teardown`, which is the single case
+        # most likely to have left a container behind -- and it got no say
+        # about it either, which is worse than the leak.
+        #
+        # Emergency callbacks run first, each bounded, so a cleanup that hangs
+        # cannot defeat the watchdog that called it. They are a last resort:
+        # the designed path is `behavioral.TIMEOUT_RESERVE_S`, which stops the
+        # sample early enough for inspect's own cleanup to run normally.
+        skipped = _run_expire_callbacks()
+        if skipped:
+            print(
+                f"error: {skipped} cleanup callback(s) did not finish before "
+                "the process was killed; containers or other resources this "
+                "run created may still exist.",
+                file=sys.stderr,
+            )
         sys.stderr.flush()
         os._exit(1)
+
+
+# Last-resort cleanups, run by the watchdog before it kills the process.
+_expire_callbacks: list = []
+
+# How long all of them together may take. The watchdog has already decided the
+# run is hung; spending its whole remaining credibility on a cleanup that is
+# hung too would turn a bounded command into an unbounded one.
+EXPIRE_CLEANUP_BUDGET_S = 10.0
+
+
+def on_expire(callback) -> None:
+    """Register a cleanup to attempt if the wall-clock watchdog fires.
+
+    For resources that outlive the process -- a container, a background server
+    -- where `finally` is not enough because `--timeout` exits hard.
+    """
+    _expire_callbacks.append(callback)
+
+
+def _run_expire_callbacks() -> int:
+    """Run every registered cleanup, bounded. Returns how many did not finish."""
+    deadline_at = time.perf_counter() + EXPIRE_CLEANUP_BUDGET_S
+    skipped = 0
+    for callback in list(_expire_callbacks):
+        if time.perf_counter() >= deadline_at:
+            skipped += 1
+            continue
+        try:
+            callback()
+        except Exception:
+            # A cleanup that raises is still a cleanup that did not happen,
+            # and this is the last code to run before the process dies: there
+            # is nobody left to handle an exception raised here.
+            skipped += 1
+    return skipped
 
 
 _active: Deadline | None = None

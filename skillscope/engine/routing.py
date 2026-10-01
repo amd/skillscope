@@ -474,6 +474,23 @@ def _limit_reason(sample) -> str | None:
     return f"host:{reason}" if reason else None
 
 
+VISIBLE_SKILLS_KEY = no_sandbox.VISIBLE_SKILLS_KEY
+EXTRA_SKILLS_KEY = no_sandbox.EXTRA_SKILLS_KEY
+
+
+def _room_report(sample, key: str) -> list[str]:
+    """One half of the room check off a sample's store, or `[]` if unrecorded.
+
+    `[]` means "this leg could not look", not "the room was clean". Only the
+    host leg sees the CLI's init event, so only it can answer; `summarize`
+    treats an empty `visible_skills` as unchecked for exactly that reason.
+    """
+    store = getattr(sample, "store", None) or {}
+    if not hasattr(store, "get"):
+        return []
+    return list(store.get(key) or [])
+
+
 def _outcomes(log, cases: list[Case], skills: list[str]) -> list[routing_core.Outcome]:
     """Map one inspect `EvalLog` back onto routing's outcome objects.
 
@@ -484,11 +501,12 @@ def _outcomes(log, cases: list[Case], skills: list[str]) -> list[routing_core.Ou
     graded count, so a task that produced no samples would report an accuracy
     of `n/a` beside a clean-looking verdict table.
 
-    It diverges on one point. `behavioral` discards a failed task's completed
-    samples, which costs one skill's results; routing is a single task for the
-    whole room, so the same rule would throw away every case the run already
-    paid for because the last one raised -- observed on a task interrupted at
-    sample three of three. So the samples that exist are graded whatever the
+    Both keep a failed task's completed samples. `behavioral` used to discard
+    them, which cost one skill's whole report for one bad case; routing never
+    could, because it is a single task for the whole room and the same rule
+    would throw away every case the run already paid for because the last one
+    raised -- observed on a task interrupted at sample three of three. So the
+    samples that exist are graded whatever the
     task's status, and only the cases with no sample at all are errored.
     """
     by_id = {case.id: case for case in cases}
@@ -556,6 +574,13 @@ def _outcomes(log, cases: list[Case], skills: list[str]) -> list[routing_core.Ou
                     elapsed_s=elapsed,
                     tool_calls=tool_calls,
                     inspection_calls=inspection_calls,
+                    # The room check, where the leg that ran could make it.
+                    # Both default to empty, and `summarize` reads an empty
+                    # `visible_skills` as "not checked" rather than as "saw
+                    # nothing" -- so the sandboxed leg, which has no init event
+                    # to read, contributes no false reassurance.
+                    visible_skills=_room_report(sample, VISIBLE_SKILLS_KEY),
+                    extra_skills=_room_report(sample, EXTRA_SKILLS_KEY),
                 )
         outcomes.append(outcome)
 
@@ -639,6 +664,10 @@ def _solver(
             stop_when_factory=host_stop_when_factory(
                 list(routing_set), max_tool_calls, max_inspection_calls
             ),
+            # The room check. This leg reads the CLI's `system/init` event, so
+            # it can say which of these the agent reported seeing and what else
+            # was registered alongside them.
+            room_names=list(routing_set),
         ),
     )
 
@@ -971,7 +1000,35 @@ def build_task(
             behavioral.message_limit_for(models.resolve(model)), ROUTING_MESSAGE_LIMIT
         ),
         time_limit=case_time_limit(case_timeout),
+        cost_limit=sandbox_cost_limit(engine, model, max_budget_usd),
     )
+
+
+def sandbox_cost_limit(
+    engine: str, model: str, max_budget_usd: float | None
+) -> float | None:
+    """`--max-budget-usd` for the leg that cannot hand it to the CLI.
+
+    The host leg passes `--max-budget-usd` straight through to `claude`, which
+    enforces it (`host_cost_flags`). The sandboxed leg has no such route:
+    `inspect_swe.claude_code()` builds its command line from a closed set of
+    arguments and takes no passthrough, so the flag has nowhere to go -- it was
+    accepted here and silently dropped, while `--help` claimed the CLI enforced
+    it.
+
+    inspect's own `cost_limit` is the equivalent, and is per *sample*, which is
+    the per-case unit the flag has always meant. So the budget is handed to the
+    task rather than to the agent, and the stop comes from inspect raising on
+    the call that crosses the line instead of from the CLI exiting.
+
+    Returned even when `models.cost_limit_binds` is False, because a limit that
+    cannot fire is inert rather than harmful -- what must not happen is a
+    *report* that implies it fired. `cli.cmd_routing` asks the same question and
+    records the answer in `meta`, so the two stay one decision.
+    """
+    if engine != CLAUDE_CODE or not max_budget_usd or max_budget_usd <= 0:
+        return None
+    return max_budget_usd
 
 
 def run(
@@ -984,6 +1041,8 @@ def run(
     max_tool_calls: int | None = None,
     max_inspection_calls: int | None = None,
     max_budget_usd: float | None = None,
+    jobs: int | None = None,
+    log_dir: str | None = None,
 ) -> list[routing_core.Outcome]:
     """Run every routing case against the room. Mirrors `routing.run_case`'s output.
 
@@ -1058,6 +1117,8 @@ def run(
             max_tool_calls,
             max_inspection_calls,
             max_budget_usd,
+            jobs,
+            log_dir,
         )
 
     outcomes: list[routing_core.Outcome] = []
@@ -1080,7 +1141,7 @@ def run(
 def _evaluate(
     inspect_eval, cases, routing_set, model, effort, engine, resolved, config_dir,
     case_timeout=None, max_tool_calls=None, max_inspection_calls=None,
-    max_budget_usd=None,
+    max_budget_usd=None, jobs=None, log_dir=None,
 ):
     """Run the task. Split out so `run` reads as a sequence of decisions."""
     return inspect_eval(
@@ -1090,7 +1151,14 @@ def _evaluate(
         ),
         model=resolved,
         model_args=models.model_args(resolved),
-        log_dir=str(Path(".skillscope") / "logs"),
+        # `--keep-logs` when it was given, the default otherwise. This is the
+        # transcript directory: `--keep-logs` declared one, CI passed one and
+        # uploaded the folder, and nothing ever read the flag -- so the upload
+        # was of whatever `.skillscope/logs` happened to hold, and a job that
+        # asked to keep its transcripts kept somebody else's.
+        log_dir=log_dir or str(Path(".skillscope") / "logs"),
+        # A routing case is a sample, so this is the flag's own words.
+        max_samples=jobs if jobs and jobs > 0 else None,
         log_realtime=behavioral.realtime_logging(),
         # skillscope's own progress lines are the report; inspect's rich display
         # takes over the terminal and produces nothing useful when a CI job

@@ -112,9 +112,9 @@ def build_task(
     return Task(
         name=f"behavioral-{skill}",
         dataset=samples,
-        setup=hooks.setup_solver(hook, skill),
+        setup=hooks.setup_solver(hook, skill, cases),
         solver=solver_factory(skill_dir),
-        cleanup=hooks.cleanup_fn(hook, skill),
+        cleanup=hooks.cleanup_fn(hook, skill, cases),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
         message_limit=message_limit_for(model),
@@ -141,14 +141,22 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     """Map one inspect `EvalLog` back onto skillscope's outcome objects.
 
-    A task that failed outright reports one failed outcome per case rather than
-    an empty list: an infrastructure failure that produced no samples must not
-    render as "every expectation met".
+    A task that produced no samples at all reports one failed outcome per case
+    rather than an empty list: an infrastructure failure must not render as
+    "every expectation met".
+
+    But a task that produced *some* samples keeps them, whatever its status.
+    `log.status` goes to `error` when any sample raised, so failing the batch
+    on it threw away every case the run had already graded and paid for --
+    one container that would not start, and a skill's whole report read as a
+    total failure. `engine/routing.py:_outcomes` has always done it this way,
+    for the same reason; the two now agree. Cases with no sample are still
+    errored below, so nothing goes quietly missing.
     """
     prompts = {c.id: c.prompt for c in cases}
     outcomes: list[BehaviorOutcome] = []
 
-    if log.status == "error" or not log.samples:
+    if not log.samples:
         detail = getattr(log.error, "message", None) or "the task produced no samples"
         return _failed(skill, cases, f"inspect task failed: {detail}")
 
@@ -177,6 +185,21 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
                 degraded=routing_core.is_provider_error(error),
             )
         )
+
+    # Samples inspect never reported back are still cases somebody asked for.
+    # Now that a partial log is kept rather than discarded wholesale, the cases
+    # missing from it are the ones that need saying -- silence here would read
+    # as a smaller, cleaner run rather than an incomplete one.
+    failure = getattr(getattr(log, "error", None), "message", None)
+    missing = (
+        f"inspect task failed before this case ran: {failure}"
+        if failure
+        else "inspect returned no sample for this case"
+    )
+    graded = {outcome.id for outcome in outcomes}
+    outcomes.extend(
+        _failed(skill, [c for c in cases if c.id not in graded], missing)
+    )
     return outcomes
 
 
@@ -187,6 +210,7 @@ def run(
     effort: str,
     *,
     solver_factory,
+    log_dir: str | None = None,
 ) -> list[BehaviorOutcome]:
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
     from inspect_ai import eval as inspect_eval
@@ -205,8 +229,16 @@ def run(
                 build_task(skill, skill_cases, model, solver_factory=solver_factory),
                 model=model,
                 model_args=models.model_args(model),
-                log_dir=str(Path(".skillscope") / "logs"),
+                log_dir=log_dir or str(Path(".skillscope") / "logs"),
                 log_realtime=realtime_logging(),
+                # A sample that raises is that case's failure, not the batch's.
+                # inspect's default ends the task on the first error, so one
+                # container that would not start discarded every case already
+                # graded -- `_outcomes` then reported the whole skill failed.
+                # Errored samples still come back in the log and are still
+                # graded as failures; what changes is that their neighbours
+                # survive.
+                fail_on_error=False,
                 # skillscope's own progress lines are the report; inspect's rich
                 # display takes over the terminal and produces nothing useful
                 # when a CI job pipes stdout to a file.

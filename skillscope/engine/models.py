@@ -51,6 +51,41 @@ def resolve(model: str) -> str:
     return ALIASES.get(model.lower(), f"anthropic/{model}")
 
 
+def cost_limit_binds(model: str) -> bool:
+    """Whether inspect can price `model`, and so whether a cost limit can fire.
+
+    `Task(cost_limit=)` is cooperative: inspect checks it from
+    `record_model_usage`, but only after computing a cost, and it computes one
+    only when its model registry knows the model's rates -- `total_cost` stays
+    `None` otherwise and the check is never reached. So a cap handed to a model
+    inspect cannot price is not a loose cap, it is no cap at all.
+
+    Asked up front rather than discovered afterwards, because the two are
+    indistinguishable in a report: a run that stayed under budget and a run
+    where the budget could never bind both finish without a limit event. The
+    caller records the answer in `meta` so a reader can tell which happened.
+
+    As of inspect_ai 0.3.266 this is `False` for every model it ships: the
+    registry has 796 entries across ten providers and not one declares a
+    `cost`, so `ModelInfo.cost` is populated only by a caller's own
+    `set_model_info`. skillscope does not register one -- a price list it
+    invented would make the cap look enforced while holding the run to a number
+    nobody agreed, which is the failure this function exists to report rather
+    than imitate.
+    """
+    try:
+        from inspect_ai.model import get_model_info
+    except ImportError:  # pragma: no cover -- an inspect without the lookup
+        return False
+    try:
+        info = get_model_info(resolve(model))
+    except Exception:
+        # A registry lookup that raises is not a priced model, and reporting
+        # what a cap can do is not the place to turn that into a failed run.
+        return False
+    return info is not None and getattr(info, "cost", None) is not None
+
+
 async def _probe(model: str, timeout: float):
     import anyio
     from inspect_ai.model import GenerateConfig, get_model

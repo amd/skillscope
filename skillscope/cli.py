@@ -69,7 +69,6 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import (
@@ -547,11 +546,14 @@ def cmd_routing(args: argparse.Namespace) -> int:
         cases = datasets.filter_cases(cases, args.skill)
 
     print(f"[routing] installed together: {', '.join(routing_set)}")
-    print(
-        f"[routing] {len(cases)} cases, model={args.model}, "
-        f"jobs={args.jobs}, engine={args.engine}"
-    )
+    # No `jobs=`: it was printed but never passed on. inspect decides a routing
+    # task's concurrency from its own `max_connections`, so naming a number the
+    # run does not honour described a parallelism nobody chose. `--jobs` still
+    # means what it always did for `structural --external`, which is the one
+    # command that reads it.
+    print(f"[routing] {len(cases)} cases, model={args.model}, engine={args.engine}")
 
+    from .engine import models as engine_models
     from .engine import routing as inspect_routing
     from .engine import sandbox as engine_sandbox
 
@@ -565,6 +567,8 @@ def cmd_routing(args: argparse.Namespace) -> int:
         max_tool_calls=args.max_tool_calls,
         max_inspection_calls=args.max_inspection_calls,
         max_budget_usd=args.max_budget_usd,
+        jobs=args.jobs,
+        log_dir=args.keep_logs or None,
     )
     if args.engine == "claude-code":
         # A container really was started: `verify.require()` refuses every
@@ -585,24 +589,48 @@ def cmd_routing(args: argparse.Namespace) -> int:
     # -- the sandboxed one by declining the call, the host one by reading
     # the CLI's stream and killing the process group -- but they are held
     # to different numbers, so the report names the one that applied.
-    extra: dict = {"case_timeout": args.case_timeout}
+    #
+    # `case_timeout` is the clipped bound, not the argument: `case_time_limit`
+    # shortens it to whatever `--timeout` has left, so reporting the request
+    # named a cap longer than the one a case was actually held to.
+    extra: dict = {"case_timeout": inspect_routing.case_time_limit(args.case_timeout)}
+    # Both legs, because both enforce these. The sandboxed leg declines the
+    # call at the approver; the host leg reads the CLI's stream and stops the
+    # process group (`host_stop_when_factory`) -- the same rule, applied one
+    # call later. Recorded only for `claude-code` before, so `near_a_limit`
+    # was handed a `meta` with no thresholds in it and the default engine
+    # reported `near_limit: 0` for every run, including cases that stopped
+    # *on* the cap. `budget_for` already returns the unscaled cap off-sandbox,
+    # so one call covers both legs.
+    extra["max_tool_calls"] = inspect_routing.budget_for(
+        args.engine, args.max_tool_calls
+    )
+    extra["max_inspection_calls"] = inspect_routing.budget_for(
+        args.engine, args.max_inspection_calls
+    )
     if args.engine == "claude-code":
-        # The cap that was enforced, not the one asked for. The sandboxed
-        # leg is held to a scaled budget, so reporting the request would
-        # make `near_limit` count against a threshold that never applied.
-        extra["max_tool_calls"] = inspect_routing.budget_for(
-            args.engine, args.max_tool_calls
-        )
-        extra["max_inspection_calls"] = inspect_routing.budget_for(
-            args.engine, args.max_inspection_calls
-        )
         extra["budget_scaled_by"] = inspect_routing.SANDBOX_BUDGET_FACTOR
+        # This leg cannot give the CLI `--max-budget-usd` -- `inspect_swe`
+        # takes no command-line passthrough -- so the cap goes to the task as
+        # inspect's own per-sample `cost_limit` instead. Whether that can bind
+        # depends on inspect being able to price the model, which it cannot do
+        # for any model it currently ships. Both facts are recorded: a reader
+        # who sees a budget and no limit event must be able to tell "stayed
+        # under it" from "it could never fire".
+        if inspect_routing.sandbox_cost_limit(
+            args.engine, args.model, args.max_budget_usd
+        ):
+            extra["max_budget_usd"] = args.max_budget_usd
+            extra["max_budget_enforced_by"] = "inspect cost_limit"
+            extra["max_budget_can_bind"] = engine_models.cost_limit_binds(args.model)
     else:
         # The CLI's own cap, passed through and only when the build
         # advertises it -- so this records what was actually enforced.
         flags = inspect_routing.host_cost_flags(args.max_budget_usd)
         if flags:
             extra["max_budget_usd"] = args.max_budget_usd
+            extra["max_budget_enforced_by"] = "claude --max-budget-usd"
+            extra["max_budget_can_bind"] = True
         extra["optional_cli_flags_used"] = sorted(f for f in flags if f.startswith("--"))
 
     return _finish_routing(
@@ -834,7 +862,7 @@ def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
         "--jobs",
         type=int,
         default=4,
-        help="Routing cases to run concurrently, each in its own workspace. Default: 4.",
+        help="Routing cases to run concurrently. Default: 4.",
     )
     parser.add_argument(
         "--case-timeout",
@@ -872,10 +900,22 @@ def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
         "--max-budget-usd",
         type=float,
         default=0.75,
-        help="Per-case routing spend cap enforced by the CLI. 0 disables. Default: 0.75.",
+        help=(
+            "Per-case routing spend cap. 0 disables. Enforced by the CLI's own "
+            "--max-budget-usd on claude-code-no-sandbox, and by inspect's "
+            "per-sample cost_limit on claude-code, which binds only where "
+            "inspect can price the model -- the report's "
+            "`max_budget_can_bind` says which held. Default: 0.75."
+        ),
     )
     parser.add_argument(
-        "--keep-logs", default="", help="Directory for raw per-case stream-json transcripts."
+        "--keep-logs",
+        default="",
+        help=(
+            "Directory for this run's inspect transcripts (`.eval` logs, one "
+            "per task, readable with `inspect view`). Defaults to "
+            ".skillscope/logs."
+        ),
     )
     parser.add_argument(
         "--min-accuracy",

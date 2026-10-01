@@ -93,26 +93,6 @@ PROVIDER_ERROR_SIGNS = (
 )
 
 
-def _result_error(event: dict) -> str:
-    """Why a `result` event says the run failed, keeping the reason it gave.
-
-    The CLI puts the reason in `result` sometimes and in `subtype` other times
-    -- `error_during_execution`, `error_max_turns` -- and collapsing both into
-    "result event reported an error" discards the one thing that makes the
-    failure readable. It did exactly that to a gateway 504 on this catalogue:
-    the report showed a case that failed for no stated reason, and nothing
-    downstream could tell it from a skill that simply did not fire.
-
-    Both are kept when both exist, because the subtype says what class of
-    failure it was and the body says what happened.
-    """
-    detail = str(event.get("result") or "").strip()
-    subtype = str(event.get("subtype") or "").strip()
-    if detail and subtype:
-        return f"{detail} (subtype: {subtype})"[:400]
-    return (detail or subtype or "result event reported an error")[:400]
-
-
 def is_provider_error(message: str | None) -> bool:
     """Whether this failure came from the provider rather than from the skill.
 
@@ -132,21 +112,6 @@ PASSING_VERDICTS = {"correct_trigger", "true_negative"}
 
 # Stop reasons that leave the routing decision unknown rather than observed.
 INCONCLUSIVE_STOPS = {"completed", "timeout"}
-
-
-@dataclass
-class RoutingConfig:
-    """Everything ``run_case`` needs that is not the case itself."""
-
-    model: str = "opus"
-    effort: str = "high"
-    case_timeout: float = 240.0
-    max_tool_calls: int = 4
-    max_inspection_calls: int = 8
-    max_budget_usd: float = 0.75
-    keep_logs: str = ""
-    available_flags: set[str] = field(default_factory=set)
-    isolate_config: bool = False
 
 
 @dataclass
@@ -265,6 +230,63 @@ def _match_skill(text: str, skills: list[str]) -> str | None:
         if skill.lower() in lowered:
             return skill
     return None
+
+
+def init_skills(event: dict, skills: list[str]) -> list[str] | None:
+    """Skill names the CLI reported at session init, if this is that event.
+
+    The room check: proof that the agent really saw the whole routing set. A
+    case graded against a room it was never shown is not a routing result, and
+    the failure looks exactly like a skill that failed to attract its prompt --
+    `missed_trigger`, with nothing to say it was the installation rather than
+    the description.
+
+    `None` for any other event, so a caller can feed it the whole stream.
+    """
+    if event.get("type") != "system" or event.get("subtype") != "init":
+        return None
+    seen: list[str] = []
+    for key in ("skills", "slash_commands", "slashCommands", "commands"):
+        entries = event.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            text = entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False)
+            hit = _match_skill(text, skills)
+            if hit and hit not in seen:
+                seen.append(hit)
+    return seen
+
+
+def init_extra_skills(event: dict, skills: list[str]) -> list[str] | None:
+    """Skills the CLI reported at init that this eval did not install.
+
+    The other half of the room check. A user-level skill on the runner --
+    `~/.claude/skills` is the usual source -- is registered alongside the
+    staged ones and competes for every prompt, so the numbers describe a room
+    nobody asked for. Classifying an answer as `other:` notices such a skill
+    only when it actually wins a case; this notices it being present at all,
+    which is the difference between one odd result and a whole run measured in
+    the wrong room.
+    """
+    if event.get("type") != "system" or event.get("subtype") != "init":
+        return None
+    entries = event.get("skills")
+    if not isinstance(entries, list):
+        return []
+    known = {skill.lower() for skill in skills}
+    extra: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, dict):
+            name = str(entry.get("name") or "")
+        else:
+            continue
+        name = name.strip().lstrip("/")
+        if name and name.lower() not in known and name not in extra:
+            extra.append(name)
+    return extra
 
 
 def _skill_from_body_path(text: str, skills: list[str]) -> str | None:
@@ -444,14 +466,15 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
     contaminated = sorted(
         {o.observed for o in outcomes if o.observed and o.observed.startswith("other:")}
     )
+    # The room check, and whether it ran at all. `visible_skills` is populated
+    # from the CLI's session-init event, which only the host leg can read:
+    # `claude-code` drives the CLI through `inspect_swe` and never sees one. So
+    # an empty list is ambiguous between "the agent reported no skills" and
+    # "nobody could ask", and the two must not render the same way -- a report
+    # with no missing-skill warning reads as a verified room.
+    checked = [o for o in outcomes if o.visible_skills]
     missing = sorted(
-        {
-            skill
-            for o in outcomes
-            if o.visible_skills
-            for skill in skills
-            if skill not in o.visible_skills
-        }
+        {skill for o in checked for skill in skills if skill not in o.visible_skills}
     )
     extras = sorted({skill for o in outcomes for skill in o.extra_skills})
 
@@ -488,6 +511,10 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
         "unexpected_skills": contaminated,
         "skills_missing_from_session": missing,
         "extra_skills_in_session": extras,
+        # How many cases the room check could actually be made for. Reported
+        # rather than inferred, so "no missing skills" and "nobody looked" are
+        # distinguishable in the JSON as well as in the markdown.
+        "room_checked_cases": len(checked),
         "cases": [asdict(o) for o in outcomes],
     }
 
@@ -665,5 +692,19 @@ def render_markdown(summary: dict) -> str:
             f"every prompt, so the room measured here is not the one that was "
             f"asked for. Set `ANTHROPIC_API_KEY` so the run can use an isolated "
             f"config dir, or remove them from the runner.",
+        ]
+    if not summary.get("room_checked_cases"):
+        # Said once, and only when no case could be checked. Both warnings
+        # above are silent on this leg whatever the room actually held, and a
+        # silent warning reads as a passed check -- which is how a contaminated
+        # runner would go unreported rather than unreportable.
+        lines += [
+            "",
+            "> **Note:** the room was not verified. The check reads the skills "
+            "the CLI announces at session init, which only "
+            "`claude-code-no-sandbox` can see -- `claude-code` drives the CLI "
+            "through `inspect_swe`, which does not surface that event. So the "
+            "two warnings above cannot fire on this leg: absence of them is "
+            "not evidence the agent saw the room this report describes.",
         ]
     return "\n".join(lines) + "\n"

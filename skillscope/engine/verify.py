@@ -241,8 +241,8 @@ def build_task(
     bound = deadline.active()
     return Task(
         name=f"claude-code-{skill}",
-        setup=hooks.setup_solver(hook, skill),
-        cleanup=hooks.cleanup_fn(hook, skill),
+        setup=hooks.setup_solver(hook, skill, cases),
+        cleanup=hooks.cleanup_fn(hook, skill, cases),
         dataset=samples,
         # `skills=` installs into .claude/skills inside the sandbox, which is
         # where the real harness looks -- the point of this leg is that its

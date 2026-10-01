@@ -17,6 +17,24 @@ takes a per-state callable that inspect invokes inside a `finally` under a
 shielded cancel scope -- so teardown still runs when the agent raises or the
 sample is cancelled, which is the property the whole hook exists for.
 
+The three arguments keep the meanings the legacy engine gave them, which is
+not where this started: `workspace` was briefly `tools.workdir()` -- `None`
+off-container, the string `/workspace` on it -- and `case` was
+`state.metadata`, a dict holding neither `id` nor `prompt`. Both were silent
+changes to a documented contract, and both broke the example in
+`docs/authoring-evals.md`. Now `workspace` is a real per-case host directory
+(`case_workspace`) and `case` is the `Case` object itself.
+
+One meaning did have to change. Legacy's `workspace` *was* the agent's room,
+because legacy staged the skill into a temp directory and ran the CLI there.
+Here the agent's room is inspect's -- a container under `claude-code` -- so
+this is a host-side scratch directory for the hook's own use, which is what
+`sources.resolve(skill, cache_dir)` wants. A hook that needs to reach the
+agent's room should use inspect's sandbox API.
+
+`ctx` is always `{}`. It carried `setup_session`'s return value, and that
+entry point is refused below, so there is nothing left to put in it.
+
 **Not supported, and refused rather than approximated.**
 
 `check(run, case, ctx)` is handed the legacy engine's `Run` object and raises
@@ -41,14 +59,88 @@ a hook, it defines `setup` and `teardown` only, and neither returns anything.
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import tempfile
+from pathlib import Path
 from types import ModuleType
 
 from .. import datasets
+from ..datasets import Case
 
 # Entry points the legacy engine honoured that these engines cannot. Named
 # rather than inferred so the refusal can list them, and so adding support
 # later is a matter of removing a name.
 UNSUPPORTED = ("check", "setup_session")
+
+# Where a case's hook scratch directory is remembered. inspect's store is
+# scoped to the sample, which is the scope the directory has: `setup` and
+# `teardown` for one case must be handed the same path, and two cases must not
+# share one.
+WORKSPACE_KEY = "skillscope_hook_workspace"
+
+
+def case_workspace() -> Path:
+    """This case's scratch directory on the host, created once per sample.
+
+    The legacy engine handed `setup`/`teardown` a real local directory and
+    asserted it was not `None`. The first inspect version handed them
+    `tools.workdir()`, which is `None` off-container and the *string*
+    `/workspace` on it -- so the documented example,
+    `sources.resolve(skill, workspace)`, raised `TypeError` on both engines,
+    and any hook doing `workspace / "x"` did too.
+
+    A host path on both engines, deliberately. `sources.resolve` names this
+    parameter `cache_dir` and uses it to fetch a source tree the hook will read
+    *in this process*; a path inside the guest would be useless for that, and
+    `claude-code`'s guest is torn down with the case anyway. A hook that needs
+    to put files where the agent will see them should use inspect's sandbox
+    API, which can address the guest -- `docs/authoring-evals.md` says so.
+    """
+    from inspect_ai.util import store
+
+    cached = store().get(WORKSPACE_KEY)
+    if cached:
+        return Path(cached)
+    created = Path(tempfile.mkdtemp(prefix="skillscope-hook-"))
+    store().set(WORKSPACE_KEY, str(created))
+    return created
+
+
+def _discard_workspace() -> None:
+    """Remove this case's scratch directory, if one was ever made.
+
+    After `teardown`, not before: the directory is what a hook was given to
+    work in, so removing it first would pull the ground out from under the
+    entry point most likely to need it.
+    """
+    from inspect_ai.util import store
+
+    cached = store().get(WORKSPACE_KEY)
+    if not cached:
+        return
+    shutil.rmtree(cached, ignore_errors=True)
+    store().set(WORKSPACE_KEY, "")
+
+
+def _case_for(state, cases: list[Case] | None) -> Case | dict:
+    """The `Case` this sample came from, for the hook's second argument.
+
+    The object, not `state.metadata`. Legacy passed the `Case` itself, so a
+    hook reading `case.id` or `case.prompt` -- both documented -- got an
+    `AttributeError` against the dict that replaced it, and the two fields it
+    most likely wanted were not in that dict under any spelling.
+
+    Falls back to `state.metadata` only when a caller built a task without
+    handing the cases down, which no caller in skillscope does; a hook seeing
+    a dict means a bug here rather than a skill to fix.
+    """
+    if not cases:
+        return state.metadata
+    sample_id = str(getattr(state, "sample_id", ""))
+    for case in cases:
+        if case.id == sample_id:
+            return case
+    return state.metadata
 
 
 def load(skill: str) -> ModuleType | None:
@@ -98,21 +190,20 @@ def _returned_template_vars(result: object, skill: str) -> None:
         )
 
 
-def setup_solver(module: ModuleType | None, skill: str):
+def setup_solver(
+    module: ModuleType | None, skill: str, cases: list[Case] | None = None
+):
     """`Task.setup` for this skill's hook, or `None` if it has no `setup`."""
     if module is None or not callable(getattr(module, "setup", None)):
         return None
 
     from inspect_ai.solver import solver
 
-    from . import tools
-
     @solver
     def _hook_setup():
         async def solve(state, generate):
-            workspace = await tools.workdir()
             _returned_template_vars(
-                module.setup(workspace, state.metadata, {}), skill
+                module.setup(case_workspace(), _case_for(state, cases), {}), skill
             )
             return state
 
@@ -121,20 +212,35 @@ def setup_solver(module: ModuleType | None, skill: str):
     return _hook_setup()
 
 
-def cleanup_fn(module: ModuleType | None, skill: str):
+def cleanup_fn(
+    module: ModuleType | None, skill: str, cases: list[Case] | None = None
+):
     """`Task.cleanup` for this skill's hook, or `None` if it has no `teardown`.
 
     Returned rather than wrapped in a solver because inspect runs `cleanup` in
     a `finally` under a shielded cancel scope, and a solver would not run at
     all once the agent had raised.
+
+    Returned whenever the skill defines `teardown`, even with no `setup`: the
+    scratch directory is created on demand, so `teardown` gets a real one
+    either way, and it is removed afterwards rather than left behind.
+
+    Also returned for a hook with `setup` and no `teardown`, where it only
+    removes the directory. `setup` is handed a real path now, so something has
+    to delete it; without this a run of N cases left N temp directories on the
+    runner, which on a shared one is a leak that outlives the job.
     """
-    if module is None or not callable(getattr(module, "teardown", None)):
+    if module is None:
+        return None
+    teardown = getattr(module, "teardown", None)
+    if not callable(teardown) and not callable(getattr(module, "setup", None)):
         return None
 
     async def _cleanup(state) -> None:
-        from . import tools
-
-        workspace = await tools.workdir()
-        module.teardown(workspace, state.metadata, {})
+        try:
+            if callable(teardown):
+                teardown(case_workspace(), _case_for(state, cases), {})
+        finally:
+            _discard_workspace()
 
     return _cleanup

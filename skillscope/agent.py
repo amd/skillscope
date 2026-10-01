@@ -37,14 +37,12 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import datasets, deadline, usage
+from . import deadline, usage
 
 DEFAULT_MODEL = os.environ.get("SKILLSCOPE_MODEL", "opus")
-DEFAULT_EFFORT = os.environ.get("SKILLSCOPE_EFFORT", "high")
 
 # Automated runs are pinned to opus: a behavioral run makes real cloud calls
 # (agent run + LLM judge), so pinning the model keeps CI results comparable
@@ -138,82 +136,6 @@ def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: float = 60) 
         detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
         return False, detail[:500]
     return True, "ok"
-
-
-def _stage_workspace(skill: str, seed: Path | None = None) -> Path:
-    """Copy ``skill`` into an isolated temp workspace and return its path.
-
-    ``seed`` is a directory of fixture files (a case's ``workspace``) whose
-    *contents* land at the workspace root, so a case can hand the agent a
-    starting file to edit rather than describing one in prose.
-    """
-    skill_src = datasets.skill_path(skill)
-    if not (skill_src / "SKILL.md").is_file():
-        raise FileNotFoundError(f"skill '{skill}' not found at {skill_src / 'SKILL.md'}")
-
-    workspace = Path(tempfile.mkdtemp(prefix=f"behavior-{skill}-"))
-    dest = workspace / ".claude" / "skills" / skill
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(skill_src, dest)
-
-    if seed is not None:
-        if not seed.is_dir():
-            raise FileNotFoundError(f"workspace fixture directory not found: {seed}")
-        shutil.copytree(seed, workspace, dirs_exist_ok=True)
-
-    return workspace
-
-
-def _run_agent(prompt_text: str, workspace: Path, model: str | None, effort: str | None) -> list[dict]:
-    """Run the agent once in ``workspace`` and return the stream-json events."""
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        raise RuntimeError("'claude' CLI not found on PATH")
-
-    cmd = [
-        claude_bin, "-p",
-        "--output-format", "stream-json", "--verbose",
-        "--dangerously-skip-permissions",
-        "--add-dir", str(workspace),
-    ]
-    if model:
-        cmd += ["--model", model]
-    if effort:
-        cmd += ["--effort", effort]
-
-    run_timeout = None
-    bound = deadline.active()
-    if bound is not None:
-        leftover = bound.remaining()
-        if leftover <= 0:
-            raise RuntimeError(bound.message())
-        run_timeout = leftover
-
-    try:
-        proc = subprocess.run(
-            cmd, cwd=str(workspace), capture_output=True, text=True,
-            encoding="utf-8", input=prompt_text, env=claude_env(),
-            timeout=run_timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"agent timed out after {exc.timeout:g}s") from exc
-
-    events: list[dict] = []
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    if not events:
-        raise RuntimeError(
-            f"claude exited with code {proc.returncode} and produced no "
-            f"parseable stream-json output. stderr:\n{proc.stderr}"
-        )
-    return events
 
 
 def _walk(obj, tool_uses, tool_results) -> None:
@@ -488,57 +410,3 @@ class Run:
     def _report(self, passed: bool, kind: str, detail: str) -> None:
         _safe_print(f"  [{'PASS' if passed else 'FAIL'}] ({kind}) {detail}")
         assert passed, f"({kind}) {detail}"
-
-
-class Agent:
-    """A single agent session bound to an isolated, skill-staged workspace.
-
-    Use as a context manager so the temp workspace is always cleaned up::
-
-        with claude("opus", skill="local-ai-use") as agent:
-            run = agent.prompt("...")
-    """
-
-    def __init__(
-        self,
-        model: str | None = DEFAULT_MODEL,
-        *,
-        skill: str,
-        effort: str | None = DEFAULT_EFFORT,
-        seed: Path | None = None,
-    ) -> None:
-        # Coerce here so the agent run and the LLM judge share the capped model.
-        self.model = enforce_model_policy(model)
-        self.skill = skill
-        self.effort = effort
-        self.seed = seed
-        self.workspace: Path | None = None
-
-    def __enter__(self) -> "Agent":
-        self.workspace = _stage_workspace(self.skill, self.seed)
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self.workspace is not None:
-            shutil.rmtree(self.workspace, ignore_errors=True)
-            self.workspace = None
-
-    def prompt(self, text: str) -> Run:
-        """Run ``text`` through the agent once and return a Run to grade."""
-        if self.workspace is None:
-            raise RuntimeError("Agent.prompt() must be called inside a 'with' block")
-
-        _safe_print(f"\n[behavioral] skill='{self.skill}' model='{self.model}': {text}")
-        events = _run_agent(text, self.workspace, self.model, self.effort)
-        return Run(workspace=self.workspace, events=events, judge_model=self.model)
-
-
-def claude(
-    model: str | None = DEFAULT_MODEL,
-    *,
-    skill: str,
-    effort: str | None = DEFAULT_EFFORT,
-    seed: Path | None = None,
-) -> Agent:
-    """Factory for a Claude-backed `Agent` (the only agent backend today)."""
-    return Agent(model, skill=skill, effort=effort, seed=seed)
