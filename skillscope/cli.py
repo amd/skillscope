@@ -69,12 +69,51 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, deadline, references, routing, structure
+from . import (
+    behavior,
+    config,
+    datasets,
+    deadline,
+    engine,
+    references,
+    routing,
+    structure,
+    usage,
+)
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
+
+# The engines a graded run can be driven by.
+#   claude-code             -- the real CLI in a sandbox, via inspect_swe (Linux only)
+#   claude-code-no-sandbox  -- the real CLI on the host, under inspect_ai (any platform)
+#
+# Both drive the agent a skill is actually written for; what differs is where
+# it runs. Two others have been removed. `inspect` drove a harness-independent
+# agent, and carried a smaller tool set than the real harness, so a skill
+# referring to a tool it did not have failed for a reason that was the agent's
+# rather than the skill's. `legacy` drove the CLI as a bare subprocess, and
+# `claude-code-no-sandbox` replaced it: measured per case against the run's own
+# noise floor, the two agreed on every routing case outside that floor, across
+# two runs, and on 12 of 13 behavioral cases.
+ENGINES = ["claude-code", "claude-code-no-sandbox"]
+
+# Every engine runs under inspect_ai now. Kept as its own name because the code
+# that branches on it is about what an inspect-based engine needs -- a preflight
+# of its own, a report that names the engine -- rather than about which engines
+# happen to exist today.
+INSPECT_ENGINES = tuple(ENGINES)
+
+# The engines routing has a leg for: all of them. Derived rather than listed,
+# because the last time two engine lists were kept by hand one fell behind and
+# the runs silently went somewhere else.
+ROUTING_ENGINES = tuple(ENGINES)
+
+# What a run uses when nobody says. The host leg rather than the sandboxed one:
+# it runs on every platform, where `claude-code` needs a POSIX guest and a
+# container runtime, and a default that refuses on Windows is not a default.
+DEFAULT_ENGINE = "claude-code-no-sandbox"
 
 # Where JSON reports land inside the repo under test. One gitignored directory
 # rather than a path per repo, so a report is always in the same place.
@@ -310,9 +349,15 @@ def _empty_room(args: argparse.Namespace) -> None:
 
 
 def _fail_if_expired() -> int | None:
-    """Non-zero when the command's ``--timeout`` has already elapsed."""
+    """Non-zero when the command's ``--timeout`` has elapsed or stopped the run.
+
+    Both, because the graceful stage fires `GRACEFUL_RESERVE_S` *before* the
+    wall. inspect then returns from `eval()` normally, so a run it stopped
+    reaches the gate with the clock still short of `expired()` -- and was
+    reported as "every case errored" instead of the overrun it was.
+    """
     bound = deadline.active()
-    if bound is None or not bound.expired():
+    if bound is None or not (bound.expired() or bound.interrupted):
         return None
     print(f"error: {bound.message()}", file=sys.stderr)
     return 1
@@ -334,11 +379,163 @@ def _prepare_graded_run(
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
     args.model = enforce_model_policy(args.model) or args.model
+    if getattr(args, "engine", DEFAULT_ENGINE) in INSPECT_ENGINES:
+        # The CLI-based reachability probe tests something these engines do not
+        # use, but they still need one of their own: a graded run starts
+        # containers and installs skills before it first reaches a provider, so
+        # without this a bad key surfaces as a task that failed after all that.
+        engine.require(args.engine)
+        # Before the model probe, because it costs nothing and a run that
+        # cannot honour a skill's setup should not first spend a round trip
+        # finding out the credentials are fine.
+        _require_hook_support(
+            args.engine, selected, getattr(args, "command", "")
+        )
+        # Also before the probe, and for the same reason: a malformed price
+        # table should fail the command, not one sample into a graded run.
+        # Registered here rather than in the engine because both graded
+        # commands come through this function and inspect's registry is
+        # process-global -- setting it twice would be the same work.
+        from .engine import pricing as engine_pricing
+
+        args.pricing_note = engine_pricing.apply()
+        if not args.skip_preflight:
+            from .engine import models as engine_models
+
+            ok, detail = engine_models.check_reachable(engine_models.resolve(args.model))
+            if not ok:
+                raise SystemExit(f"error: model not reachable -- {detail}")
+            if args.engine == "claude-code-no-sandbox":
+                # This engine reaches the provider for the judge but drives the
+                # real CLI as the agent, so both credentials are load-bearing
+                # and probing one proves nothing about the other.
+                ok, detail = check_api_reachable(args.model)
+                if not ok:
+                    raise SystemExit(f"error: claude API not reachable -- {detail}")
+        return selected
     if not args.skip_preflight:
         ok, detail = check_api_reachable(args.model)
         if not ok:
             raise SystemExit(f"error: claude API not reachable -- {detail}")
     return selected
+
+
+def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
+    """Refuse a run whose hooks use entry points this engine cannot honour.
+
+    `evals/hooks.py` is environment plumbing -- clearing stale containers,
+    tearing down a service. `setup` and `teardown` run here: inspect's
+    `Task.setup` and `Task.cleanup` are the same two shapes, and `cleanup`
+    runs inside a `finally` under a shielded cancel scope, so teardown still
+    happens when the agent raises.
+
+    `check` and `setup_session` do not, and this refuses rather than skipping
+    them. Skipping is the dangerous half: a hook that did not run leaves no
+    trace in the report, the case is graded as though it had, and the failure
+    surfaces later as a skill that mysteriously does not work on this runner.
+
+    Refused by entry point, not by the file existing. An earlier version
+    grounded any skill that shipped a hook at all -- which took the behavioral
+    leg away from the one skill in the catalogue whose hook these engines can
+    run perfectly well.
+
+    Routing is exempt on every engine: it installs the skills, asks which one
+    fires, and executes nothing.
+    """
+    if command != "behavioral":
+        return
+
+    from .engine import hooks as engine_hooks
+
+    blocked: dict[str, list[str]] = {}
+    for skill in skills:
+        names = engine_hooks.unsupported_entry_points(engine_hooks.load(skill))
+        if names:
+            blocked[skill] = names
+    if not blocked:
+        return
+
+    listed = "\n".join(
+        f"    {skill}: {datasets.hooks_path(skill)} defines "
+        f"{', '.join(names)}"
+        for skill, names in blocked.items()
+    )
+    raise SystemExit(
+        f"error: --engine {engine} cannot run every entry point these "
+        f"skills' hooks define:\n{listed}\n"
+        "    They would be skipped silently, and the cases graded as though "
+        "they had run.\n"
+        "    `setup` and `teardown` are supported. `check` needs the legacy "
+        "engine's Run object, and `setup_session` returns template variables "
+        "that are substituted before any hook runs -- neither has an "
+        "equivalent here.\n"
+        "    Move what they do into the dataset, or into setup/teardown."
+    )
+
+
+def _sandbox_meta(args: argparse.Namespace) -> dict:
+    """What contained this run, recorded so the report does not have to imply it.
+
+    Saying so in the artifact is the point: the same numbers mean different
+    things depending on whether anything was isolated, and one engine here
+    isolates nothing by construction. A report that left a reader to infer it
+    from the engine name is how a table of host results came to be read as
+    evidence about containers.
+    """
+    from .engine import sandbox as engine_sandbox
+
+    return engine_sandbox.describe()
+
+
+def _finish_routing(
+    args: argparse.Namespace,
+    outcomes: list,
+    routing_set: dict,
+    started: float,
+    *,
+    isolated: bool,
+    sandbox: str,
+    sandbox_isolated: bool,
+    extra: dict | None = None,
+) -> int:
+    """Summarize, report, and gate a routing run. Shared by all three legs.
+
+    What contained the run is required of the caller rather than worked out
+    here. Deriving it from the engine's name is what let a run that started no
+    container report `sandbox: docker, sandbox_isolated: true`, and hardcoding
+    `host` was only right while no leg had a sandbox. Required keywords mean a
+    leg added later that forgets fails at the call with a TypeError, instead of
+    quietly reporting a containment it never had.
+    """
+    summary = routing.summarize(
+        outcomes,
+        list(routing_set),
+        {
+            "model": args.model,
+            "engine": args.engine,
+            "effort": args.effort,
+            "skills": list(routing_set),
+            "extended": args.extended,
+            "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
+            **(extra or {}),
+            # Last, so a leg's own meta cannot shadow what contained it.
+            "isolated_config_dir": isolated,
+            "sandbox": sandbox,
+            "sandbox_isolated": sandbox_isolated,
+        },
+    )
+    _write_report(summary, routing.render_markdown(summary), args, "routing")
+
+    if (code := _fail_if_expired()) is not None:
+        return code
+    reason = routing_gate(summary["totals"], args.min_accuracy)
+    if reason:
+        print(f"[routing] {reason}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_routing(args: argparse.Namespace) -> int:
@@ -362,64 +559,117 @@ def cmd_routing(args: argparse.Namespace) -> int:
     elif args.skill:
         cases = datasets.filter_cases(cases, args.skill)
 
-    routing_config = routing.RoutingConfig(
-        model=args.model,
-        effort=args.effort,
+    print(f"[routing] installed together: {', '.join(routing_set)}")
+    # No `jobs=`: it was printed but never passed on. inspect decides a routing
+    # task's concurrency from its own `max_connections`, so naming a number the
+    # run does not honour described a parallelism nobody chose. `--jobs` still
+    # means what it always did for `structural --external`, which is the one
+    # command that reads it.
+    print(f"[routing] {len(cases)} cases, model={args.model}, engine={args.engine}")
+
+    from .engine import models as engine_models
+    from .engine import routing as inspect_routing
+    from .engine import sandbox as engine_sandbox
+
+    outcomes = inspect_routing.run(
+        cases,
+        routing_set,
+        args.model,
+        args.effort,
+        args.engine,
         case_timeout=args.case_timeout,
         max_tool_calls=args.max_tool_calls,
         max_inspection_calls=args.max_inspection_calls,
         max_budget_usd=args.max_budget_usd,
-        keep_logs=args.keep_logs,
-        available_flags=routing.supported_flags(
-            ["--no-session-persistence", "--max-budget-usd"]
-        ),
-        isolate_config=routing.can_isolate_config(),
+        jobs=args.jobs,
+        log_dir=args.keep_logs or None,
     )
-    if not routing_config.isolate_config:
-        print(
-            "[routing] warning: ANTHROPIC_API_KEY is not set, so the runner's "
-            "own config dir is used and any user-level skill in it joins the "
-            "room for every case. The report flags what was registered."
-        )
+    if args.engine == "claude-code":
+        # A container really was started: `verify.require()` refuses every
+        # provider that shares the host's filesystem, so `describe()`
+        # cannot report an isolation this leg did not have. The config dir
+        # is isolated structurally -- the guest has no `~/.claude` to keep
+        # out -- rather than conditionally on a credential.
+        box = engine_sandbox.describe()
+        isolated = True
+    else:
+        # The CLI on the host. `engine/routing.py` has already refused to
+        # start without the credential that lets it redirect the config
+        # dir, so reaching here means the room is the room that was asked
+        # for -- but nothing was contained, and the report says so.
+        box = {"sandbox": "host", "sandbox_isolated": False}
+        isolated = True
+    # Reported as enforced, per leg. Both legs stop at the decision now
+    # -- the sandboxed one by declining the call, the host one by reading
+    # the CLI's stream and killing the process group -- but they are held
+    # to different numbers, so the report names the one that applied.
+    #
+    # `case_timeout` is the clipped bound, not the argument: `case_time_limit`
+    # shortens it to whatever `--timeout` has left, so reporting the request
+    # named a cap longer than the one a case was actually held to.
+    extra: dict = {"case_timeout": inspect_routing.case_time_limit(args.case_timeout)}
+    # Both legs, because both enforce these. The sandboxed leg declines the
+    # call at the approver; the host leg reads the CLI's stream and stops the
+    # process group (`host_stop_when_factory`) -- the same rule, applied one
+    # call later. Recorded only for `claude-code` before, so `near_a_limit`
+    # was handed a `meta` with no thresholds in it and the default engine
+    # reported `near_limit: 0` for every run, including cases that stopped
+    # *on* the cap. `budget_for` already returns the unscaled cap off-sandbox,
+    # so one call covers both legs.
+    extra["max_tool_calls"] = inspect_routing.budget_for(
+        args.engine, args.max_tool_calls
+    )
+    extra["max_inspection_calls"] = inspect_routing.budget_for(
+        args.engine, args.max_inspection_calls
+    )
+    if args.engine == "claude-code":
+        extra["budget_scaled_by"] = inspect_routing.SANDBOX_BUDGET_FACTOR
+        # This leg cannot give the CLI `--max-budget-usd` -- `inspect_swe`
+        # takes no command-line passthrough -- so the cap goes to the task as
+        # inspect's own per-sample `cost_limit` instead. Whether that can bind
+        # depends on inspect being able to price the model, which it cannot do
+        # for any model it currently ships. Both facts are recorded: a reader
+        # who sees a budget and no limit event must be able to tell "stayed
+        # under it" from "it could never fire".
+        if inspect_routing.sandbox_cost_limit(
+            args.engine, args.model, args.max_budget_usd
+        ):
+            extra["max_budget_usd"] = args.max_budget_usd
+            extra["max_budget_enforced_by"] = "inspect cost_limit"
+            extra["max_budget_can_bind"] = engine_models.cost_limit_binds(args.model)
+            # Where the rates came from, when any did. A cap backed by an
+            # operator's own figures and one backed by inspect's registry are
+            # not the same claim, and only one of them is currently possible.
+            from .engine import pricing as engine_pricing
 
-    print(f"[routing] installed together: {', '.join(routing_set)}")
-    print(f"[routing] {len(cases)} cases, model={args.model}, jobs={args.jobs}")
-    if args.jobs > 1 and len(cases) > 1:
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            outcomes = list(
-                pool.map(lambda c: routing.run_case(c, routing_set, routing_config), cases)
+            extra["max_budget_pricing"] = getattr(
+                args, "pricing_note", engine_pricing.NO_PRICING
             )
     else:
-        outcomes = [routing.run_case(case, routing_set, routing_config) for case in cases]
+        # The CLI's own cap, passed through and only when the build
+        # advertises it -- so this records what was actually enforced.
+        #
+        # Keyed on the budget flag itself, not on the list being non-empty:
+        # the list also carries `--no-session-persistence`, which says nothing
+        # about spend, so `if flags:` would claim an enforced budget for a run
+        # that passed none.
+        flags = inspect_routing.host_cost_flags(args.max_budget_usd)
+        if "--max-budget-usd" in flags:
+            extra["max_budget_usd"] = args.max_budget_usd
+            extra["max_budget_enforced_by"] = "claude --max-budget-usd"
+            extra["max_budget_can_bind"] = True
+        extra["optional_cli_flags_used"] = sorted(f for f in flags if f.startswith("--"))
 
-    summary = routing.summarize(
+    return _finish_routing(
+        args,
         outcomes,
-        list(routing_set),
-        {
-            "model": args.model,
-            "effort": args.effort,
-            "skills": list(routing_set),
-            "extended": args.extended,
-            "wall_time_s": round(time.time() - started, 1),
-            "timeout": args.timeout,
-            "case_timeout": args.case_timeout,
-            "max_tool_calls": args.max_tool_calls,
-            "max_inspection_calls": args.max_inspection_calls,
-            "isolated_config_dir": routing_config.isolate_config,
-            "max_budget_usd": args.max_budget_usd,
-            "optional_cli_flags_used": sorted(routing_config.available_flags),
-            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
-        },
+        routing_set,
+        started,
+        isolated=isolated,
+        sandbox=box["sandbox"],
+        sandbox_isolated=box["sandbox_isolated"],
+        extra=extra,
     )
-    _write_report(summary, routing.render_markdown(summary), args, "routing")
-
-    if (code := _fail_if_expired()) is not None:
-        return code
-    reason = routing_gate(summary["totals"], args.min_accuracy)
-    if reason:
-        print(f"[routing] {reason}", file=sys.stderr)
-        return 1
-    return 0
 
 
 def cmd_behavioral(args: argparse.Namespace) -> int:
@@ -442,17 +692,54 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    outcomes = behavior.run(skills, gradable, args.model, args.effort)
+    from .engine import behavioral as inspect_behavioral
+    from .engine import models as engine_models
+
+    if args.engine == "claude-code":
+        from .engine import verify as runner
+
+        outcomes = runner.run(
+            skills, gradable, engine_models.resolve(args.model), args.effort
+        )
+    elif args.engine == "claude-code-no-sandbox":
+        # The real CLI, driven on the host, inside inspect's framework.
+        # `--model` stays the CLI's own alias here: this one does not go
+        # through an inspect model provider.
+        from .engine import no_sandbox
+
+        no_sandbox.require_local()
+        outcomes = inspect_behavioral.run(
+            skills,
+            gradable,
+            engine_models.resolve(args.model),
+            args.effort,
+            solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
+                args.model, args.effort, d
+            ),
+        )
+    else:
+        # Not a fallthrough. An engine in ENGINES with no branch here is a
+        # bug this dispatch has had once already, and a silent default is
+        # what let it survive: runs asked for one agent, got another, and
+        # the report named the one they had asked for.
+        raise SystemExit(
+            f"error: --engine {args.engine} has no behavioral leg. "
+            f"This is a bug in skillscope, not in how it was called."
+        )
+
     summary = behavior.summarize(
         outcomes,
         {
             "model": args.model,
+            "engine": args.engine,
             "effort": args.effort,
             "skills": skills,
             "extended": args.extended,
             "wall_time_s": round(time.time() - started, 1),
             "timeout": args.timeout,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
+            **_sandbox_meta(args),
         },
     )
     _write_report(summary, behavior.render_markdown(summary), args, "behavioral")
@@ -565,6 +852,20 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--skip-preflight", action="store_true", help="Skip the API reachability check."
     )
+    parser.add_argument(
+        "--engine",
+        default=os.environ.get("SKILLSCOPE_ENGINE", DEFAULT_ENGINE),
+        choices=ENGINES,
+        help=(
+            "Which eval engine runs the cases. Both drive the real claude "
+            "CLI, under inspect_ai; what differs is where it runs. "
+            "`claude-code-no-sandbox` runs it on the host, on any platform. "
+            "`claude-code` runs it inside a container via inspect_swe, which "
+            "needs a POSIX guest and so is Linux only, and additionally "
+            "needs `pip install 'skillscope[verify]'`. Both run both graded "
+            "commands. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
+        ),
+    )
     _add_timeout_argument(parser)
 
 
@@ -588,7 +889,7 @@ def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
         "--jobs",
         type=int,
         default=4,
-        help="Routing cases to run concurrently, each in its own workspace. Default: 4.",
+        help="Routing cases to run concurrently. Default: 4.",
     )
     parser.add_argument(
         "--case-timeout",
@@ -626,10 +927,22 @@ def _add_routing_arguments(parser: argparse.ArgumentParser) -> None:
         "--max-budget-usd",
         type=float,
         default=0.75,
-        help="Per-case routing spend cap enforced by the CLI. 0 disables. Default: 0.75.",
+        help=(
+            "Per-case routing spend cap. 0 disables. Enforced by the CLI's own "
+            "--max-budget-usd on claude-code-no-sandbox, and by inspect's "
+            "per-sample cost_limit on claude-code, which binds only where "
+            "inspect can price the model -- the report's "
+            "`max_budget_can_bind` says which held. Default: 0.75."
+        ),
     )
     parser.add_argument(
-        "--keep-logs", default="", help="Directory for raw per-case stream-json transcripts."
+        "--keep-logs",
+        default="",
+        help=(
+            "Directory for this run's inspect transcripts (`.eval` logs, one "
+            "per task, readable with `inspect view`). Defaults to "
+            ".skillscope/logs."
+        ),
     )
     parser.add_argument(
         "--min-accuracy",
@@ -924,6 +1237,18 @@ def main(argv: list[str] | None = None) -> int:
         bound.arm()
     try:
         return args.handler(args)
+    except KeyboardInterrupt:
+        # A Ctrl-C or the deadline's graceful stage that landed outside an
+        # `eval()` -- between skills, or while a report was being written.
+        # Inside one, inspect absorbs it: it unwinds through `Task.cleanup`
+        # and returns, `run_eval` reads a stopped run's log back, and
+        # `_fail_if_expired` reports the overrun beside the results. All that
+        # is left here is to say which it was, without a traceback.
+        if bound is not None and bound.interrupted:
+            print(f"error: {bound.message()}", file=sys.stderr)
+        else:
+            print("error: interrupted", file=sys.stderr)
+        return 1
     finally:
         if bound is not None:
             bound.disarm()

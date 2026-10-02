@@ -152,14 +152,49 @@ Setup a dataset cannot express: cloning a repo, tearing down a container,
 running an external scoring script. Every function is optional:
 
 ```python
-def setup_session(cache_dir): ...     # once per skill; returns {name: value} for {placeholders} in prompts
-def setup(workspace, case, ctx): ...  # before each case; may return more placeholders
-def teardown(workspace, case, ctx): ...
-def check(run, case, ctx): ...        # after each case; raise AssertionError to fail it
+def setup(workspace, case, ctx): ...     # before each case
+def teardown(workspace, case, ctx): ...  # after it, even if the agent blew up
 ```
 
-`teardown` runs even when the agent itself blew up, and a `check` that raises
-fails its case without killing the run.
+`teardown` runs even when the agent itself blew up: it is wired to inspect's
+`Task.cleanup`, which runs inside a `finally` under a shielded cancel scope, so
+an exception or a cancelled sample does not skip it. The one exception is
+`--timeout` expiring: that kills the process outright, and nothing shielded
+survives it. Keep a case inside its own `--case-timeout` if a teardown is
+load-bearing.
+
+The three arguments:
+
+| | |
+|---|---|
+| `workspace` | A fresh per-case directory **on the host**, removed after `teardown`. Yours to write in. |
+| `case` | The `Case` being run — `case.id`, `case.prompt`, and the rest of the dataset row. |
+| `ctx` | Always `{}`. It carried `setup_session`'s return value, and that entry point is gone. |
+
+`workspace` is on the host under every engine, including `claude-code`, where
+the agent itself works inside a container. It is scratch space for the hook's
+own use — fetching a source tree, holding a scoring script — not the agent's
+room. A hook that needs to put a file where the *agent* will see it should use
+[inspect's sandbox API](https://inspect.aisi.org.uk/sandboxing.html), which can
+address the guest; writing to `workspace` will not reach it.
+
+**Two entry points are no longer supported**, and a skill that defines either
+is refused rather than having it silently skipped:
+
+```python
+def setup_session(cache_dir): ...     # NOT supported
+def check(run, case, ctx): ...        # NOT supported
+```
+
+`check` was handed the retired engine's `Run` object; the engines here have
+inspect's `TaskState`, which is a different thing with different attributes.
+`setup_session` returned `{name: value}` pairs substituted into prompts as
+`{placeholders}`, and prompts are built before any hook runs -- so honouring it
+would mean constructing every case after the hook rather than before. A `setup`
+that *returns* placeholders is refused at runtime for the same reason.
+
+If you were relying on either, move the work into `setup`/`teardown`, or put
+the value in the dataset.
 
 Keep prompts and expectations in the dataset even when you use hooks, so what
 is being asserted stays readable without opening Python.
@@ -170,9 +205,9 @@ for it rather than cloning:
 ```python
 from skillscope import sources
 
-def setup_session(cache_dir):
-    source = sources.resolve("my-skill", cache_dir)
-    return {"repo": source.path}
+def setup(workspace, case, ctx):
+    source = sources.resolve("my-skill", workspace)
+    # Use source.path here; returning it as a {placeholder} is not supported.
 ```
 
 `resolve` answers with the checkout that matches the skill under test: an
