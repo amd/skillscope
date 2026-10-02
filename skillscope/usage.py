@@ -17,7 +17,7 @@ scope is right even if the shape is blunt; `reset()` exists for tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

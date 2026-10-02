@@ -14,8 +14,13 @@ closed set of arguments and takes no passthrough
 `cost_limit` is cooperative: inspect checks it from `record_model_usage`, but
 only after computing a cost, and it computes one only when its model registry
 supplies a rate. **The registry ships no rates at all** -- 796 entries across
-ten provider files in inspect_ai 0.3.266, not one with a `cost`. So the cap is
-inert out of the box, for every model, not merely for an unusual one.
+ten provider files in inspect_ai 0.3.266, not one with a `cost`.
+
+And an unpriced `cost_limit` is not merely a cap that cannot fire: inspect
+validates it before the first sample and refuses the run outright with
+`PrerequisiteError`. So without rates the sandboxed leg does not run at all,
+which is why `routing.sandbox_cost_limit` withholds the limit rather than
+handing over one that would abort the command.
 
 This module is the way out, and it is opt-in on purpose. skillscope does not
 ship a price list: rates change without notice, differ by contract and region,
@@ -53,6 +58,7 @@ knowledge where it belongs and keeps skillscope's dependencies to a file read.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -66,26 +72,65 @@ PRICING_ENV = "SKILLSCOPE_MODEL_PRICING"
 NO_PRICING = "none (inspect ships no rates, so a cost limit cannot bind)"
 
 
-def _rates(entry: dict, model: str) -> dict:
-    """One model's four rates, or raise with the key that is wrong."""
-    try:
-        return {
-            "input": float(entry["input"]),
-            "output": float(entry["output"]),
-            "input_cache_read": float(entry.get("cache_read", 0) or 0),
-            "input_cache_write": float(entry.get("cache_write", 0) or 0),
-        }
-    except KeyError as exc:
+def _rate(value: object, key: str, model: str) -> float:
+    """One rate, checked. Raises `SystemExit` naming the key that is wrong.
+
+    `float()` alone is not a check. It accepts `True` (because `bool` is an
+    `int`), and `json.loads` accepts bare `NaN` and `Infinity`, so a table
+    could register `input: NaN` and be reported as a binding cap -- while
+    every `nan >= limit` comparison is False and the budget never fires. A
+    negative rate does the same thing by making the running total fall.
+
+    That is precisely the failure this module exists to prevent, arriving
+    through the module itself, so the check belongs here rather than in a
+    reader's head.
+    """
+    if isinstance(value, bool):
+        # Before the numeric check: `float(True)` is 1.0, so a JSON `true`
+        # would otherwise register as a one-dollar rate.
         raise SystemExit(
-            f"error: {PRICING_ENV} entry for {model!r} is missing {exc.args[0]!r}. "
-            "`input` and `output` are required, in dollars per million tokens; "
-            "`cache_read` and `cache_write` default to 0."
-        ) from exc
+            f"error: {PRICING_ENV} entry for {model!r} has {key}={value!r}. "
+            "Rates are numbers, in dollars per million tokens."
+        )
+    try:
+        rate = float(value)
     except (TypeError, ValueError) as exc:
         raise SystemExit(
-            f"error: {PRICING_ENV} entry for {model!r} has a non-numeric rate. "
-            "Rates are dollars per million tokens."
+            f"error: {PRICING_ENV} entry for {model!r} has a non-numeric "
+            f"{key} ({value!r}). Rates are dollars per million tokens."
         ) from exc
+    if not math.isfinite(rate):
+        raise SystemExit(
+            f"error: {PRICING_ENV} entry for {model!r} has {key}={value!r}. "
+            "A non-finite rate silently disables the cap it was meant to "
+            "enforce: every comparison against it is false, so the budget "
+            "never fires while the report says it binds."
+        )
+    if rate < 0:
+        raise SystemExit(
+            f"error: {PRICING_ENV} entry for {model!r} has a negative {key} "
+            f"({rate}). A negative rate makes the running total fall, so the "
+            "cap never fires."
+        )
+    return rate
+
+
+def _rates(entry: dict, model: str) -> dict:
+    """One model's four rates, or raise with the key that is wrong."""
+    for required in ("input", "output"):
+        if required not in entry:
+            raise SystemExit(
+                f"error: {PRICING_ENV} entry for {model!r} is missing "
+                f"{required!r}. `input` and `output` are required, in dollars "
+                "per million tokens; `cache_read` and `cache_write` default "
+                "to 0."
+            )
+    return {
+        "input": _rate(entry["input"], "input", model),
+        "output": _rate(entry["output"], "output", model),
+        "input_cache_read": _rate(entry.get("cache_read", 0), "cache_read", model),
+        "input_cache_write": _rate(entry.get("cache_write", 0), "cache_write", model),
+    }
 
 
 def load() -> dict | None:

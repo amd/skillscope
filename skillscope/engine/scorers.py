@@ -15,7 +15,6 @@ The per-expectation results ride in `Score.metadata["checks"]` in the shape
 
 from __future__ import annotations
 
-import os
 
 from ..agent import _find_file
 from . import convert, judge, tools

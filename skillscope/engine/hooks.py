@@ -64,7 +64,7 @@ import tempfile
 from pathlib import Path
 from types import ModuleType
 
-from .. import datasets
+from .. import datasets, deadline
 from ..datasets import Case
 
 # Entry points the legacy engine honoured that these engines cannot. Named
@@ -77,6 +77,22 @@ UNSUPPORTED = ("check", "setup_session")
 # `teardown` for one case must be handed the same path, and two cases must not
 # share one.
 WORKSPACE_KEY = "skillscope_hook_workspace"
+
+# Every scratch directory this process made, for the one caller that cannot
+# reach inspect's store: the `--timeout` watchdog, which fires from a thread
+# with no sample bound to it. Registered with `deadline` below so a hard exit
+# removes them rather than leaving one per case on the runner.
+_created_workspaces: set[str] = set()
+
+
+def _discard_all_workspaces() -> None:
+    """Remove every scratch directory this process made. For the watchdog."""
+    for path in list(_created_workspaces):
+        shutil.rmtree(path, ignore_errors=True)
+    _created_workspaces.clear()
+
+
+deadline.on_expire(_discard_all_workspaces)
 
 
 def case_workspace() -> Path:
@@ -103,6 +119,11 @@ def case_workspace() -> Path:
         return Path(cached)
     created = Path(tempfile.mkdtemp(prefix="skillscope-hook-"))
     store().set(WORKSPACE_KEY, str(created))
+    # Also tracked outside inspect's store, because the store is scoped to a
+    # sample and the wall-clock watchdog runs in a thread that has no sample.
+    # `_discard_workspace` is the ordinary path; this is what lets a hard exit
+    # take the directories with it rather than leaving one per case behind.
+    _created_workspaces.add(str(created))
     return created
 
 
@@ -119,6 +140,7 @@ def _discard_workspace() -> None:
     if not cached:
         return
     shutil.rmtree(cached, ignore_errors=True)
+    _created_workspaces.discard(str(cached))
     store().set(WORKSPACE_KEY, "")
 
 

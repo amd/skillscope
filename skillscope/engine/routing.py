@@ -1041,12 +1041,25 @@ def sandbox_cost_limit(
     task rather than to the agent, and the stop comes from inspect raising on
     the call that crosses the line instead of from the CLI exiting.
 
-    Returned even when `models.cost_limit_binds` is False, because a limit that
-    cannot fire is inert rather than harmful -- what must not happen is a
-    *report* that implies it fired. `cli.cmd_routing` asks the same question and
-    records the answer in `meta`, so the two stay one decision.
+    Withheld when `models.cost_limit_binds` is False, which is not a nicety.
+    An unpriced `cost_limit` is not inert: inspect validates it before the
+    first sample and refuses the whole run --
+
+        PrerequisiteError: cost_limit requires cost data for all models.
+        Missing cost data for: anthropic/claude-opus-5.
+
+    -- so handing one over on the reasoning that it could never fire made
+    `--engine claude-code` unstartable on its default arguments, unless the
+    operator had already set `SKILLSCOPE_MODEL_PRICING`. It survived because
+    the only runs made of it had a rate card registered, and CI grades nothing.
+
+    So the limit is passed exactly when it can bind, which is also what
+    `meta.max_budget_can_bind` reports: one question, asked once, and the
+    behaviour and the report cannot disagree.
     """
     if engine != CLAUDE_CODE or not max_budget_usd or max_budget_usd <= 0:
+        return None
+    if not models.cost_limit_binds(model):
         return None
     return max_budget_usd
 

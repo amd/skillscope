@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import agent, config, deadline, routing as routing_core, usage
+from .. import agent, config, deadline, routing as routing_core
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
 from . import convert, hooks, models, sandbox as sandbox_spec, scorers, stats

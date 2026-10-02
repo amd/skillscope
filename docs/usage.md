@@ -70,8 +70,12 @@ knows what it bills and stops by itself. `claude-code` cannot: `inspect_swe`
 builds its command line from a closed set of arguments and takes no
 passthrough ([inspect_swe#178][swe178]), so that leg uses inspect's own
 per-sample `cost_limit` instead — and inspect computes a cost only when its
-model registry knows the rate. **It ships no rates for any model**, so on that
-leg the cap is inert until you supply them.
+model registry knows the rate. **It ships no rates for any model.**
+
+So without rates that leg simply runs without a spend cap: skillscope withholds
+the limit rather than passing one, because inspect validates `cost_limit` up
+front and would refuse the whole run. `meta.max_budget_can_bind` reports which
+happened.
 
 `SKILLSCOPE_MODEL_PRICING` is how. Point it at a JSON file — or pass the JSON
 directly — mapping each model to its rates in **dollars per million tokens**:

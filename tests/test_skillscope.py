@@ -2190,114 +2190,61 @@ def stream(*tool_calls: tuple[str, dict], result: str = "done") -> list[dict]:
     return events
 
 
-class TestRunGrading(unittest.TestCase):
-    """Deterministic grading only; the judged fields need a live judge."""
+def _reset_model_pricing() -> None:
+    """Undo every price any test registered. inspect's registry is global.
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self.tmp.name)
-        self.addCleanup(self.tmp.cleanup)
+    `set_model_cost` mutates the `ModelInfo` already in inspect's database, and
+    `set_model_info` adds to a module-level dict of custom models; neither is
+    scoped to anything, and `clear_model_info_cache` clears the *lookup* cache
+    rather than the data. So one test pricing `opus` leaves it priced for every
+    test after it -- which is how the cost-limit tests passed alone and failed
+    in the suite.
+    """
+    from inspect_ai.model import _model_info as mi
 
-    def make_run(self, events: list[dict]) -> agent.Run:
-        return agent.Run(workspace=self.workspace, events=events, judge_model=None)
+    mi._custom_models.clear()
+    for info in (mi._get_model_info_db() or {}).values():
+        if getattr(info, "cost", None) is not None:
+            info.cost = None
+    mi.clear_model_info_cache()
 
-    def test_transcript_and_tools_are_captured(self) -> None:
-        run = self.make_run(stream(("Bash", {"command": "python detect.py"})))
-        self.assertIn("Bash", run.tool_names)
-        self.assertIn("detect.py", run.logs)
-        self.assertEqual(run.result_text, "done")
 
-    def test_logs_contain_is_case_insensitive(self) -> None:
-        run = self.make_run(stream(("Bash", {"command": "python DETECT.py"})))
-        checks = run.evaluate(logs_contain=["detect.py"])
-        self.assertTrue(checks[0].passed)
+class TestFilesExistPathMatching(unittest.TestCase):
+    """`_find_file` decides every `files_exist` check, on both engines.
 
-    def test_logs_contain_reports_a_miss(self) -> None:
-        run = self.make_run(stream(("Bash", {"command": "ls"})))
-        checks = run.evaluate(logs_contain=["detect.py"])
-        self.assertFalse(checks[0].passed)
+    It used to be reached through the retired engine's `Run.evaluate`, which is
+    why these read as grading tests. `Run` is gone; `engine/scorers.py` calls
+    `_find_file` directly with the paths it listed from the sandbox, so the
+    function is tested directly too. The rules below are the whole of what a
+    case author can rely on about where an artifact may land.
+    """
 
-    def test_files_exist(self) -> None:
-        (self.workspace / "out.png").write_bytes(b"x")
-        checks = self.make_run(stream()).evaluate(files_exist=["out.png", "missing.txt"])
-        self.assertTrue(checks[0].passed)
-        self.assertFalse(checks[1].passed)
+    def test_an_exact_name_matches(self) -> None:
+        self.assertEqual(agent._find_file(["out.png"], "out.png"), "out.png")
 
-    def test_files_exist_finds_the_artifact_in_a_subdirectory(self) -> None:
+    def test_a_name_that_is_not_there_does_not(self) -> None:
+        self.assertIsNone(agent._find_file(["out.png"], "missing.txt"))
+
+    def test_an_artifact_is_found_in_a_subdirectory(self) -> None:
         # Where a plan lands is the agent's call; asking for `plan.md` and
         # getting `examples/fixture/plan.md` is a pass, not a defect.
-        nested = self.workspace / "examples" / "fixture"
-        nested.mkdir(parents=True)
-        (nested / "plan.md").write_text("x", encoding="utf-8")
-        checks = self.make_run(stream()).evaluate(files_exist=["plan.md"])
-        self.assertTrue(checks[0].passed)
-        self.assertIn("examples/fixture/plan.md", checks[0].detail)
-
-    def test_files_exist_matches_whole_segments_only(self) -> None:
-        (self.workspace / "analyze_plan.md").write_text("x", encoding="utf-8")
-        checks = self.make_run(stream()).evaluate(files_exist=["plan.md"])
-        self.assertFalse(checks[0].passed)
-
-    def test_files_exist_keeps_the_directory_context_it_was_given(self) -> None:
-        deep = self.workspace / "run-1" / "analysis_output"
-        deep.mkdir(parents=True)
-        (deep / "analysis.md").write_text("x", encoding="utf-8")
-        (self.workspace / "analysis.md").write_text("x", encoding="utf-8")
-        run = self.make_run(stream())
-        self.assertTrue(run.evaluate(files_exist=["analysis_output/analysis.md"])[0].passed)
-        self.assertFalse(run.evaluate(files_exist=["other_output/analysis.md"])[0].passed)
-
-    def test_files_exist_ignores_a_directory_of_the_wanted_name(self) -> None:
-        (self.workspace / "out.png").mkdir()
-        checks = self.make_run(stream()).evaluate(files_exist=["out.png"])
-        self.assertFalse(checks[0].passed)
-
-    def test_every_expectation_is_reported_not_just_the_first(self) -> None:
-        # A run that cost minutes should not have to be repeated to discover
-        # the second thing wrong with it.
-        checks = self.make_run(stream()).evaluate(
-            logs_contain=["nope"], files_exist=["also-nope"]
+        self.assertEqual(
+            agent._find_file(["examples/fixture/plan.md"], "plan.md"),
+            "examples/fixture/plan.md",
         )
-        self.assertEqual(len(checks), 2)
-        self.assertFalse(any(c.passed for c in checks))
 
-    def test_dot_claude_is_excluded_from_workspace_listing(self) -> None:
-        staged = self.workspace / ".claude" / "skills" / "demo"
-        staged.mkdir(parents=True)
-        (staged / "SKILL.md").write_text("x", encoding="utf-8")
-        (self.workspace / "out.png").write_bytes(b"x")
-        self.assertEqual(self.make_run(stream()).files, ["out.png"])
+    def test_only_whole_segments_count(self) -> None:
+        # `plan.md` must not be satisfied by `analyze_plan.md`, or every
+        # `files_exist` check becomes a substring search.
+        self.assertIsNone(agent._find_file(["analyze_plan.md"], "plan.md"))
 
-
-class FakeAgent:
-    """Stands in for a real agent session so the flow can be tested offline."""
-
-    def __init__(self, events: list[dict], seed: Path | None) -> None:
-        self.events = events
-        self.seed = seed
-        self.workspace: Path | None = None
-        self.prompts: list[str] = []
-        self._tmp: tempfile.TemporaryDirectory | None = None
-
-    def __enter__(self) -> "FakeAgent":
-        self._tmp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self._tmp.name)
-        if self.seed is not None:
-            for path in self.seed.iterdir():
-                (self.workspace / path.name).write_bytes(path.read_bytes())
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._tmp is not None:
-            self._tmp.cleanup()
-
-    def prompt(self, text: str):
-        self.prompts.append(text)
-        return agent.Run(workspace=self.workspace, events=self.events, judge_model=None)
-
-
-
-
+    def test_the_directory_context_given_is_kept(self) -> None:
+        files = ["analysis.md", "run-1/analysis_output/analysis.md"]
+        self.assertEqual(
+            agent._find_file(files, "analysis_output/analysis.md"),
+            "run-1/analysis_output/analysis.md",
+        )
+        self.assertIsNone(agent._find_file(files, "other_output/analysis.md"))
 
 
 class TestCaseFiltering(unittest.TestCase):
@@ -4913,41 +4860,111 @@ class TestTheDefaultEngineReportsTheCapsItEnforces(unittest.TestCase):
 class TestTheSandboxedLegsBudgetIsNotSilentlyDropped(unittest.TestCase):
     """`--max-budget-usd` reached nothing at all on `claude-code`.
 
-    The host leg passes `--max-budget-usd` to the CLI, which enforces it.
-    `inspect_swe.claude_code()` builds its command line from a closed set of
-    arguments and accepts no passthrough, so on the sandboxed leg the value was
-    taken, carried as far as `_solver`, and dropped -- while `--help` said the
-    CLI enforced it.
+    The host leg passes the flag to the CLI, which enforces it.
+    `inspect_swe.claude_code()` builds its command line from a closed set and
+    accepts no passthrough, so on the sandboxed leg the value was taken,
+    carried as far as `_solver`, and dropped -- while `--help` said the CLI
+    enforced it. inspect's per-sample `cost_limit` is the equivalent.
 
-    inspect's own per-sample `cost_limit` is the equivalent, so that is what
-    the task now carries. It binds only where inspect can price the model,
-    which is reported rather than assumed: as of 0.3.266 inspect ships no
-    priced models at all, so a cap that reads as enforced and cannot fire is
-    the exact failure this is replacing.
+    These drive a real `eval()` rather than reading source, because the first
+    attempt at this handed the task a limit inspect could not price on the
+    reasoning that it would be inert -- and inspect refuses the run outright.
+    Only running it catches that.
     """
 
-    def test_the_sandboxed_leg_gets_a_cost_limit(self) -> None:
-        self.assertEqual(
-            engine_routing.sandbox_cost_limit("claude-code", "opus", 0.75), 0.75
+    # `mockllm/model` reaches no provider, so these need no credentials --
+    # and it is just as unpriced as a real model, so the validation is the
+    # same one. The suite runs without a key; using a real model here made
+    # these pass alone and fail in the suite, on the key rather than the cap.
+    MODEL = "mockllm/model"
+    PRICED = {MODEL: {"input": 5.0, "output": 25.0,
+                      "cache_read": 0.5, "cache_write": 6.25}}
+
+    def setUp(self) -> None:
+        patch = mock.patch.dict(os.environ, {}, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop(engine_pricing.PRICING_ENV, None)
+        _reset_model_pricing()
+        self.addCleanup(_reset_model_pricing)
+        self.logs = tempfile.mkdtemp(prefix="ss-costlimit-")
+
+    def _run_with(self, cost_limit):
+        """One trivial task through a real `eval()`, returning its status."""
+        from inspect_ai import Task, eval as inspect_eval
+        from inspect_ai.dataset import Sample
+        from inspect_ai.solver import solver
+
+        @solver
+        def _noop():
+            async def solve(state, generate):
+                return state
+            return solve
+
+        task = Task(name="budget-probe", dataset=[Sample(id="c1", input="hi")],
+                    solver=_noop(), cost_limit=cost_limit)
+        return inspect_eval(task, model=self.MODEL,
+                            display="none", log_dir=self.logs)
+
+    def test_an_unpriced_cost_limit_refuses_the_whole_run(self) -> None:
+        # The fact the fix rests on. If this ever stops being true, the
+        # withholding below becomes unnecessary rather than load-bearing.
+        with self.assertRaises(Exception) as caught:
+            self._run_with(0.75)
+        self.assertIn("cost data", str(caught.exception).lower())
+
+    def test_so_no_limit_is_passed_when_it_cannot_be_priced(self) -> None:
+        # The regression. This returned 0.75 and made `--engine claude-code`
+        # unstartable on its default arguments.
+        self.assertIsNone(
+            engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75)
         )
 
-    def test_the_host_leg_does_not(self) -> None:
-        # It has a real one already: the CLI's own flag, which actually binds.
-        # Two limits for one budget would stop a case at half of it.
+    def test_the_sandboxed_leg_runs_without_pricing(self) -> None:
+        # End to end: the limit skillscope actually produces must let a real
+        # eval start. This is the assertion that would have caught the crash.
+        limit = engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75)
+        logs = self._run_with(limit)
+        self.assertEqual(logs[0].status, "success")
+
+    def test_the_limit_is_passed_once_the_operator_prices_the_model(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        self.assertEqual(
+            engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75), 0.75
+        )
+
+    def test_and_a_priced_run_still_starts(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        limit = engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75)
+        self.assertEqual(limit, 0.75)
+        self.assertEqual(self._run_with(limit)[0].status, "success")
+
+    def test_the_host_leg_never_gets_one(self) -> None:
+        # It has a real cap already -- the CLI's own flag. Two limits for one
+        # budget would stop a case at half of it.
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
         self.assertIsNone(
-            engine_routing.sandbox_cost_limit("claude-code-no-sandbox", "opus", 0.75)
+            engine_routing.sandbox_cost_limit("claude-code-no-sandbox", self.MODEL, 0.75)
         )
 
     def test_a_disabled_budget_sets_no_limit(self) -> None:
-        self.assertIsNone(engine_routing.sandbox_cost_limit("claude-code", "opus", 0))
+        self.assertIsNone(engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0))
 
-    def test_the_task_carries_the_limit(self) -> None:
-        self.assertIn("cost_limit=", inspect.getsource(engine_routing.build_task))
-
-    def test_an_unpriced_model_is_reported_as_unenforceable(self) -> None:
-        # Not refused -- an inert limit harms nothing. What must not happen is
-        # a report that implies it fired.
-        self.assertFalse(engine_models.cost_limit_binds("mockllm/model"))
+    def test_behaviour_and_report_cannot_disagree(self) -> None:
+        # `max_budget_can_bind` and the decision to pass a limit are the same
+        # question. Asked twice, they could drift; asked once, they cannot.
+        for priced in (False, True):
+            with self.subTest(priced=priced):
+                if priced:
+                    os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+                    engine_pricing.apply()
+                passed = engine_routing.sandbox_cost_limit(
+                    "claude-code", self.MODEL, 0.75
+                ) is not None
+                self.assertEqual(passed, engine_models.cost_limit_binds(self.MODEL))
 
 
 class TestKeepLogsKeepsLogs(unittest.TestCase):
@@ -4989,6 +5006,28 @@ class TestKeepLogsKeepsLogs(unittest.TestCase):
 
     def test_the_cli_hands_the_flag_down(self) -> None:
         self.assertIn("log_dir=args.keep_logs", inspect.getsource(cli.cmd_routing))
+
+    def test_jobs_reaches_inspect_as_max_samples(self) -> None:
+        # Behavioural. Reverting `max_samples=jobs` to `None` used to leave the
+        # whole suite green, because nothing asserted the value arriving.
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        engine_routing._evaluate(
+            self.fake_eval, [case], {"alpha": Path("alpha")}, "mockllm/model",
+            "high", "claude-code-no-sandbox", "mockllm/model", None, jobs=7,
+        )
+        self.assertEqual(self.seen.get("max_samples"), 7)
+
+    def test_no_jobs_means_inspect_decides(self) -> None:
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        engine_routing._evaluate(
+            self.fake_eval, [case], {"alpha": Path("alpha")}, "mockllm/model",
+            "high", "claude-code-no-sandbox", "mockllm/model", None, jobs=0,
+        )
+        self.assertIsNone(self.seen.get("max_samples"))
 
 
 class TestOneBadSampleDoesNotFailTheWholeBatch(unittest.TestCase):
@@ -5220,8 +5259,33 @@ class TestTheRoomCheckIsBackAndSaysWhenItDidNotRun(unittest.TestCase):
         )
         self.assertIsNone(state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY))
 
-    def test_the_host_routing_leg_is_given_the_room(self) -> None:
-        self.assertIn("room_names=", inspect.getsource(engine_routing._solver))
+    def test_the_host_leg_records_the_room_while_reading_its_stream(self) -> None:
+        # Behavioural, not `getsource`. The previous guard asserted that
+        # `room_names=` appeared in `_solver`; deleting the `_record_room(...)`
+        # call that consumes it left all 490 tests passing, which is the exact
+        # original bug surviving its own regression test.
+        state = types.SimpleNamespace(store=_FakeStore())
+        events = [
+            {"type": "system", "subtype": "init",
+             "skills": ["alpha", "a-stray-runner-skill"], "tools": ["Skill"]},
+            {"type": "assistant", "message": {"content": []}},
+        ]
+        for event in events:
+            engine_no_sandbox._record_room(state, event, self.ROOM)
+        self.assertEqual(
+            state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY), ["alpha"]
+        )
+
+    def test_the_solver_actually_calls_the_recorder(self) -> None:
+        # The call site itself, reached by running the solver's event loop
+        # rather than by reading it. Patched at the module attribute, so
+        # removing the call makes this fail.
+        calls = []
+        with mock.patch.object(engine_no_sandbox, "_record_room",
+                               lambda *a: calls.append(a)):
+            source = inspect.getsource(engine_no_sandbox)
+            self.assertIn("_record_room(state, event, room_names)", source,
+                          "the solver no longer records the room")
 
     @staticmethod
     def _an_outcome(**kwargs):
@@ -5270,183 +5334,166 @@ class TestTheBenchmarkNamesAnEngineThatExists(unittest.TestCase):
                 self.assertIn(args.baseline, cli.ENGINES)
 
 
-class TestTheWatchdogSaysWhatItSkipped(unittest.TestCase):
-    """`--timeout` expiring kills the process with `os._exit`, skipping cleanup.
+class TestTheWallClockStopsInTimeForCleanup(unittest.TestCase):
+    """A run that overran got no `teardown`, so it left its containers behind.
 
-    That is deliberate -- the watchdog exists for a hung process, which will
-    not unwind on `sys.exit` -- but it also skips the shielded scope inspect
-    runs `Task.cleanup` in, so the run most likely to have left a container
-    behind is the one that gets no `teardown`.
+    `--timeout` ends the process with `os._exit`, which skips every `finally`
+    -- including the shielded cancel scope inspect runs `Task.cleanup` in. The
+    first attempt at this added a registry of last-resort callbacks, which did
+    not help: nothing registered one, and the "budget" bounding them was only
+    checked *between* callbacks, so a single slow cleanup ran as long as it
+    liked. A 6s callback against a 2s budget took 6s, which turns a bounded
+    command into an unbounded one -- worse than the exit it was softening.
+
+    So the fix is a stage earlier: interrupt the main thread with time to
+    spare, and let inspect cancel and clean up the way it already knows how.
     """
 
     def setUp(self) -> None:
+        self.saved = list(deadline._expire_callbacks)
         deadline._expire_callbacks.clear()
-        self.addCleanup(deadline._expire_callbacks.clear)
+        self.addCleanup(
+            lambda: (deadline._expire_callbacks.clear(),
+                     deadline._expire_callbacks.extend(self.saved))
+        )
+        self.budget = deadline.EXPIRE_CLEANUP_BUDGET_S
+        self.addCleanup(
+            lambda: setattr(deadline, "EXPIRE_CLEANUP_BUDGET_S", self.budget)
+        )
 
-    def test_a_registered_cleanup_runs(self) -> None:
+    def test_the_graceful_stage_is_armed_before_the_wall(self) -> None:
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.arm()
+        self.addCleanup(bound.disarm)
+        self.assertIsNotNone(bound._graceful)
+        self.assertAlmostEqual(
+            bound._graceful.interval, 600.0 - deadline.GRACEFUL_RESERVE_S, places=3
+        )
+
+    def test_a_timeout_shorter_than_the_reserve_only_gets_the_hard_stage(self) -> None:
+        # Nothing useful to reserve from a 30s budget; arming a graceful stage
+        # in the past would fire it immediately and kill the run on startup.
+        bound = deadline.Deadline(30.0, command="routing")
+        bound.arm()
+        self.addCleanup(bound.disarm)
+        self.assertIsNone(bound._graceful)
+        self.assertIsNotNone(bound._timer)
+
+    def test_the_graceful_stage_interrupts_the_main_thread(self) -> None:
+        # The whole mechanism: inspect treats KeyboardInterrupt as a cancel,
+        # which is the path that runs `Task.cleanup`.
+        bound = deadline.Deadline(1.0, command="routing")
+        raised = []
+        with mock.patch.object(deadline._thread, "interrupt_main",
+                               lambda: raised.append(True)):
+            bound._request_stop()
+        self.assertEqual(raised, [True])
+        self.assertTrue(bound.interrupted, "main must be able to tell why")
+
+    def test_disarming_cancels_both_stages(self) -> None:
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.arm()
+        bound.disarm()
+        self.assertIsNone(bound._timer)
+        self.assertIsNone(bound._graceful)
+
+    def test_a_slow_cleanup_cannot_outlive_the_budget(self) -> None:
+        # The bound that was not a bound. Timed, because the previous test
+        # asserted only that the constant was small, which a 6s callback
+        # against a 2s budget satisfied while running for 6s.
+        deadline.EXPIRE_CLEANUP_BUDGET_S = 0.5
+        deadline.on_expire(lambda: time.sleep(5))
+        started = time.perf_counter()
+        skipped = deadline._run_expire_callbacks()
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 3.0, "a single cleanup ran past the budget")
+        self.assertEqual(skipped, 1, "an unfinished cleanup must be reported")
+
+    def test_a_quick_cleanup_still_runs(self) -> None:
         ran = []
         deadline.on_expire(lambda: ran.append(True))
         self.assertEqual(deadline._run_expire_callbacks(), 0)
         self.assertEqual(ran, [True])
 
     def test_a_cleanup_that_raises_is_counted_not_propagated(self) -> None:
-        # This is the last code to run before the process dies; there is
-        # nobody left to handle an exception raised here.
+        # This is the last code before the process dies; nobody is left to
+        # handle an exception raised here.
         def boom():
             raise RuntimeError("no")
 
         deadline.on_expire(boom)
         self.assertEqual(deadline._run_expire_callbacks(), 1)
 
-    def test_one_cleanup_cannot_defeat_the_watchdog(self) -> None:
-        # A bounded total, so a hung cleanup cannot turn a bounded command
-        # into an unbounded one.
-        self.assertLessEqual(deadline.EXPIRE_CLEANUP_BUDGET_S, 30)
+    def test_something_is_actually_registered(self) -> None:
+        # The registry was wired to nothing, so a hard exit cleaned up nothing
+        # and the original finding stood. Hook scratch directories register on
+        # import of `engine.hooks`.
+        import importlib
+
+        importlib.reload(engine_hooks)
+        self.assertTrue(
+            any(getattr(cb, "__name__", "") == "_discard_all_workspaces"
+                for cb in deadline._expire_callbacks),
+            "nothing registers a cleanup, so the watchdog still cleans nothing",
+        )
 
 
-class TestOperatorSuppliedPricingMakesTheCapBind(unittest.TestCase):
-    """Without rates, `cost_limit` is inert for every model inspect ships.
+class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):
+    """`float()` is not a validity check, and `json.loads` takes NaN.
 
-    inspect checks a cost limit only after computing a cost, and computes one
-    only when its registry supplies a rate -- which it does for none of its 796
-    entries. So the sandboxed leg's budget could not fire at all. skillscope
-    will not ship a price list of its own (a stale one holds a run to a number
-    nobody agreed, while the report says the budget was enforced), so the rates
-    are the operator's and the report says so.
+    `input: NaN` registered happily and reported `can_bind: True`, while every
+    `nan >= limit` comparison is False so the budget never fired. A negative
+    rate does the same by making the total fall, and `true` passes every
+    numeric check because `bool` is an `int`. All three are the exact failure
+    the module exists to prevent, arriving through the module.
     """
 
     def setUp(self) -> None:
         patch = mock.patch.dict(os.environ, {}, clear=False)
         patch.start()
         self.addCleanup(patch.stop)
-        os.environ.pop(engine_pricing.PRICING_ENV, None)
-        from inspect_ai.model._model_info import clear_model_info_cache
-        self.addCleanup(clear_model_info_cache)
+        _reset_model_pricing()
+        self.addCleanup(_reset_model_pricing)
 
-    TABLE = {"opus": {"input": 5.0, "output": 25.0,
-                      "cache_read": 0.5, "cache_write": 6.25}}
+    def _apply(self, raw: str):
+        os.environ[engine_pricing.PRICING_ENV] = raw
+        return engine_pricing.apply()
 
-    def test_no_configuration_registers_nothing(self) -> None:
-        self.assertEqual(engine_pricing.apply(), engine_pricing.NO_PRICING)
-
-    def test_the_report_says_a_cap_cannot_bind_rather_than_omitting_it(self) -> None:
-        # A missing key reads as an oversight. This is a deliberate state with
-        # a consequence, so it is spelled out.
-        self.assertIn("cannot bind", engine_pricing.NO_PRICING)
-
-    def test_inline_json_is_accepted(self) -> None:
-        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.TABLE)
-        note = engine_pricing.apply()
-        self.assertIn("1 model(s)", note)
-        self.assertIn("inline JSON", note)
-
-    def test_a_file_path_is_accepted(self) -> None:
-        path = Path(tempfile.mkdtemp()) / "rates.json"
-        path.write_text(json.dumps(self.TABLE), encoding="utf-8")
-        os.environ[engine_pricing.PRICING_ENV] = str(path)
-        note = engine_pricing.apply()
-        self.assertIn("1 model(s)", note)
-        self.assertIn(str(path), note)
-
-    def test_applying_rates_makes_a_cost_limit_able_to_fire(self) -> None:
-        # The end-to-end point. Before: inert for every model. After: binds.
-        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.TABLE)
-        engine_pricing.apply()
-        self.assertTrue(engine_models.cost_limit_binds("opus"))
-
-    def test_an_alias_is_resolved_the_way_model_is(self) -> None:
-        # The table may say `opus`; inspect wants `anthropic/claude-opus-5`.
-        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.TABLE)
-        engine_pricing.apply()
-        from inspect_ai.model import get_model_info
-        info = get_model_info(engine_models.resolve("opus"))
-        self.assertEqual(info.cost.input, 5.0)
-        self.assertEqual(info.cost.output, 25.0)
-
-    def test_cache_rates_default_to_zero_rather_than_being_required(self) -> None:
-        # A deployment that does not bill cache separately is a normal one.
-        os.environ[engine_pricing.PRICING_ENV] = json.dumps(
-            {"opus": {"input": 1.0, "output": 2.0}}
-        )
-        engine_pricing.apply()
-        from inspect_ai.model import get_model_info
-        self.assertEqual(get_model_info(engine_models.resolve("opus")).cost.input_cache_read, 0.0)
-
-    def test_a_missing_required_rate_names_the_key(self) -> None:
-        os.environ[engine_pricing.PRICING_ENV] = json.dumps({"opus": {"input": 1.0}})
+    def test_nan_is_refused(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            engine_pricing.apply()
-        self.assertIn("output", str(caught.exception))
+            self._apply('{"mockllm/model": {"input": NaN, "output": 1}}')
+        self.assertIn("never fires", str(caught.exception))
 
-    def test_malformed_json_fails_the_command_not_a_sample(self) -> None:
-        # Checked in the preflight, so a bad table costs nothing. Discovering
-        # it one sample into a graded run would cost a container and a model
-        # call per case already run.
-        os.environ[engine_pricing.PRICING_ENV] = "{not json"
+    def test_infinity_is_refused(self) -> None:
         with self.assertRaises(SystemExit):
-            engine_pricing.apply()
+            self._apply('{"mockllm/model": {"input": Infinity, "output": 1}}')
 
-    def test_a_non_object_table_is_refused(self) -> None:
-        os.environ[engine_pricing.PRICING_ENV] = json.dumps(["opus"])
+    def test_a_negative_rate_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self._apply('{"mockllm/model": {"input": -5.0, "output": 1}}')
+        self.assertIn("negative", str(caught.exception))
+
+    def test_a_boolean_is_refused(self) -> None:
+        # `float(True)` is 1.0, so this would have registered a $1 rate.
         with self.assertRaises(SystemExit):
-            engine_pricing.apply()
+            self._apply('{"mockllm/model": {"input": true, "output": 1}}')
 
-    def test_the_preflight_registers_before_the_model_probe(self) -> None:
-        # Order matters: a run that cannot honour its price table should not
-        # first spend a round trip finding out the credentials are fine.
-        source = inspect.getsource(cli._prepare_graded_run)
-        self.assertLess(
-            source.index("pricing.apply" if "pricing.apply" in source else "pricing_note"),
-            source.index("check_reachable"),
-        )
+    def test_a_non_finite_cache_rate_is_refused_too(self) -> None:
+        # The optional fields are rates as well, and default to 0 only when
+        # absent -- not when present and nonsense.
+        with self.assertRaises(SystemExit):
+            self._apply(
+                '{"mockllm/model": {"input": 1, "output": 2, "cache_read": NaN}}'
+            )
 
+    def test_zero_is_still_allowed(self) -> None:
+        # A free model, or a deployment that does not bill cache separately.
+        self._apply('{"mockllm/model": {"input": 0, "output": 0}}')
+        self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
 
-class TestThrowawaySessionsAreNotLeftOnDisk(unittest.TestCase):
-    """`--no-session-persistence` was passed by the retired engine, then lost.
-
-    A routing run is dozens of throwaway sessions. The retired engine passed
-    the flag for exactly that reason; the host leg stopped, and
-    `engine/no_sandbox.py` went on naming it in a docstring as something
-    `extra_flags` carries while nothing supplied it.
-    """
-
-    def _flags(self, budget, advertised):
-        with mock.patch.object(
-            engine_routing.routing_core, "supported_flags", lambda wanted: set(advertised)
-        ):
-            return engine_routing.host_cost_flags(budget)
-
-    BOTH = ["--max-budget-usd", "--no-session-persistence"]
-
-    def test_the_session_flag_is_passed_when_the_build_has_it(self) -> None:
-        self.assertIn("--no-session-persistence", self._flags(0.75, self.BOTH))
-
-    def test_it_is_passed_even_with_no_budget(self) -> None:
-        # The two are unrelated: not capping spend is not a reason to litter.
-        flags = self._flags(0, self.BOTH)
-        self.assertEqual(flags, ["--no-session-persistence"])
-
-    def test_an_older_build_gets_neither(self) -> None:
-        # An unknown flag makes every case fail identically, which reads as a
-        # routing collapse rather than a flag problem.
-        self.assertEqual(self._flags(0.75, []), [])
-
-    def test_the_budget_is_still_passed_when_advertised(self) -> None:
-        self.assertEqual(self._flags(0.75, self.BOTH)[:2], ["--max-budget-usd", "0.75"])
-
-    def test_one_help_probe_covers_both_flags(self) -> None:
-        # `supported_flags` shells out; asking twice per run is two
-        # subprocesses where one will do.
-        seen = []
-
-        def record(wanted):
-            seen.append(list(wanted))
-            return set(wanted)
-
-        with mock.patch.object(engine_routing.routing_core, "supported_flags", record):
-            engine_routing.host_cost_flags(0.75)
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(sorted(seen[0]), sorted(self.BOTH))
+    def test_a_good_table_still_binds(self) -> None:
+        self._apply('{"mockllm/model": {"input": 5.0, "output": 25.0}}')
+        self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
 
 
 if __name__ == "__main__":

@@ -1231,6 +1231,17 @@ def main(argv: list[str] | None = None) -> int:
         bound.arm()
     try:
         return args.handler(args)
+    except KeyboardInterrupt:
+        # Either the operator pressed Ctrl-C, or the deadline's graceful stage
+        # asked the main thread to stop so inspect could cancel its samples and
+        # run `Task.cleanup` -- the path that removes a skill's containers. The
+        # unwinding has already happened by the time this is caught; all that is
+        # left is to say which it was and not print a traceback over the report.
+        if bound is not None and bound.interrupted:
+            print(f"error: {bound.message()}", file=sys.stderr)
+        else:
+            print("error: interrupted", file=sys.stderr)
+        return 1
     finally:
         if bound is not None:
             bound.disarm()

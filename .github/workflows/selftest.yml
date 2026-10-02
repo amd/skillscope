@@ -23,6 +23,24 @@ permissions:
   contents: read
 
 jobs:
+  imports:
+    # One rule, not a linter. `F401` finds imports nothing uses, which is how
+    # dead code announces itself: two rounds of review found functions whose
+    # last caller had been deleted, and in both cases the orphaned imports were
+    # sitting there saying so. Twelve of them had accumulated by the time
+    # anybody looked.
+    #
+    # Deliberately narrow. Adopting a full style configuration is a change to
+    # every file and a decision about house style; this is the one check that
+    # pays for itself immediately and reformats nothing.
+    name: Unused imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check --select F401 skillscope tests tools
+
   unit:
     name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
