@@ -203,6 +203,68 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     return outcomes
 
 
+# Eval-level metadata naming the `run_eval` call that started an eval, so a
+# stopped run reads back its own log and nobody else's.
+CALL_TOKEN = "skillscope_call"
+
+
+def stop_requested() -> bool:
+    """Whether the deadline's graceful stage has asked the command to stop."""
+    bound = deadline.active()
+    return bound is not None and bound.interrupted
+
+
+def run_eval(inspect_eval, task, *, log_dir: str, **kwargs):
+    """`inspect_eval(task, ...)`, keeping the logs of a run the deadline stopped.
+
+    When the graceful stage interrupts a run inside inspect's loop, inspect
+    cancels the samples, runs `Task.cleanup`, writes the log as `cancelled` --
+    and then returns `[]`. Measured with five of six samples finished: all five
+    were in the log on disk, and none came back from `eval()`. Without this, a
+    run that overran its wall clock dropped every case it had already graded
+    and paid for, and the gate blamed "every case errored".
+
+    The interrupt does not always land there. In `eval()`'s synchronous setup
+    it surfaces as `KeyboardInterrupt`, and on Python 3.10 anyio can surface it
+    as `CancelledError`; both are taken as the stop they are, and the readback
+    runs the same way.
+
+    So the log is read back from `log_dir`, and only this call's. The default
+    directory accumulates across runs and can be shared by another command
+    running beside this one -- including one running the very same task, since
+    routing's is always `routing`. A task name or a time window cannot tell
+    those apart, so each call tags its eval with a token of its own and reads
+    back only what carries it. Files that predate the call are skipped before
+    their headers are read, which is all that the listing is for. An empty
+    result is the caller's to report, since only it knows which cases were
+    asked for.
+    """
+    import asyncio
+    import uuid
+
+    from inspect_ai.log import list_eval_logs, read_eval_log
+
+    token = uuid.uuid4().hex
+    before = {info.name for info in list_eval_logs(log_dir)}
+    try:
+        logs = inspect_eval(
+            task, log_dir=log_dir, metadata={CALL_TOKEN: token}, **kwargs
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        if not stop_requested():
+            raise
+        logs = []
+    if logs or not stop_requested():
+        return logs
+    ours = [
+        info for info in list_eval_logs(log_dir)
+        if info.name not in before
+        and (read_eval_log(info, header_only=True).eval.metadata or {}).get(CALL_TOKEN)
+        == token
+    ]
+    return [read_eval_log(info) for info in ours]
+
+
 def run(
     skills: list[str],
     cases: list[Case],
@@ -223,9 +285,17 @@ def run(
         if not skill_cases:
             continue
 
+        if stop_requested():
+            # The stop is for the command, not the task it landed in. Starting
+            # the next skill would spend the reserve meant for cleanup and meet
+            # the hard kill, which loses the report along with everything else.
+            outcomes.extend(_failed(skill, skill_cases, deadline.active().message()))
+            continue
+
         print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
         try:
-            logs = inspect_eval(
+            logs = run_eval(
+                inspect_eval,
                 build_task(skill, skill_cases, model, solver_factory=solver_factory),
                 model=model,
                 model_args=models.model_args(model),
@@ -251,6 +321,12 @@ def run(
             # the same reason the structural gate reads only the skills a run
             # is about.
             outcomes.extend(_failed(skill, skill_cases, str(exc)))
+            continue
+
+        if not logs and stop_requested():
+            # Stopped before inspect wrote anything. Failed rather than absent,
+            # so the report still counts the cases it was asked for.
+            outcomes.extend(_failed(skill, skill_cases, deadline.active().message()))
             continue
 
         for log in logs:

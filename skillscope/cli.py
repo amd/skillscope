@@ -349,9 +349,15 @@ def _empty_room(args: argparse.Namespace) -> None:
 
 
 def _fail_if_expired() -> int | None:
-    """Non-zero when the command's ``--timeout`` has already elapsed."""
+    """Non-zero when the command's ``--timeout`` has elapsed or stopped the run.
+
+    Both, because the graceful stage fires `GRACEFUL_RESERVE_S` *before* the
+    wall. inspect then returns from `eval()` normally, so a run it stopped
+    reaches the gate with the clock still short of `expired()` -- and was
+    reported as "every case errored" instead of the overrun it was.
+    """
     bound = deadline.active()
-    if bound is None or not bound.expired():
+    if bound is None or not (bound.expired() or bound.interrupted):
         return None
     print(f"error: {bound.message()}", file=sys.stderr)
     return 1
@@ -1232,11 +1238,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.handler(args)
     except KeyboardInterrupt:
-        # Either the operator pressed Ctrl-C, or the deadline's graceful stage
-        # asked the main thread to stop so inspect could cancel its samples and
-        # run `Task.cleanup` -- the path that removes a skill's containers. The
-        # unwinding has already happened by the time this is caught; all that is
-        # left is to say which it was and not print a traceback over the report.
+        # A Ctrl-C or the deadline's graceful stage that landed outside an
+        # `eval()` -- between skills, or while a report was being written.
+        # Inside one, inspect absorbs it: it unwinds through `Task.cleanup`
+        # and returns, `run_eval` reads a stopped run's log back, and
+        # `_fail_if_expired` reports the overrun beside the results. All that
+        # is left here is to say which it was, without a traceback.
         if bound is not None and bound.interrupted:
             print(f"error: {bound.message()}", file=sys.stderr)
         else:

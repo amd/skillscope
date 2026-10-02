@@ -4953,6 +4953,36 @@ class TestTheSandboxedLegsBudgetIsNotSilentlyDropped(unittest.TestCase):
     def test_a_disabled_budget_sets_no_limit(self) -> None:
         self.assertIsNone(engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0))
 
+    def _built_cost_limit(self, engine):
+        # The task `build_task` returns, not `sandbox_cost_limit` on its own:
+        # writing `cost_limit=None` at the call site left every test above
+        # green. The solver is stubbed because `inspect_swe` is an extra and
+        # this is about the limit, not the agent.
+        from inspect_ai.solver import solver
+
+        @solver
+        def _noop():
+            async def solve(state, generate):
+                return state
+            return solve
+
+        case = datasets.Case(id="c1", skill="alpha", prompt="p",
+                             skill_should_trigger=True)
+        with mock.patch.object(engine_routing, "_solver", lambda *a, **k: _noop()):
+            task = engine_routing.build_task(
+                [case], {"alpha": Path("alpha")}, self.MODEL, "high", engine,
+                max_budget_usd=0.75,
+            )
+        return task.cost_limit
+
+    def test_the_task_carries_the_limit_once_priced(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        self.assertEqual(self._built_cost_limit(engine_routing.CLAUDE_CODE), 0.75)
+
+    def test_the_task_carries_none_when_it_cannot_be_priced(self) -> None:
+        self.assertIsNone(self._built_cost_limit(engine_routing.CLAUDE_CODE))
+
     def test_behaviour_and_report_cannot_disagree(self) -> None:
         # `max_budget_can_bind` and the decision to pass a limit are the same
         # question. Asked twice, they could drift; asked once, they cannot.
@@ -5276,17 +5306,6 @@ class TestTheRoomCheckIsBackAndSaysWhenItDidNotRun(unittest.TestCase):
             state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY), ["alpha"]
         )
 
-    def test_the_solver_actually_calls_the_recorder(self) -> None:
-        # The call site itself, reached by running the solver's event loop
-        # rather than by reading it. Patched at the module attribute, so
-        # removing the call makes this fail.
-        calls = []
-        with mock.patch.object(engine_no_sandbox, "_record_room",
-                               lambda *a: calls.append(a)):
-            source = inspect.getsource(engine_no_sandbox)
-            self.assertIn("_record_room(state, event, room_names)", source,
-                          "the solver no longer records the room")
-
     @staticmethod
     def _an_outcome(**kwargs):
         defaults = dict(
@@ -5297,6 +5316,324 @@ class TestTheRoomCheckIsBackAndSaysWhenItDidNotRun(unittest.TestCase):
         defaults.update(kwargs)
         return routing.Outcome(**defaults)
 
+
+_STUB_CLAUDE = r'''
+import json, sys
+
+if "--help" in sys.argv:
+    print("--max-budget-usd --no-session-persistence")
+    sys.exit(0)
+sys.stdin.read()
+for event in [
+    {"type": "system", "subtype": "init",
+     "skills": ["alpha", "a-stray-runner-skill"], "tools": ["Skill"]},
+    {"type": "assistant", "message": {
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+        "content": [{"type": "tool_use", "id": "t1", "name": "Skill",
+                     "input": {"skill": "alpha"}}]}},
+    {"type": "result", "subtype": "success", "result": "done",
+     "total_cost_usd": 0.01},
+]:
+    print(json.dumps(event), flush=True)
+'''
+
+
+def _stub_claude_on_path(test: unittest.TestCase) -> None:
+    """Put a `claude` that replays a fixed stream first on PATH for `test`.
+
+    A script rather than a mock, so the solver's own `shutil.which`, subprocess
+    and stream parsing all run. Windows resolves `claude` through PATHEXT, so
+    there the shim in front of the script is a `.cmd` rather than `/bin/sh`.
+    """
+    bin_dir = Path(tempfile.mkdtemp(prefix="ss-stub-claude-"))
+    test.addCleanup(shutil.rmtree, bin_dir, True)
+    script = bin_dir / "claude_stub.py"
+    script.write_text(_STUB_CLAUDE, encoding="utf-8")
+    if os.name == "nt":
+        (bin_dir / "claude.cmd").write_text(
+            f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8"
+        )
+    else:
+        # A shell shim rather than a `#!python` line, which breaks on an
+        # interpreter path with a space or past the kernel's length limit.
+        shim = bin_dir / "claude"
+        shim.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
+        )
+        shim.chmod(0o755)
+    patch = mock.patch.dict(
+        os.environ,
+        {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
+    patch.start()
+    test.addCleanup(patch.stop)
+
+
+class TestTheDefaultEngineRunsACase(unittest.TestCase):
+    """The host leg's solver, driven end to end against a stub `claude`.
+
+    Nothing else in the suite runs it. The sandbox job uses a stub *solver*,
+    and every other test here reaches a piece of it -- the room recorder, the
+    stream parser -- by calling that piece directly. So when a dead-code sweep
+    dropped `usage` from `agent.py`'s imports, the solver's
+    `legacy_agent.usage.record_stream_event` raised on the first event of
+    every case on the default engine, and all 487 tests still passed. F401
+    cannot see an attribute reached through another module either.
+    """
+
+    def setUp(self) -> None:
+        _stub_claude_on_path(self)
+        env = mock.patch.dict(
+            os.environ,
+            {engine_sandbox.SANDBOX_ENV: "local",
+             # Lets the leg isolate its config dir; the stub never reads it.
+             "ANTHROPIC_API_KEY": "sk-test-not-a-key"},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        usage.reset()
+        self.addCleanup(usage.reset)
+        self.root = Path(tempfile.mkdtemp(prefix="ss-host-leg-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        alpha = self.root / "alpha"
+        alpha.mkdir()
+        (alpha / "SKILL.md").write_text(
+            "---\nname: alpha\ndescription: does alpha things\n---\n",
+            encoding="utf-8",
+        )
+        self.room = {"alpha": alpha}
+
+    def _run(self):
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="do the alpha thing",
+            skill_should_trigger=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            return engine_routing.run(
+                [case], self.room, "mockllm/model", "high",
+                engine_routing.NO_SANDBOX, log_dir=str(self.root / "logs"),
+            )
+
+    def test_a_case_is_graded_rather_than_errored(self) -> None:
+        [outcome] = self._run()
+        self.assertFalse(outcome.error, outcome.error)
+        self.assertEqual(outcome.observed, "alpha")
+        self.assertTrue(outcome.passed)
+
+    def test_the_room_is_recorded_from_the_stream_it_read(self) -> None:
+        # The call site, not the helper: `_record_room` is tested on its own
+        # above, and that test kept passing when the solver stopped calling it.
+        [outcome] = self._run()
+        self.assertEqual(outcome.visible_skills, ["alpha"])
+        self.assertEqual(outcome.extra_skills, ["a-stray-runner-skill"])
+
+    def test_the_tokens_it_spent_are_counted(self) -> None:
+        self._run()
+        self.assertEqual(usage.snapshot().input_tokens, 11)
+        self.assertEqual(usage.snapshot().output_tokens, 7)
+
+    def test_a_stop_that_left_no_log_still_reports_the_case(self) -> None:
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.interrupted = True
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        with mock.patch.object(engine_routing, "_evaluate", lambda *a, **k: []):
+            [outcome] = self._run()
+        self.assertIn("exceeded --timeout", outcome.error)
+
+
+
+class TestAStoppedRunKeepsWhatItFinished(unittest.TestCase):
+    """Every `eval()` call site reads back the log of a run the deadline stopped.
+
+    inspect writes that log and returns `[]`, so a call site that went back to
+    calling `eval()` directly would drop every finished case -- and the
+    subprocess test above, which calls `run_eval` itself, would not notice.
+    Each test here swaps in an `eval()` that does exactly what inspect does:
+    writes a real log for the task it was given, then returns nothing.
+    """
+
+    def setUp(self) -> None:
+        # Armed but not yet fired: each fake fires it from inside `eval()`,
+        # which is where the graceful stage lands. Fired up front, the guard
+        # that starts no new skill would skip the run being tested.
+        self.bound = deadline.Deadline(600.0, command="routing")
+        previous = deadline.use(self.bound)
+        self.addCleanup(deadline.use, previous)
+        self.logs = tempfile.mkdtemp(prefix="ss-stopped-")
+        self.addCleanup(shutil.rmtree, self.logs, True)
+        self.case = datasets.Case(id="c1", skill="alpha", prompt="p",
+                                  skill_should_trigger=True, files_exist=["x"])
+        for patch in (mock.patch.object(engine_sandbox, "require_provider"),
+                      contextlib.redirect_stdout(io.StringIO())):
+            patch.__enter__()
+            self.addCleanup(patch.__exit__, None, None, None)
+
+    @staticmethod
+    def _eval_that_keeps_its_log_to_itself(case_ids):
+        from inspect_ai import Task, eval as real_eval
+        from inspect_ai.dataset import Sample
+        from inspect_ai.solver import solver
+
+        @solver
+        def _noop():
+            async def solve(state, generate):
+                return state
+            return solve
+
+        def fake_eval(task, *, log_dir, metadata=None, **_):
+            real_eval(
+                Task(name=task.name, solver=_noop(),
+                     dataset=[Sample(id=i, input="x") for i in case_ids]),
+                model="mockllm/model", log_dir=log_dir, display="none",
+                metadata=metadata,
+            )
+            deadline.active().interrupted = True
+            return []
+
+        return fake_eval
+
+    def _stopped_with_nothing_written(self, task, **_):
+        self.bound.interrupted = True
+        return []
+
+    def _a_task(self, name):
+        return lambda *a, **k: types.SimpleNamespace(name=name)
+
+    def test_routing_reads_it_back(self) -> None:
+        with mock.patch.object(engine_routing, "build_task", self._a_task("routing")):
+            logs = engine_routing._evaluate(
+                self._eval_that_keeps_its_log_to_itself(["c1"]), [self.case],
+                {"alpha": Path("alpha")}, "mockllm/model", "high",
+                engine_routing.NO_SANDBOX, "mockllm/model", None,
+                log_dir=self.logs,
+            )
+        self.assertEqual([s.id for log in logs for s in log.samples], ["c1"])
+
+    def test_behavioral_reads_it_back(self) -> None:
+        with mock.patch.object(engine_behavioral, "build_task",
+                               self._a_task("behavioral-alpha")), \
+                mock.patch("inspect_ai.eval",
+                           self._eval_that_keeps_its_log_to_itself(["c1"])):
+            [outcome] = engine_behavioral.run(
+                ["alpha"], [self.case], "mockllm/model", "high",
+                solver_factory=None, log_dir=self.logs,
+            )
+        self.assertNotIn("exceeded --timeout", outcome.error or "",
+                         "graded from nothing rather than from the log")
+
+    def test_the_sandboxed_leg_reads_it_back(self) -> None:
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(engine_verify, "require"))
+        stack.enter_context(mock.patch.object(
+            engine_verify, "build_task", self._a_task("claude-code-alpha")))
+        stack.enter_context(mock.patch(
+            "inspect_ai.eval", self._eval_that_keeps_its_log_to_itself(["c1"])))
+        # Its log directory is fixed, so the run happens somewhere disposable.
+        stack.enter_context(_chdir(self.logs))
+        [outcome] = engine_verify.run(["alpha"], [self.case], "mockllm/model", "high")
+        self.assertNotIn("exceeded --timeout", outcome.error or "",
+                         "graded from nothing rather than from the log")
+
+    def test_the_sandboxed_leg_starts_no_new_skill_after_a_stop(self) -> None:
+        # The twin of behavioral's guard, which has its own test above.
+        self.bound.interrupted = True
+        with mock.patch.object(engine_verify, "require"), \
+                mock.patch.object(engine_behavioral, "run_eval",
+                                  mock.Mock(side_effect=AssertionError("started"))):
+            [outcome] = engine_verify.run(["alpha"], [self.case], "mockllm/model", "high")
+        self.assertIn("exceeded --timeout", outcome.error)
+
+    def _stopped_beside(self, other_run):
+        """A stopped `behavioral-alpha` whose log directory `other_run` shares."""
+        ours = self._eval_that_keeps_its_log_to_itself(["c1"])
+
+        def eval_beside_another(task, *, log_dir, **kwargs):
+            other_run(log_dir)
+            return ours(task, log_dir=log_dir, **kwargs)
+
+        logs = engine_behavioral.run_eval(
+            eval_beside_another, types.SimpleNamespace(name="behavioral-alpha"),
+            log_dir=self.logs,
+        )
+        return sorted(s.id for log in logs for s in log.samples)
+
+    def test_another_run_of_the_same_task_is_not_taken_for_this_one(self) -> None:
+        # The default directory is shared by every run from one checkout, and
+        # routing's task is always `routing`, so a name match is not enough:
+        # a parity run of both engines writes two `routing` logs side by side.
+        theirs = self._eval_that_keeps_its_log_to_itself(["somebody-else"])
+        self.assertEqual(self._stopped_beside(lambda log_dir: theirs(
+            types.SimpleNamespace(name="behavioral-alpha"), log_dir=log_dir
+        )), ["c1"])
+
+    def test_an_earlier_run_of_the_same_task_is_not_taken_for_this_one(self) -> None:
+        # The normal state of `.skillscope/logs`: every past run of this skill.
+        earlier = self._eval_that_keeps_its_log_to_itself(["from-last-week"])
+        earlier(types.SimpleNamespace(name="behavioral-alpha"), log_dir=self.logs)
+        self.bound.interrupted = False
+        self.assertEqual(self._stopped_beside(lambda log_dir: None), ["c1"])
+
+    def test_an_interrupt_that_escapes_eval_is_still_the_stop(self) -> None:
+        # In `eval()`'s own setup the interrupt surfaces as an exception, and
+        # on 3.10 anyio can surface it as `CancelledError`.
+        for raised in (KeyboardInterrupt, asyncio.CancelledError):
+            with self.subTest(raised=raised.__name__):
+                def interrupted(task, **_):
+                    deadline.active().interrupted = True
+                    raise raised()
+
+                # Caught here, because a `KeyboardInterrupt` that escapes
+                # would abort the test runner rather than fail this test.
+                try:
+                    logs = engine_behavioral.run_eval(
+                        interrupted, types.SimpleNamespace(name="t"),
+                        log_dir=self.logs,
+                    )
+                except BaseException as exc:
+                    self.fail(f"the stop escaped as {type(exc).__name__}")
+                self.assertEqual(logs, [])
+
+    def test_an_interrupt_with_no_stop_behind_it_is_not_swallowed(self) -> None:
+        # The operator's Ctrl-C still ends the command.
+        def interrupted(task, **_):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            engine_behavioral.run_eval(
+                interrupted, types.SimpleNamespace(name="t"), log_dir=self.logs
+            )
+
+    def test_the_sandboxed_leg_reports_a_stop_that_left_no_log(self) -> None:
+        with mock.patch.object(engine_verify, "require"), \
+                mock.patch.object(engine_verify, "build_task",
+                                  self._a_task("claude-code-alpha")), \
+                mock.patch("inspect_ai.eval", self._stopped_with_nothing_written), \
+                _chdir(self.logs):
+            [outcome] = engine_verify.run(["alpha"], [self.case], "mockllm/model", "high")
+        self.assertIn("exceeded --timeout", outcome.error)
+
+    def test_a_stop_that_left_no_log_still_reports_the_cases(self) -> None:
+        # Failed, not absent: the report counts what it was asked to grade.
+        with mock.patch.object(engine_behavioral, "build_task",
+                               self._a_task("behavioral-alpha")), \
+                mock.patch("inspect_ai.eval", self._stopped_with_nothing_written):
+            [outcome] = engine_behavioral.run(
+                ["alpha"], [self.case], "mockllm/model", "high",
+                solver_factory=None, log_dir=self.logs,
+            )
+        self.assertIn("exceeded --timeout", outcome.error)
+
+
+@contextlib.contextmanager
+def _chdir(path):
+    previous = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 class TestTheBenchmarkNamesAnEngineThatExists(unittest.TestCase):
     """`--baseline` defaulted to `legacy` after `legacy` was removed.
@@ -5379,16 +5716,36 @@ class TestTheWallClockStopsInTimeForCleanup(unittest.TestCase):
         self.assertIsNone(bound._graceful)
         self.assertIsNotNone(bound._timer)
 
-    def test_the_graceful_stage_interrupts_the_main_thread(self) -> None:
-        # The whole mechanism: inspect treats KeyboardInterrupt as a cancel,
-        # which is the path that runs `Task.cleanup`.
-        bound = deadline.Deadline(1.0, command="routing")
-        raised = []
-        with mock.patch.object(deadline._thread, "interrupt_main",
-                               lambda: raised.append(True)):
-            bound._request_stop()
-        self.assertEqual(raised, [True])
-        self.assertTrue(bound.interrupted, "main must be able to tell why")
+    def test_a_requested_stop_fails_the_gate_as_an_overrun(self) -> None:
+        # Fired before the wall, so `expired()` is still False when inspect
+        # returns and the gate runs. It reported "every case errored".
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.interrupted = True
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli._fail_if_expired(), 1)
+        self.assertIn("exceeded --timeout", err.getvalue())
+
+    def test_no_new_skill_starts_after_a_stop(self) -> None:
+        # The reserve is for cleanup. The next skill's task would spend it and
+        # meet the hard kill, which loses the report too.
+        bound = deadline.Deadline(600.0, command="behavioral")
+        bound.interrupted = True
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        case = datasets.Case(id="c1", skill="alpha", prompt="p",
+                             skill_should_trigger=True, files_exist=["x"])
+        started = mock.Mock(side_effect=AssertionError("a task was started"))
+        with mock.patch.object(engine_behavioral, "run_eval", started), \
+                mock.patch.object(engine_sandbox, "require_provider"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            [outcome] = engine_behavioral.run(
+                ["alpha"], [case], "mockllm/model", "high", solver_factory=None
+            )
+        self.assertFalse(outcome.passed)
+        self.assertIn("exceeded --timeout", outcome.error)
 
     def test_disarming_cancels_both_stages(self) -> None:
         bound = deadline.Deadline(600.0, command="routing")
@@ -5436,6 +5793,119 @@ class TestTheWallClockStopsInTimeForCleanup(unittest.TestCase):
                 for cb in deadline._expire_callbacks),
             "nothing registers a cleanup, so the watchdog still cleans nothing",
         )
+
+
+_PARKED_LOOP_RUN = r'''
+import json, sys, tempfile, threading, time
+import anyio
+from inspect_ai import Task, eval as inspect_eval
+from inspect_ai.dataset import Sample
+from inspect_ai.solver import solver
+from skillscope import deadline
+from skillscope.engine import behavioral
+
+finished = []
+asked_at = []
+
+def _stop():
+    asked_at.append(time.perf_counter())
+    bound._request_stop()
+
+@solver
+def _maybe_hang():
+    async def solve(state, generate):
+        if state.sample_id != "hung":
+            finished.append(state.sample_id)
+            return state
+        # The stop is asked for once the other five are done, from a thread
+        # the way the watchdog asks for it, while this sample holds the loop
+        # parked. Timed from here rather than from start-up, which is inspect's
+        # and varies with the machine.
+        while len(finished) < 5:
+            await anyio.sleep(0.05)
+        threading.Timer(0.5, _stop).start()
+        await anyio.sleep(600)
+        return state
+    return solve
+
+task = Task(
+    name="parked",
+    dataset=[Sample(id=f"c{i}", input="x") for i in range(5)]
+    + [Sample(id="hung", input="x")],
+    solver=_maybe_hang(), sandbox="local",
+)
+bound = deadline.Deadline(float(sys.argv[1]), command="routing")
+deadline.use(bound)
+bound.arm()
+logs = behavioral.run_eval(inspect_eval, task, log_dir=tempfile.mkdtemp(),
+                           model="mockllm/model", display="none")
+print(json.dumps({
+    "after_stop": time.perf_counter() - asked_at[0] if asked_at else None,
+    "finished": sorted(s.id for log in logs for s in (log.samples or [])
+                       if s.error is None and s.id != "hung"),
+}))
+'''
+
+
+class TestTheGracefulStopReachesAParkedLoop(unittest.TestCase):
+    """The graceful stage, delivered to a real `eval()` with one hung sample.
+
+    Its test used to mock `interrupt_main` and assert it was called, which is
+    how two faults got through. `interrupt_main` only sets a flag, so a main
+    thread parked in `epoll_wait` -- one hung sample, nothing else to wake the
+    loop -- never saw it, and the stop landed whenever the hang ended. And when
+    it did land, inspect cleaned up and then returned `[]` from `eval()`, so
+    the five finished cases were dropped.
+
+    One test per fault: the bare loop holds down delivery -- through `eval()`
+    the flag happens to land anyway, so the other cannot -- and the `eval()`
+    one holds down keeping the finished cases.
+
+    A subprocess, because the signal is real and this test runner is a main
+    thread too. If delivery fails, the hard stage kills the child and there is
+    no output at all.
+    """
+
+    # The hard stage is only the backstop here; the stop is asked for directly.
+    HARD_AT = 120.0
+
+    def test_the_stop_wakes_a_loop_with_nothing_else_to_do(self) -> None:
+        # Delivery on its own, against a bare loop. Through `eval()` the flag
+        # alone happened to land within a second here, because something in
+        # inspect wakes its loop; this is the case where nothing does, and the
+        # flag waited out the full sleep.
+        script = (
+            "import asyncio, sys, time, anyio\n"
+            "from skillscope import deadline\n"
+            "deadline.GRACEFUL_RESERVE_S = 58.0\n"
+            "bound = deadline.Deadline(60.0, command='routing')\n"
+            "bound.arm()\n"
+            "started = time.perf_counter()\n"
+            "try:\n"
+            "    anyio.run(anyio.sleep, 30)\n"
+            # Before 3.11 anyio cannot turn the cancel back into
+            # `KeyboardInterrupt` (no `Task.uncancel`); either means it landed.
+            "except (KeyboardInterrupt, asyncio.CancelledError):\n"
+            "    print(time.perf_counter() - started)\n"
+        )
+        done = subprocess.run([sys.executable, "-c", script],
+                              capture_output=True, text=True, timeout=90)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        self.assertTrue(done.stdout.strip(), "the loop was never interrupted")
+        self.assertLess(float(done.stdout.strip().splitlines()[-1]), 10.0,
+                        "the stop waited for the loop to wake by itself")
+
+    def test_the_stop_lands_and_the_finished_cases_survive_it(self) -> None:
+        done = subprocess.run(
+            [sys.executable, "-c", _PARKED_LOOP_RUN, str(self.HARD_AT)],
+            capture_output=True, text=True, timeout=self.HARD_AT + 30,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        result = json.loads(done.stdout.strip().splitlines()[-1])
+        self.assertIsNotNone(result["after_stop"], "the stop was never asked for")
+        self.assertLess(result["after_stop"], 30.0,
+                        "the stop waited for the hung sample")
+        self.assertEqual(result["finished"], [f"c{i}" for i in range(5)])
 
 
 class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):

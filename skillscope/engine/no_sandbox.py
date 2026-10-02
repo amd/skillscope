@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import agent as legacy_agent
+from .. import usage
 from .. import routing as routing_core
 
 # Tool calls and results are reconstructed from the stream, so they need ids
@@ -499,7 +500,7 @@ def claude_code_no_sandbox(
                 )
 
             for event in events:
-                legacy_agent.usage.record_stream_event(event)
+                usage.record_stream_event(event)
                 _record_room(state, event, room_names)
 
             messages, final = events_to_messages(events, prompt)

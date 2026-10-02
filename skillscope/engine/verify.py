@@ -284,8 +284,16 @@ def run(
         if not skill_cases:
             continue
 
+        if behavioral.stop_requested():
+            # See `behavioral.run`: the stop is for the command.
+            outcomes.extend(
+                behavioral._failed(skill, skill_cases, deadline.active().message())
+            )
+            continue
+
         print(f"[claude-code] {skill}: {len(skill_cases)} case(s)", flush=True)
-        logs = inspect_eval(
+        logs = behavioral.run_eval(
+            inspect_eval,
             build_task(skill, skill_cases, model, effort=effort),
             model=model,
             model_args=models.model_args(model),
@@ -293,6 +301,13 @@ def run(
             log_realtime=behavioral.realtime_logging(),
             display="plain",
         )
+        if not logs and behavioral.stop_requested():
+            # See `behavioral.run`.
+            outcomes.extend(
+                behavioral._failed(skill, skill_cases, deadline.active().message())
+            )
+            continue
+
         for log in logs:
             stats.record_log(log)
             outcomes.extend(behavioral._outcomes(log, skill, skill_cases))

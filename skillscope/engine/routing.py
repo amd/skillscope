@@ -1158,6 +1158,10 @@ def run(
     for log in logs:
         stats.record_log(log)
         outcomes.extend(_outcomes(log, cases, skills))
+    if not logs and behavioral.stop_requested():
+        # Stopped before inspect wrote anything; see `behavioral.run`.
+        message = deadline.active().message()
+        outcomes.extend(_error_outcome(case, message) for case in cases)
 
     for outcome in outcomes:
         print(
@@ -1177,7 +1181,8 @@ def _evaluate(
     max_budget_usd=None, jobs=None, log_dir=None,
 ):
     """Run the task. Split out so `run` reads as a sequence of decisions."""
-    return inspect_eval(
+    return behavioral.run_eval(
+        inspect_eval,
         build_task(
             cases, routing_set, model, effort, engine, config_dir, case_timeout,
             max_tool_calls, max_inspection_calls, max_budget_usd,

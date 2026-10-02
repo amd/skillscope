@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import _thread
 import os
+import signal
 import sys
 import threading
 import time
@@ -73,10 +74,13 @@ class Deadline:
         long -- was the one that got no `teardown`.
 
         The graceful stage fixes that by arriving first. `GRACEFUL_RESERVE_S`
-        before the wall, it raises `KeyboardInterrupt` in the main thread,
+        before the wall, it raises `KeyboardInterrupt` in the main thread
+        (`_interrupt_main`, which is more than a flag -- see there),
         which is the signal inspect already understands: it cancels the
         running samples and unwinds *through* its cleanup rather than around
-        it. `cli.main` catches it and reports the same overrun message.
+        it. inspect does not hand back the stopped run's log, so
+        `engine.behavioral.run_eval` reads it back from disk, and
+        `cli._fail_if_expired` reports the overrun beside the results.
 
         The reserve is the same idea as `behavioral.TIMEOUT_RESERVE_S`, which
         holds a per-sample limit back from the command's budget for the same
@@ -110,10 +114,7 @@ class Deadline:
         )
         sys.stderr.flush()
         self.interrupted = True
-        # The one way to reach a main thread that is blocked inside an event
-        # loop. inspect treats it as a cancel, which is exactly the path that
-        # runs `Task.cleanup`.
-        _thread.interrupt_main()
+        _interrupt_main()
 
     def _expire(self) -> None:
         print(f"error: {self.message()}", file=sys.stderr)
@@ -139,6 +140,32 @@ class Deadline:
             )
         sys.stderr.flush()
         os._exit(1)
+
+
+def _interrupt_main() -> None:
+    """Raise `KeyboardInterrupt` in the main thread, even one parked in a loop.
+
+    inspect treats it as a cancel, which is exactly the path that runs
+    `Task.cleanup`. The delivery is the hard part. `_thread.interrupt_main()`
+    only sets a flag the interpreter checks between bytecodes, so it cannot
+    wake a main thread blocked in `epoll_wait` -- and an event loop with one
+    hung sample and no display to tick is blocked there until something else
+    happens. Measured: with the loop idle, the stop landed when the hung sleep
+    ended by itself rather than when it was asked for.
+
+    A real signal interrupts the wait. Aimed at the main thread rather than the
+    process, so it cannot land on this watchdog thread instead. Windows has no
+    `pthread_kill`, and `os.kill(pid, SIGINT)` there terminates the process
+    outright rather than raising anything, so it keeps `interrupt_main` --
+    which is enough there, because asyncio's proactor loop registers a wakeup
+    socket for the main thread and `interrupt_main` writes to it, which is the
+    wake-up epoll on POSIX never gets. `TestTheGracefulStopReachesAParkedLoop`
+    measures delivery on both.
+    """
+    if hasattr(signal, "pthread_kill"):
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+    else:
+        _thread.interrupt_main()
 
 
 # Last-resort cleanups, run by the watchdog before it kills the process.
