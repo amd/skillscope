@@ -235,17 +235,17 @@ def run_eval(inspect_eval, task, *, log_dir: str, **kwargs):
     routing's is always `routing`. A task name or a time window cannot tell
     those apart, so each call tags its eval with a token of its own and reads
     back only what carries it. Files that predate the call are skipped before
-    their headers are read, which is all that the listing is for. An empty
+    their headers are read, which is all that `before` is for. An empty
     result is the caller's to report, since only it knows which cases were
     asked for.
     """
     import asyncio
     import uuid
 
-    from inspect_ai.log import list_eval_logs, read_eval_log
+    from inspect_ai.log import read_eval_log
 
     token = uuid.uuid4().hex
-    before = {info.name for info in list_eval_logs(log_dir)}
+    before = _log_files(log_dir)
     try:
         logs = inspect_eval(
             task, log_dir=log_dir, metadata={CALL_TOKEN: token}, **kwargs
@@ -257,12 +257,31 @@ def run_eval(inspect_eval, task, *, log_dir: str, **kwargs):
     if logs or not stop_requested():
         return logs
     ours = [
-        info for info in list_eval_logs(log_dir)
-        if info.name not in before
-        and (read_eval_log(info, header_only=True).eval.metadata or {}).get(CALL_TOKEN)
+        uri for uri in sorted(_log_files(log_dir) - before)
+        if (read_eval_log(uri, header_only=True).eval.metadata or {}).get(CALL_TOKEN)
         == token
     ]
-    return [read_eval_log(info) for info in ours]
+    return [read_eval_log(uri) for uri in ours]
+
+
+def _log_files(log_dir: str) -> set[str]:
+    """The logs in `log_dir`, as URIs inspect can read back on every platform.
+
+    Not `inspect_ai.log.list_eval_logs`: on Windows the names it returns do
+    not survive the trip back into `read_eval_log`. It builds them as
+    `file://C:...`, one slash short, so the drive letter parses as a host and
+    is dropped -- every readback failed with FileNotFoundError on a path
+    starting `\\Users`. `Path.as_uri()` gives `file:///C:/...`. Local only,
+    which is every directory skillscope writes logs to.
+    """
+    root = Path(log_dir)
+    if not root.is_dir():
+        return set()
+    return {
+        path.resolve().as_uri()
+        for path in root.iterdir()
+        if path.suffix in (".eval", ".json")
+    }
 
 
 def run(
