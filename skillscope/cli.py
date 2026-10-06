@@ -148,12 +148,16 @@ def _structural_or_exit(skills: list[str] | None = None) -> list[references.Refe
     return found
 
 
-def routing_gate(totals: dict, min_accuracy: float) -> str | None:
+def routing_gate(
+    totals: dict, min_accuracy: float, missing_skills: list[str] | None = None
+) -> str | None:
     """Why this routing run should fail, or ``None`` if it should not.
 
-    The first two answers are infrastructure, not score, and hold whatever the
-    bar is: a run where nothing was graded, or where no skill ever activated,
-    has not measured routing at all.
+    The first three answers are infrastructure, not score, and hold whatever
+    the bar is: a run where nothing was graded, where no skill ever activated,
+    or where a staged skill never reached the agent has not measured routing at
+    all. The last of those is the quietest, because the cases still run and
+    still produce a number.
     """
     if totals["graded"] == 0:
         return "every case errored; treating the run as a failure."
@@ -162,6 +166,15 @@ def routing_gate(totals: dict, min_accuracy: float) -> str | None:
             "no skill activated in any case -- the skills were not installed, "
             "or activation detection is broken. Failing rather than reporting "
             "a 0% routing rate as if it were real."
+        )
+    if missing_skills:
+        return (
+            "the CLI did not report these installed skills at session init: "
+            f"{', '.join(sorted(missing_skills))}. A skill the agent was never "
+            "offered cannot be routed to, so every case for it reads as a "
+            "missed trigger and the author is told a description that was never "
+            "listed does not trigger. Failing rather than scoring a room that "
+            "was not the one asked for."
         )
     if min_accuracy <= 0:
         return None
@@ -415,7 +428,11 @@ def cmd_routing(args: argparse.Namespace) -> int:
 
     if (code := _fail_if_expired()) is not None:
         return code
-    reason = routing_gate(summary["totals"], args.min_accuracy)
+    reason = routing_gate(
+        summary["totals"],
+        args.min_accuracy,
+        summary["skills_missing_from_session"],
+    )
     if reason:
         print(f"[routing] {reason}", file=sys.stderr)
         return 1
