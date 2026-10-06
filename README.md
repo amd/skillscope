@@ -61,7 +61,7 @@ You may also choose to customize or even disable some tests if you prefer it. Se
 
 | Command | Does |
 | --- | --- |
-| `skillscope structural` | Skill folders, datasets, and markdown references. |
+| `skillscope structural` | Skill folders, datasets, markdown references, and what the skills cost in an agent's startup listing. |
 | `skillscope routing` | Which skill fires, with several installed together. |
 | `skillscope behavioral` | What a skill does once it has fired. |
 | `skillscope select` | The CI plan for a change, as JSON. |

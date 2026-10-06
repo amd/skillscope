@@ -72,7 +72,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import behavior, config, datasets, deadline, references, routing, structure
+from . import (
+    behavior,
+    config,
+    datasets,
+    deadline,
+    listing,
+    references,
+    routing,
+    structure,
+)
 from . import selection as select_module
 from .agent import check_api_reachable, enforce_model_policy
 
@@ -195,6 +204,15 @@ def cmd_structural(args: argparse.Namespace) -> int:
         f"[evals] OK: {len(cases)} case(s) across {len(skills)} skill(s) "
         f"plus {len(datasets.load_shared_negatives())} shared negative(s)."
     )
+    # Reported rather than graded. Every skill can be within the format's
+    # limits and the listing still overflow, because the budget belongs to the
+    # whole installed set rather than to any one skill, and what a published
+    # catalog shares that budget with is not visible from here. A run over a
+    # repo's prose alone has no listing to cost, so it says nothing.
+    cost = listing.cost()
+    if cost.skills:
+        print(f"[evals] listing: {listing.summary(cost)}")
+
     local = sum(1 for reference in found if reference.is_local)
     external = references.external_urls(found)
     print(
