@@ -170,10 +170,10 @@ alone — those are illustrations of links rather than promises.
 ## Routing, and the bar it is held to
 
 `--min-accuracy` / `min_accuracy` defaults to `1`: every graded routing case has
-to land on the right skill, the same way every behavioral expectation has to
-hold. A routing miss is a defect and not a statistic — a description that fires
-on its neighbour's prompt makes that neighbour worse — so it turns the run red
-rather than sitting in a summary nobody reads.
+to land on the right skill, the same way every behavioral expectation that was
+graded has to hold. A routing miss is a defect and not a statistic — a
+description that fires on its neighbour's prompt makes that neighbour worse —
+so it turns the run red rather than sitting in a summary nobody reads.
 
 Loosening it is a one-line diff. `0` reports the score without gating on it,
 which is where a repo that has never measured its prompts should start; anything
@@ -183,6 +183,16 @@ because a timeout says nothing about routing. No value turns off the
 infrastructure checks — a run where nothing was graded, or where no skill
 activated anywhere, fails at any bar, since those numbers are an artifact
 rather than a result.
+
+Behavioral is held to the same shape of bar, and carves out the same case. An
+expectation its judge could not reach a verdict on — the API was unreachable,
+the grader ran out of time, the reply came back without one — is reported as
+**ungraded** rather than unmet, listed under its own heading, and left out of
+the expectation rate. The run still fails, and the case carries an error saying
+the grader could not answer. The distinction is what the report is for: an
+`unexpected_behavior` expectation scored against no verdict would otherwise
+assert the skill did the very thing it forbids, on the evidence of a dropped
+connection.
 
 Two failure modes are worth knowing before reading a report. A routing case that
 ends without the agent either activating a skill or answering is reported as an
