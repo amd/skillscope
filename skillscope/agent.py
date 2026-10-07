@@ -263,8 +263,16 @@ def _find_file(files: list[str], expected: str) -> str | None:
 
 def _grade_with_llm(
     statement: str, run: "Run", judge_model: str | None, *, must_happen: bool
-) -> tuple[bool, str]:
+) -> tuple[bool | None, str]:
     """Ask a grader LLM whether the run satisfied a requirement.
+
+    The verdict is ``True`` (satisfied), ``False`` (not satisfied), or ``None``
+    when the judge could not answer at all -- no CLI, no time left, no reply.
+    ``None`` is not a negative verdict and callers must not collapse it into
+    one: a grader that never ran is no evidence about the skill, and reporting
+    it as ``False`` publishes a network fault as a behavioral violation. The
+    ``must_happen=False`` polarity is where this bites hardest, because there
+    ``False`` asserts the prohibited thing *happened*.
 
     ``must_happen`` selects the polarity: ``True`` means the agent was required
     to do ``statement``, ``False`` means it was required *not* to. The judge
@@ -278,7 +286,7 @@ def _grade_with_llm(
     """
     claude_bin = shutil.which("claude")
     if not claude_bin:
-        return False, "llm_judge skipped: 'claude' CLI not on PATH"
+        return None, "llm_judge skipped: 'claude' CLI not on PATH"
 
     cmd_text = run.command_text
     if len(cmd_text) > 4000:
@@ -326,7 +334,7 @@ def _grade_with_llm(
     if bound is not None:
         leftover = bound.remaining()
         if leftover <= 0:
-            return False, bound.message()
+            return None, bound.message()
         judge_timeout = bound.cap(judge_timeout)
 
     try:
@@ -335,7 +343,7 @@ def _grade_with_llm(
             input=prompt_text, timeout=judge_timeout, env=claude_env(),
         )
     except subprocess.TimeoutExpired:
-        return False, f"llm_judge timed out after {judge_timeout:g}s"
+        return None, f"llm_judge timed out after {judge_timeout:g}s"
 
     try:
         payload = json.loads((proc.stdout or "").strip())
@@ -359,21 +367,49 @@ def _grade_with_llm(
         if isinstance(parsed, dict) and "pass" in parsed:
             verdict = parsed
     if verdict is None:
-        return False, f"llm_judge gave no JSON verdict: {verdict_text[:200]!r}"
+        return None, f"llm_judge gave no JSON verdict: {verdict_text[:200]!r}"
 
     satisfied = bool(verdict.get("pass"))
     reason = str(verdict.get("reason", "")).strip() or "(no reason given)"
     return satisfied, f"llm_judge: {reason}"
 
 
+class Ungradable(Exception):
+    """A check could not be decided, as distinct from deciding against it."""
+
+
 @dataclass
 class Check:
-    """One graded expectation from a case."""
+    """One expectation from a case, and what grading it concluded.
+
+    ``graded`` is ``False`` when the check could not be decided at all -- an
+    LLM judge that never answered. Such a check is not a pass and not a
+    failure; it is an absence of evidence, and the distinction is what
+    separates reporting a broken grader from accusing a skill of the behavior
+    the expectation forbids. ``passed`` stays ``False`` there, so a reader that
+    only knows about pass and fail still refuses to call the case green -- but
+    anything attributing a result to the skill must read ``graded`` first.
+    """
 
     kind: str
     expectation: str
     passed: bool
     detail: str = ""
+    graded: bool = True
+
+
+def _judged(kind: str, expectation: str, verdict: bool | None, reason: str) -> Check:
+    """Turn a judge's verdict into a `Check`, keeping `None` as ungraded."""
+    if verdict is None:
+        return Check(kind, expectation, False, reason, graded=False)
+    return Check(kind, expectation, verdict, reason)
+
+
+def _verdict_label(check: Check) -> str:
+    """What the per-check line reports: met, unmet, or nothing concluded."""
+    if not check.graded:
+        return "----"
+    return "PASS" if check.passed else "FAIL"
 
 
 class Run:
@@ -434,22 +470,21 @@ class Run:
 
         for statement in expected_behavior:
             ok, reason = _grade_with_llm(statement, self, self.judge_model, must_happen=True)
-            checks.append(Check("expected_behavior", statement, ok, reason))
+            checks.append(_judged("expected_behavior", statement, ok, reason))
 
         for statement in unexpected_behavior:
             ok, reason = _grade_with_llm(statement, self, self.judge_model, must_happen=False)
-            checks.append(Check("unexpected_behavior", statement, ok, reason))
+            checks.append(_judged("unexpected_behavior", statement, ok, reason))
 
         for check in checks:
             suffix = f" -- {check.detail}" if check.detail else ""
-            _safe_print(
-                f"  [{'PASS' if check.passed else 'FAIL'}] "
-                f"({check.kind}) {check.expectation}{suffix}"
-            )
+            _safe_print(f"  [{_verdict_label(check)}] ({check.kind}) {check.expectation}{suffix}")
         return checks
 
     # Asserting variants, for an `evals/hooks.py` that needs a check the
-    # dataset format cannot express. Each raises AssertionError on failure.
+    # dataset format cannot express. A check that failed raises
+    # AssertionError; one the judge could not decide raises `Ungradable`,
+    # which `run_case` records as an ungraded check rather than a failed one.
 
     def logs_contains(self, text: str) -> "Run":
         ok = text.lower() in self.logs.lower()
@@ -474,7 +509,14 @@ class Run:
         self._report(satisfied, "unexpected_behavior", f"{statement} -- {reason}")
         return self
 
-    def _report(self, passed: bool, kind: str, detail: str) -> None:
+    def _report(self, passed: bool | None, kind: str, detail: str) -> None:
+        if passed is None:
+            # Deliberately not an AssertionError. `run_case` catches that and
+            # records a failed check against the skill, which is the exact
+            # attribution this state exists to prevent; anything else reaches
+            # the outer handler and is reported as the run erroring.
+            _safe_print(f"  [----] ({kind}) {detail}")
+            raise Ungradable(f"({kind}) {detail}")
         _safe_print(f"  [{'PASS' if passed else 'FAIL'}] ({kind}) {detail}")
         assert passed, f"({kind}) {detail}"
 

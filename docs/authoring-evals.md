@@ -90,7 +90,11 @@ All arrays, all valid only on a `skill_should_trigger: true` evaluation:
 | `files_exist` | the filesystem | an artifact the run must produce |
 
 The bottom two are instant and free where a judged expectation costs a second
-agent call, so reach for them when the thing you want is literal. Never assert
+agent call, so reach for them when the thing you want is literal. They are also
+the two that always produce an answer: a judged expectation has a third outcome,
+**ungraded**, for when the judge could not be reached or did not reply with a
+verdict. That is reported apart from a failure and excluded from the rate, since
+a grader that never ran says nothing about your skill either way. Never assert
 your own skill's name in `logs_contain`: routing already grades that properly,
 and a substring match only proves the skill was staged.
 
@@ -156,6 +160,8 @@ def setup_session(cache_dir): ...     # once per skill; returns {name: value} fo
 def setup(workspace, case, ctx): ...  # before each case; may return more placeholders
 def teardown(workspace, case, ctx): ...
 def check(run, case, ctx): ...        # after each case; raise AssertionError to fail it
+                                      # (run.expects leaves it ungraded if the judge
+                                      #  could not answer, rather than failing it)
 ```
 
 `teardown` runs even when the agent itself blew up, and a `check` that raises

@@ -2356,6 +2356,15 @@ class TestBehaviorCaseFlow(unittest.TestCase):
             behavior.claude = original
         return outcome, made[0]
 
+    def test_an_ungraded_expectation_is_reported_as_an_error(self) -> None:
+        with mock.patch.object(agent.shutil, "which", return_value=None):
+            outcome, _ = self.run_case(
+                {"id": "a", "prompt": "run it", "expected_behavior": ["Do the thing"]}
+            )
+        self.assertFalse(outcome.passed)
+        self.assertFalse(outcome.checks[0]["graded"])
+        self.assertIn("could not be graded", outcome.error or "")
+
     def test_a_passing_case(self) -> None:
         outcome, session = self.run_case(
             {"id": "a", "prompt": "run it", "logs_contain": ["detect.py"]},
@@ -2404,6 +2413,28 @@ class TestBehaviorCaseFlow(unittest.TestCase):
         self.assertFalse(outcome.passed)
         self.assertTrue(any("scorer reported" in c["detail"] for c in outcome.checks))
 
+    def test_a_hook_the_judge_could_not_answer_is_ungraded_not_failed(self) -> None:
+        calls: list[str] = []
+
+        class Hooks:
+            @staticmethod
+            def check(run, case, ctx):
+                run.expects_not("Claim measured results")
+
+            @staticmethod
+            def teardown(workspace, case, ctx):
+                calls.append("teardown")
+
+        with mock.patch.object(agent.shutil, "which", return_value=None):
+            outcome, _ = self.run_case(
+                {"id": "a", "prompt": "p", "logs_contain": []}, hooks=Hooks
+            )
+        self.assertEqual(calls, ["teardown"])
+        self.assertFalse(outcome.passed)
+        hook = next(c for c in outcome.checks if c["kind"] == "hook")
+        self.assertFalse(hook["graded"])
+        self.assertIn("could not be graded", outcome.error or "")
+
     def test_teardown_runs_even_when_the_agent_raises(self) -> None:
         calls: list[str] = []
 
@@ -2439,6 +2470,183 @@ class TestBehaviorCaseFlow(unittest.TestCase):
         self.assertTrue(outcome.passed, outcome.checks)
 
 
+class TestAJudgeThatCannotAnswer(unittest.TestCase):
+    """A grader that reached no verdict must not be read as having reached one.
+
+    Every path out of `_grade_with_llm` that cannot produce an answer used to
+    return False, which is indistinguishable from the judge deciding against
+    the skill. For `unexpected_behavior` that inverts the default the function
+    documents: it asserts the prohibited behavior happened, on no evidence at
+    all, so a dropped connection was published as the skill misbehaving.
+    """
+
+    STATEMENT = "Claim measured results"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def make_run(self) -> agent.Run:
+        return agent.Run(workspace=self.workspace, events=stream(), judge_model=None)
+
+    API_ERROR = "API Error: Connection dropped (ECONNRESET)"
+
+    def no_cli(self):
+        # The judge's own binary is missing, so it cannot be called at all.
+        return mock.patch.object(agent.shutil, "which", return_value=None)
+
+    def judge_reply(self, result: str):
+        # The CLI runs and returns `result` where a verdict should be. An API
+        # error arrives by exactly this route, which is what made it look like
+        # a verdict.
+        return self._patched(
+            run=mock.Mock(
+                return_value=mock.Mock(
+                    stdout=json.dumps({"result": result}), stderr="", returncode=0
+                )
+            )
+        )
+
+    def judge_times_out(self):
+        # The CLI is there and never comes back inside the cap.
+        return self._patched(
+            run=mock.Mock(side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=1))
+        )
+
+    def _patched(self, *, run):
+        return mock.patch.multiple(
+            agent,
+            shutil=mock.Mock(which=mock.Mock(return_value="/usr/bin/claude")),
+            subprocess=mock.Mock(run=run, TimeoutExpired=subprocess.TimeoutExpired),
+        )
+
+    def test_a_missing_cli_is_not_a_failed_expectation(self) -> None:
+        with self.no_cli():
+            checks = self.make_run().evaluate(expected_behavior=[self.STATEMENT])
+        self.assertFalse(checks[0].graded)
+        self.assertFalse(checks[0].passed)
+        self.assertIn("not on PATH", checks[0].detail)
+
+    def test_an_api_error_is_not_a_failed_expectation(self) -> None:
+        with self.judge_reply(self.API_ERROR):
+            checks = self.make_run().evaluate(expected_behavior=[self.STATEMENT])
+        self.assertFalse(checks[0].graded)
+        self.assertIn("ECONNRESET", checks[0].detail)
+
+    def test_a_judge_that_times_out_is_not_a_failed_expectation(self) -> None:
+        with self.judge_times_out():
+            checks = self.make_run().evaluate(expected_behavior=[self.STATEMENT])
+        self.assertFalse(checks[0].graded)
+        self.assertIn("timed out", checks[0].detail)
+
+    def test_a_spent_deadline_is_not_a_failed_expectation(self) -> None:
+        # The command ran out of time before the judge was ever called, which
+        # says as little about the skill as the judge refusing to answer.
+        previous = deadline.use(deadline.Deadline(0.0, command="behavioral"))
+        try:
+            with mock.patch.object(agent.shutil, "which", return_value="/usr/bin/claude"):
+                checks = self.make_run().evaluate(expected_behavior=[self.STATEMENT])
+        finally:
+            deadline.use(previous)
+        self.assertFalse(checks[0].graded)
+        self.assertIn("--timeout", checks[0].detail)
+
+    def test_a_prohibited_behavior_is_not_asserted_on_no_evidence(self) -> None:
+        # The polarity that made this worst: False here means the agent did it.
+        with self.judge_reply(self.API_ERROR):
+            checks = self.make_run().evaluate(unexpected_behavior=[self.STATEMENT])
+        self.assertFalse(checks[0].graded)
+
+    def test_an_ungraded_check_is_labelled_apart_from_a_failure(self) -> None:
+        buffer = io.StringIO()
+        with self.judge_reply(self.API_ERROR), contextlib.redirect_stdout(buffer):
+            self.make_run().evaluate(expected_behavior=[self.STATEMENT])
+        self.assertIn("[----]", buffer.getvalue())
+        self.assertNotIn("[FAIL]", buffer.getvalue())
+
+    def test_a_real_verdict_is_still_graded(self) -> None:
+        for verdict, expected in ((True, True), (False, False)):
+            with self.subTest(verdict=verdict):
+                reply = json.dumps({"pass": verdict, "reason": "because"})
+                with self.judge_reply(reply):
+                    checks = self.make_run().evaluate(expected_behavior=[self.STATEMENT])
+                self.assertTrue(checks[0].graded)
+                self.assertIs(checks[0].passed, expected)
+
+    def test_a_hook_whose_judge_never_answered_does_not_raise_assertion(self) -> None:
+        # `run_case` turns AssertionError into a check failed by the skill, so
+        # the ungradable signal must not arrive as one.
+        with self.no_cli():
+            with self.assertRaises(agent.Ungradable):
+                self.make_run().expects_not(self.STATEMENT)
+
+    def outcome(self, graded: bool) -> behavior.BehaviorOutcome:
+        check = {
+            "kind": "unexpected_behavior",
+            "expectation": self.STATEMENT,
+            "passed": False,
+            "detail": "llm_judge gave no JSON verdict",
+            "graded": graded,
+        }
+        return behavior.BehaviorOutcome(
+            id="a",
+            skill="s",
+            prompt="p",
+            passed=False,
+            elapsed_s=1.0,
+            checks=[check],
+            error=None if graded else "1 of 1 expectation(s) could not be graded",
+        )
+
+    def test_an_ungraded_check_is_excluded_from_the_rate(self) -> None:
+        summary = behavior.summarize(
+            [self.outcome(graded=False)], {"model": "opus", "effort": "high"}
+        )
+        self.assertEqual(summary["totals"]["checks_graded"], 0)
+        self.assertEqual(summary["totals"]["checks_ungraded"], 1)
+        self.assertEqual(summary["totals"]["checks_passed"], 0)
+        self.assertEqual(summary["per_skill"]["s"]["checks_ungraded"], 1)
+        self.assertEqual(summary["per_skill"]["s"]["checks_graded"], 0)
+
+    def test_the_rate_is_over_what_was_graded(self) -> None:
+        # The one claim both doc paragraphs make. Two checks, one ungraded, so
+        # a denominator of 2 would report the grader outage as a missed
+        # expectation.
+        outcome = self.outcome(graded=False)
+        outcome.checks.append(
+            {
+                "kind": "logs_contain",
+                "expectation": "x",
+                "passed": True,
+                "detail": "",
+                "graded": True,
+            }
+        )
+        summary = behavior.summarize([outcome], {"model": "opus", "effort": "high"})
+        report = behavior.render_markdown(summary)
+        self.assertIn("1/1 graded expectations", report)
+
+    def test_a_report_without_the_graded_key_still_reads(self) -> None:
+        # A check dict built by anything other than asdict(Check) must not be
+        # read as ungraded just because it predates the key.
+        outcome = self.outcome(graded=True)
+        del outcome.checks[0]["graded"]
+        summary = behavior.summarize([outcome], {"model": "opus", "effort": "high"})
+        self.assertEqual(summary["totals"]["checks_graded"], 1)
+        self.assertEqual(summary["totals"]["checks_ungraded"], 0)
+
+    def test_the_report_keeps_ungraded_out_of_the_unmet_table(self) -> None:
+        summary = behavior.summarize(
+            [self.outcome(graded=False)], {"model": "opus", "effort": "high"}
+        )
+        report = behavior.render_markdown(summary)
+        self.assertIn("### Ungraded expectations", report)
+        unmet, _, ungraded = report.partition("### Ungraded expectations")
+        self.assertNotIn(self.STATEMENT, unmet)
+        self.assertIn(self.STATEMENT, ungraded)
+
+
 class TestBehaviorReporting(unittest.TestCase):
     def test_summary_counts_cases_and_expectations(self) -> None:
         outcomes = [
@@ -2471,7 +2679,15 @@ class TestBehaviorReporting(unittest.TestCase):
         summary = behavior.summarize(outcomes, {"model": "opus", "effort": "high"})
         self.assertEqual(
             summary["totals"],
-            {"cases": 2, "passed": 1, "checks": 2, "checks_passed": 1, "errors": 0},
+            {
+                "cases": 2,
+                "passed": 1,
+                "checks": 2,
+                "checks_passed": 1,
+                "checks_graded": 2,
+                "checks_ungraded": 0,
+                "errors": 0,
+            },
         )
         report = behavior.render_markdown(summary)
         self.assertIn("1/2 cases passed", report)
