@@ -36,8 +36,16 @@ uv tool install --system-certs git+https://github.com/amd/skillscope
 skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs
 skillscope behavioral --skill my-skill       # needs an authenticated `claude` CLI
-skillscope routing --routing-room my-skill,its-neighbour
+skillscope routing --routing-room my-skill,its-neighbour  # also needs a key in the environment
 ```
+
+`routing` needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, and refuses
+to start without one — a `claude login` on its own is not enough. The key is
+what lets the run point the CLI at its own config directory; without that, the
+runner's own `~/.claude/skills` join the room for every case and the scores
+describe a room nobody asked for. `behavioral` installs one skill and grades
+what the agent produced, so a stray skill is at worst noise there, and a plain
+`claude login` is fine.
 
 ## Run it from your CI
 
@@ -85,9 +93,11 @@ python -m pip install -e .
 python -m unittest discover -s tests -t .
 ```
 
-Standard library only, apart from PyYAML for frontmatter, so a graded run
-installs nothing beyond this package. Tests build a throwaway repo in a temp
-directory rather than reading the tree they run in.
+Runtime dependencies are PyYAML for frontmatter, `inspect-ai` for the eval
+framework both engines are built on, and `anthropic` for the model client.
+`inspect-ai` became required when the last stdlib-only engine was removed; the
+test suite still runs on the standard library alone, and builds a throwaway
+repo in a temp directory rather than reading the tree it runs in.
 
 ## License
 

@@ -23,6 +23,24 @@ permissions:
   contents: read
 
 jobs:
+  imports:
+    # One rule, not a linter. `F401` finds imports nothing uses, which is how
+    # dead code announces itself: two rounds of review found functions whose
+    # last caller had been deleted, and in both cases the orphaned imports were
+    # sitting there saying so. Twelve of them had accumulated by the time
+    # anybody looked.
+    #
+    # Deliberately narrow. Adopting a full style configuration is a change to
+    # every file and a decision about house style; this is the one check that
+    # pays for itself immediately and reformats nothing.
+    name: Unused imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check --select F401 skillscope tests tools
+
   unit:
     name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
@@ -43,6 +61,77 @@ jobs:
 
       - name: Run the suite
         run: python -m unittest discover -s tests -t . --verbose
+
+  sandbox:
+    name: Sandbox machinery (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both sandboxes a run can get. Ubuntu has Docker, which is the
+        # default and what CI uses; Windows has none, which is the other
+        # supported shape. The Windows leg is the only place the cross-platform
+        # sandbox helpers are exercised at all -- inspect's own assume a POSIX
+        # guest, and a scorer that cannot list the guest cannot grade it.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # inspect-ai pulls in the order of eighty packages, so the download
+          # is most of this step. Keyed on pyproject, which is where the extra
+          # is declared and the only thing that changes what gets installed.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install with the inspect extra
+        run: python -m pip install --upgrade pip && python -m pip install ".[inspect]"
+
+      # The case seeds a file and expects that same file. Nothing an agent
+      # does can satisfy it and nothing an agent does can break it, so what
+      # passes or fails is the layer underneath: the sandbox started, the
+      # fixture was staged into it, the guest was listed, and the listing was
+      # matched. That is where every cross-platform bug so far has been.
+      - name: Build a repo to test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fixture/demo-skill/evals fixture/demo-skill/fixtures
+          cat > fixture/demo-skill/SKILL.md <<'EOF'
+          ---
+          name: demo-skill
+          description: Does demonstrable things, for a test that needs a skill.
+          ---
+          EOF
+          echo "seeded by the case, not produced by the agent" \
+            > fixture/demo-skill/fixtures/seeded.txt
+          cat > fixture/demo-skill/evals/evals.json <<'EOF'
+          {
+            "evaluations": [
+              {"id": "demo-a", "skill_should_trigger": true, "prompt": "do the demo thing",
+               "workspace": "fixtures", "files_exist": ["seeded.txt"]},
+              {"id": "demo-b", "skill_should_trigger": true, "prompt": "another way to ask"},
+              {"id": "demo-c", "skill_should_trigger": true, "prompt": "a third phrasing"},
+              {"id": "demo-d", "skill_should_trigger": false, "prompt": "something adjacent"},
+              {"id": "demo-e", "skill_should_trigger": false, "prompt": "something else entirely"}
+            ]
+          }
+          EOF
+
+      # No key, no model, no agent: a stub solver stands in for the agent so
+      # only the machinery beneath it can pass the case. That is what makes
+      # this runnable on a pull request from a fork, which is exactly where a
+      # cross-platform sandbox bug shows up.
+      - name: Exercise the sandbox, the staging and the listing
+        # The expected provider is supplied per platform rather than read back
+        # from the harness. Ubuntu must get a real container; a leg that
+        # quietly fell back to `local` would pass every check below against the
+        # host filesystem and stay green under the name "Sandbox machinery".
+        run: >
+          python tools/sandbox_smoketest.py fixture --skill demo-skill
+          --expect-sandbox ${{ matrix.os == 'windows-latest' && 'local' || 'docker' }}
 
   action:
     name: Action against a throwaway repo

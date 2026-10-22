@@ -19,15 +19,20 @@ temp directory rather than reading whatever happens to be checked out here.
 from __future__ import annotations
 
 import argparse
+import sys
+import asyncio
+import inspect
 import contextlib
 import io
 import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import tempfile
 import time
+import types
 import unittest
 import urllib.error
 from pathlib import Path
@@ -42,12 +47,29 @@ from skillscope import (
     credentials,
     datasets,
     deadline,
+    engine as engine_module,
     references,
     routing,
     structure,
 )
 from skillscope import selection as select_module
 from skillscope.datasets import EVALUATIONS_KEY, TRIGGER_KEY
+from skillscope.engine import behavioral as engine_behavioral
+from skillscope.engine import hooks as engine_hooks
+from skillscope.engine import no_sandbox as engine_no_sandbox
+from skillscope.engine import behavioral as engine_behavioral
+from skillscope.engine import judge as engine_judge
+from skillscope.engine import models as engine_models
+from skillscope.engine import sandbox as engine_sandbox
+from skillscope.engine import verify as engine_verify
+from skillscope.engine import routing as engine_routing
+from skillscope.engine import no_sandbox as engine_no_sandbox
+from skillscope.engine import behavioral as engine_behavioral
+from skillscope.engine import tools as engine_tools
+from skillscope.engine import scorers as engine_scorers
+from skillscope.engine import stats as engine_stats
+from skillscope.engine import pricing as engine_pricing
+from skillscope import usage
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
 SCHEMA_DIR = datasets.PACKAGE_DIR / "schema"
@@ -331,13 +353,16 @@ class TestMachineSchema(unittest.TestCase):
     def test_documented_keys_match_the_parser(self) -> None:
         self.assertEqual(set(self.schema["properties"]), datasets.MACHINE_KEYS)
 
-    def test_neither_key_is_enumerated_in_the_schema(self) -> None:
-        # Neither can be: a label means whatever a repo registered its runners
-        # with, so the schema documents what the key is for and the workflow
-        # supplies the labels around it.
-        for key in datasets.MACHINE_KEYS:
+    def test_no_list_key_is_enumerated_in_the_schema(self) -> None:
+        # Neither `os` nor `labels` can be: a label means whatever a repo
+        # registered its runners with, so the schema documents what the key is
+        # for and the workflow supplies the labels around it. Scoped to the
+        # list-valued keys, since `sandbox` names a file rather than a set.
+        for key, spec in self.schema["properties"].items():
+            if spec.get("type") != "array":
+                continue
             with self.subTest(key=key):
-                self.assertNotIn("enum", self.schema["properties"][key]["items"])
+                self.assertNotIn("enum", spec["items"])
 
     def test_every_machine_yml_in_the_repo_resolves(self) -> None:
         for skill in datasets.declared_skills():
@@ -764,32 +789,7 @@ class TestDeadline(unittest.TestCase):
         self.assertEqual(bound.cap(240), 0.0)
         self.assertIn("--timeout of 1s", bound.message())
 
-    def test_an_expired_deadline_does_not_start_a_routing_case(self) -> None:
-        cases, errors = parse(triggers(id="hung", prompt="go"))
-        self.assertEqual(errors, [])
-        bound = deadline.Deadline(1, command="routing", start=time.perf_counter() - 2)
-        previous = deadline.use(bound)
-        try:
-            outcome = routing.run_case(
-                cases[0], {"demo-skill": Path(".")}, routing.RoutingConfig()
-            )
-        finally:
-            deadline.use(previous)
-        self.assertEqual(outcome.verdict, "error")
-        self.assertEqual(outcome.stop_reason, "timeout")
-        self.assertIn("routing exceeded --timeout", outcome.error)
 
-    def test_an_expired_deadline_does_not_start_a_behavioral_case(self) -> None:
-        cases, errors = parse(triggers(id="hung", prompt="go", logs_contain=["x"]))
-        self.assertEqual(errors, [])
-        bound = deadline.Deadline(1, command="behavioral", start=time.perf_counter() - 2)
-        previous = deadline.use(bound)
-        try:
-            outcome = behavior.run_case(cases[0], {}, None, "opus", "high")
-        finally:
-            deadline.use(previous)
-        self.assertFalse(outcome.passed)
-        self.assertIn("behavioral exceeded --timeout", outcome.error)
 
 
 class TestCredentialResolution(unittest.TestCase):
@@ -1489,19 +1489,6 @@ class TestWholeRepoStructure(unittest.TestCase):
         covered = {case.expect_skill for case in cases if case.expect_skill}
         self.assertEqual(sorted(covered), sorted(listed))
 
-    def test_hooks_are_importable_and_expose_known_entry_points(self) -> None:
-        known = {"setup_session", "setup", "teardown", "check"}
-        for skill in datasets.skills_with_datasets():
-            if not datasets.hooks_path(skill).is_file():
-                continue
-            with self.subTest(skill=skill):
-                module = behavior.load_hooks(skill)
-                exported = {
-                    name
-                    for name in dir(module)
-                    if not name.startswith("_") and callable(getattr(module, name))
-                }
-                self.assertTrue(exported & known, f"{skill} hooks export nothing usable")
 
     def test_the_shipped_negatives_pool_parses(self) -> None:
         shared = datasets.load_shared_negatives()
@@ -2173,24 +2160,6 @@ class TestActivationDetection(unittest.TestCase):
         self.assertFalse(routing._is_skills_inspection('{"path": "src/main.py"}', self.SKILLS))
 
 
-class TestRoutingStaging(unittest.TestCase):
-    def test_the_routing_set_lands_in_the_workspace_and_nothing_else(self) -> None:
-        repo = Repo(self)
-        repo.skill("one", dataset=tier0_dataset("one"))
-        repo.skill("two", dataset=tier0_dataset("two"))
-        repo.skill("unlisted", dataset=tier0_dataset("unlisted"))
-        cfg = repo.activate(routing_room="one,two")
-        workspace = routing.stage_workspace(cfg.routing_set)
-        try:
-            staged = sorted(p.name for p in (workspace / ".claude" / "skills").iterdir())
-            self.assertEqual(staged, ["one", "two"])
-            self.assertTrue(
-                (workspace / ".claude" / "skills" / "one" / "SKILL.md").is_file()
-            )
-        finally:
-            import shutil
-
-            shutil.rmtree(workspace, ignore_errors=True)
 
 
 class TestPromptTemplating(unittest.TestCase):
@@ -2221,261 +2190,61 @@ def stream(*tool_calls: tuple[str, dict], result: str = "done") -> list[dict]:
     return events
 
 
-class TestRunGrading(unittest.TestCase):
-    """Deterministic grading only; the judged fields need a live judge."""
+def _reset_model_pricing() -> None:
+    """Undo every price any test registered. inspect's registry is global.
 
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self.tmp.name)
-        self.addCleanup(self.tmp.cleanup)
+    `set_model_cost` mutates the `ModelInfo` already in inspect's database, and
+    `set_model_info` adds to a module-level dict of custom models; neither is
+    scoped to anything, and `clear_model_info_cache` clears the *lookup* cache
+    rather than the data. So one test pricing `opus` leaves it priced for every
+    test after it -- which is how the cost-limit tests passed alone and failed
+    in the suite.
+    """
+    from inspect_ai.model import _model_info as mi
 
-    def make_run(self, events: list[dict]) -> agent.Run:
-        return agent.Run(workspace=self.workspace, events=events, judge_model=None)
+    mi._custom_models.clear()
+    for info in (mi._get_model_info_db() or {}).values():
+        if getattr(info, "cost", None) is not None:
+            info.cost = None
+    mi.clear_model_info_cache()
 
-    def test_transcript_and_tools_are_captured(self) -> None:
-        run = self.make_run(stream(("Bash", {"command": "python detect.py"})))
-        self.assertIn("Bash", run.tool_names)
-        self.assertIn("detect.py", run.logs)
-        self.assertEqual(run.result_text, "done")
 
-    def test_logs_contain_is_case_insensitive(self) -> None:
-        run = self.make_run(stream(("Bash", {"command": "python DETECT.py"})))
-        checks = run.evaluate(logs_contain=["detect.py"])
-        self.assertTrue(checks[0].passed)
+class TestFilesExistPathMatching(unittest.TestCase):
+    """`_find_file` decides every `files_exist` check, on both engines.
 
-    def test_logs_contain_reports_a_miss(self) -> None:
-        run = self.make_run(stream(("Bash", {"command": "ls"})))
-        checks = run.evaluate(logs_contain=["detect.py"])
-        self.assertFalse(checks[0].passed)
+    It used to be reached through the retired engine's `Run.evaluate`, which is
+    why these read as grading tests. `Run` is gone; `engine/scorers.py` calls
+    `_find_file` directly with the paths it listed from the sandbox, so the
+    function is tested directly too. The rules below are the whole of what a
+    case author can rely on about where an artifact may land.
+    """
 
-    def test_files_exist(self) -> None:
-        (self.workspace / "out.png").write_bytes(b"x")
-        checks = self.make_run(stream()).evaluate(files_exist=["out.png", "missing.txt"])
-        self.assertTrue(checks[0].passed)
-        self.assertFalse(checks[1].passed)
+    def test_an_exact_name_matches(self) -> None:
+        self.assertEqual(agent._find_file(["out.png"], "out.png"), "out.png")
 
-    def test_files_exist_finds_the_artifact_in_a_subdirectory(self) -> None:
+    def test_a_name_that_is_not_there_does_not(self) -> None:
+        self.assertIsNone(agent._find_file(["out.png"], "missing.txt"))
+
+    def test_an_artifact_is_found_in_a_subdirectory(self) -> None:
         # Where a plan lands is the agent's call; asking for `plan.md` and
         # getting `examples/fixture/plan.md` is a pass, not a defect.
-        nested = self.workspace / "examples" / "fixture"
-        nested.mkdir(parents=True)
-        (nested / "plan.md").write_text("x", encoding="utf-8")
-        checks = self.make_run(stream()).evaluate(files_exist=["plan.md"])
-        self.assertTrue(checks[0].passed)
-        self.assertIn("examples/fixture/plan.md", checks[0].detail)
-
-    def test_files_exist_matches_whole_segments_only(self) -> None:
-        (self.workspace / "analyze_plan.md").write_text("x", encoding="utf-8")
-        checks = self.make_run(stream()).evaluate(files_exist=["plan.md"])
-        self.assertFalse(checks[0].passed)
-
-    def test_files_exist_keeps_the_directory_context_it_was_given(self) -> None:
-        deep = self.workspace / "run-1" / "analysis_output"
-        deep.mkdir(parents=True)
-        (deep / "analysis.md").write_text("x", encoding="utf-8")
-        (self.workspace / "analysis.md").write_text("x", encoding="utf-8")
-        run = self.make_run(stream())
-        self.assertTrue(run.evaluate(files_exist=["analysis_output/analysis.md"])[0].passed)
-        self.assertFalse(run.evaluate(files_exist=["other_output/analysis.md"])[0].passed)
-
-    def test_files_exist_ignores_a_directory_of_the_wanted_name(self) -> None:
-        (self.workspace / "out.png").mkdir()
-        checks = self.make_run(stream()).evaluate(files_exist=["out.png"])
-        self.assertFalse(checks[0].passed)
-
-    def test_every_expectation_is_reported_not_just_the_first(self) -> None:
-        # A run that cost minutes should not have to be repeated to discover
-        # the second thing wrong with it.
-        checks = self.make_run(stream()).evaluate(
-            logs_contain=["nope"], files_exist=["also-nope"]
-        )
-        self.assertEqual(len(checks), 2)
-        self.assertFalse(any(c.passed for c in checks))
-
-    def test_dot_claude_is_excluded_from_workspace_listing(self) -> None:
-        staged = self.workspace / ".claude" / "skills" / "demo"
-        staged.mkdir(parents=True)
-        (staged / "SKILL.md").write_text("x", encoding="utf-8")
-        (self.workspace / "out.png").write_bytes(b"x")
-        self.assertEqual(self.make_run(stream()).files, ["out.png"])
-
-
-class FakeAgent:
-    """Stands in for a real agent session so the flow can be tested offline."""
-
-    def __init__(self, events: list[dict], seed: Path | None) -> None:
-        self.events = events
-        self.seed = seed
-        self.workspace: Path | None = None
-        self.prompts: list[str] = []
-        self._tmp: tempfile.TemporaryDirectory | None = None
-
-    def __enter__(self) -> "FakeAgent":
-        self._tmp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self._tmp.name)
-        if self.seed is not None:
-            for path in self.seed.iterdir():
-                (self.workspace / path.name).write_bytes(path.read_bytes())
-        return self
-
-    def __exit__(self, *exc) -> None:
-        if self._tmp is not None:
-            self._tmp.cleanup()
-
-    def prompt(self, text: str):
-        self.prompts.append(text)
-        return agent.Run(workspace=self.workspace, events=self.events, judge_model=None)
-
-
-class TestBehaviorCaseFlow(unittest.TestCase):
-    """The hook contract and prompt templating, without spending tokens."""
-
-    def setUp(self) -> None:
-        self.repo = Repo(self)
-        self.repo.skill(
-            "demo-skill",
-            dataset=tier0_dataset("demo"),
-            workspace={"evals/files/stub/main.py": "print('hi')\n"},
-        )
-        self.repo.activate()
-
-    def run_case(self, case_payload: dict, hooks=None, events=None, skill="demo-skill"):
-        cases, errors = parse(triggers(**case_payload), skill=skill)
-        self.assertEqual(errors, [])
-        made: list[FakeAgent] = []
-
-        def fake_claude(model, *, skill, effort, seed=None):
-            made.append(FakeAgent(events or stream(), seed))
-            return made[-1]
-
-        original = behavior.claude
-        behavior.claude = fake_claude
-        try:
-            outcome = behavior.run_case(cases[0], {}, hooks, "opus", "high")
-        finally:
-            behavior.claude = original
-        return outcome, made[0]
-
-    def test_a_passing_case(self) -> None:
-        outcome, session = self.run_case(
-            {"id": "a", "prompt": "run it", "logs_contain": ["detect.py"]},
-            events=stream(("Bash", {"command": "detect.py"})),
-        )
-        self.assertTrue(outcome.passed)
-        self.assertEqual(session.prompts, ["run it"])
-
-    def test_a_failing_expectation_fails_the_case(self) -> None:
-        outcome, _ = self.run_case({"id": "a", "prompt": "run it", "logs_contain": ["nope"]})
-        self.assertFalse(outcome.passed)
-
-    def test_hooks_run_in_order_and_can_template_the_prompt(self) -> None:
-        calls: list[str] = []
-
-        class Hooks:
-            @staticmethod
-            def setup(workspace, case, ctx):
-                calls.append("setup")
-                return {"output_dir": workspace / "out"}
-
-            @staticmethod
-            def check(run, case, ctx):
-                calls.append("check")
-
-            @staticmethod
-            def teardown(workspace, case, ctx):
-                calls.append("teardown")
-
-        outcome, session = self.run_case(
-            {"id": "a", "prompt": "write to {output_dir}", "logs_contain": ["detect"]},
-            hooks=Hooks,
-            events=stream(("Bash", {"command": "detect"})),
-        )
-        self.assertEqual(calls, ["setup", "check", "teardown"])
-        self.assertNotIn("{output_dir}", session.prompts[0])
-        self.assertTrue(outcome.passed)
-
-    def test_a_raising_hook_check_fails_the_case_without_killing_the_run(self) -> None:
-        class Hooks:
-            @staticmethod
-            def check(run, case, ctx):
-                raise AssertionError("scorer reported 3 failures")
-
-        outcome, _ = self.run_case({"id": "a", "prompt": "p", "logs_contain": []}, hooks=Hooks)
-        self.assertFalse(outcome.passed)
-        self.assertTrue(any("scorer reported" in c["detail"] for c in outcome.checks))
-
-    def test_teardown_runs_even_when_the_agent_raises(self) -> None:
-        calls: list[str] = []
-
-        class Hooks:
-            @staticmethod
-            def teardown(workspace, case, ctx):
-                calls.append("teardown")
-
-        class Exploding(FakeAgent):
-            def prompt(self, text):
-                raise RuntimeError("claude produced no output")
-
-        cases, _ = parse(triggers(id="a", prompt="p", unexpected_behavior=["x"]))
-        original = behavior.claude
-        behavior.claude = lambda model, *, skill, effort, seed=None: Exploding(stream(), seed)
-        try:
-            outcome = behavior.run_case(cases[0], {}, Hooks, "opus", "high")
-        finally:
-            behavior.claude = original
-        self.assertEqual(calls, ["teardown"])
-        self.assertFalse(outcome.passed)
-        self.assertIn("claude produced no output", outcome.error)
-
-    def test_workspace_fixtures_are_staged(self) -> None:
-        outcome, _ = self.run_case(
-            {
-                "id": "a",
-                "prompt": "edit it",
-                "workspace": "evals/files/stub",
-                "files_exist": ["main.py"],
-            }
-        )
-        self.assertTrue(outcome.passed, outcome.checks)
-
-
-class TestBehaviorReporting(unittest.TestCase):
-    def test_summary_counts_cases_and_expectations(self) -> None:
-        outcomes = [
-            behavior.BehaviorOutcome(
-                id="a",
-                skill="s",
-                prompt="p",
-                passed=True,
-                elapsed_s=1.0,
-                checks=[
-                    {"kind": "logs_contain", "expectation": "x", "passed": True, "detail": ""}
-                ],
-            ),
-            behavior.BehaviorOutcome(
-                id="b",
-                skill="s",
-                prompt="p",
-                passed=False,
-                elapsed_s=1.0,
-                checks=[
-                    {
-                        "kind": "expected_behavior",
-                        "expectation": "y",
-                        "passed": False,
-                        "detail": "no",
-                    }
-                ],
-            ),
-        ]
-        summary = behavior.summarize(outcomes, {"model": "opus", "effort": "high"})
         self.assertEqual(
-            summary["totals"],
-            {"cases": 2, "passed": 1, "checks": 2, "checks_passed": 1, "errors": 0},
+            agent._find_file(["examples/fixture/plan.md"], "plan.md"),
+            "examples/fixture/plan.md",
         )
-        report = behavior.render_markdown(summary)
-        self.assertIn("1/2 cases passed", report)
-        self.assertIn("`b`", report)
+
+    def test_only_whole_segments_count(self) -> None:
+        # `plan.md` must not be satisfied by `analyze_plan.md`, or every
+        # `files_exist` check becomes a substring search.
+        self.assertIsNone(agent._find_file(["analyze_plan.md"], "plan.md"))
+
+    def test_the_directory_context_given_is_kept(self) -> None:
+        files = ["analysis.md", "run-1/analysis_output/analysis.md"]
+        self.assertEqual(
+            agent._find_file(files, "analysis_output/analysis.md"),
+            "run-1/analysis_output/analysis.md",
+        )
+        self.assertIsNone(agent._find_file(files, "other_output/analysis.md"))
 
 
 class TestCaseFiltering(unittest.TestCase):
@@ -2534,6 +2303,3667 @@ class TestRoutingCasePooling(unittest.TestCase):
         cases = datasets.routing_cases([])
         self.assertTrue(cases)
         self.assertTrue(all(case.skill is None for case in cases))
+
+
+class TestCiModelPin(unittest.TestCase):
+    """The pin keeps paid runs comparable; a mock is neither paid nor graded."""
+
+    def test_a_real_model_is_pinned_under_ci(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            self.assertEqual(agent.enforce_model_policy("sonnet"), "opus")
+
+    def test_a_mock_is_left_alone_under_ci(self) -> None:
+        # Otherwise the free wiring run becomes a run that needs a key, in the
+        # one place where not needing a key is the whole point.
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            self.assertEqual(
+                agent.enforce_model_policy("mockllm/model"), "mockllm/model"
+            )
+
+    def test_nothing_is_pinned_outside_ci(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "", "GITHUB_ACTIONS": ""}):
+            self.assertEqual(agent.enforce_model_policy("sonnet"), "sonnet")
+
+
+class TestEngineMessageLimit(unittest.TestCase):
+    """A model that cannot finish should not be given a hundred turns to prove it."""
+
+    def test_a_real_model_gets_the_full_budget(self) -> None:
+        self.assertEqual(
+            engine_behavioral.message_limit_for("anthropic/claude-opus-5"),
+            engine_behavioral.MESSAGE_LIMIT,
+        )
+
+    def test_a_mock_gets_a_short_one(self) -> None:
+        # It never calls submit, so it loops to whatever cap it is given, and
+        # every turn is a real sandbox round trip.
+        self.assertEqual(
+            engine_behavioral.message_limit_for("mockllm/model"),
+            engine_behavioral.MOCK_MESSAGE_LIMIT,
+        )
+
+
+class TestEngineSkillFailureIsContained(unittest.TestCase):
+    """One skill's broken setup is that skill's failure, not everybody's."""
+
+    def test_a_skill_that_cannot_run_becomes_failed_outcomes(self) -> None:
+        cases = [
+            datasets.Case(id="a", prompt="p", skill="broken", skill_should_trigger=True),
+            datasets.Case(id="b", prompt="q", skill="broken", skill_should_trigger=True),
+        ]
+        outcomes = engine_behavioral._failed(cases[0].skill, cases, "no compose file")
+        self.assertEqual([o.id for o in outcomes], ["a", "b"])
+        self.assertTrue(all(not o.passed for o in outcomes))
+        self.assertTrue(all("no compose file" in (o.error or "") for o in outcomes))
+        # Not silence: an unreported skill would let a run that graded nothing
+        # call itself green.
+        self.assertTrue(all(o.checks == [] for o in outcomes))
+
+
+class TestBehavioralEngineDispatch(unittest.TestCase):
+    """Every engine has a behavioral branch, and reaches its own runner.
+
+    `claude-code-no-sandbox` was once added to the dispatch chain but not to
+    the guard around it, so it fell through to the engine that no longer
+    exists: runs asked for one agent, silently got another, and the reports
+    said `engine: claude-code-no-sandbox` throughout. Nothing in the suite
+    noticed, because nothing asserted which runner a flag actually reaches.
+    """
+
+    def test_every_engine_runs_under_inspect_now(self) -> None:
+        self.assertEqual(set(cli.INSPECT_ENGINES), set(cli.ENGINES))
+
+    def test_the_dispatch_reads_that_set_rather_than_a_literal(self) -> None:
+        # The bug was a branch list that fell behind the choices list, so
+        # the source is what to assert: every engine named, and an `else`
+        # that raises rather than quietly picking one.
+        source = inspect.getsource(cli.cmd_behavioral)
+        for engine in cli.ENGINES:
+            with self.subTest(engine=engine):
+                self.assertIn(f'args.engine == "{engine}"', source)
+        self.assertIn("has no behavioral leg", source)
+
+    def test_the_preflight_uses_the_same_set(self) -> None:
+        # These once disagreed: the preflight demanded the inspect extra for
+        # claude-code-no-sandbox while the dispatch sent it somewhere that
+        # never used it, which is how a Windows job failed on a flag it had
+        # not passed. One set now, and the preflight reads it.
+        self.assertIn("INSPECT_ENGINES", inspect.getsource(cli._prepare_graded_run))
+
+
+class TestEngineInstallHint(unittest.TestCase):
+    """The hint has to name the engine the user actually asked for."""
+
+    def test_it_names_the_requested_engine(self) -> None:
+        # Naming `inspect` regardless sent a Windows CI job looking for a flag
+        # it had never passed -- it had asked for claude-code-no-sandbox.
+        self.assertIn("--engine claude-code-no-sandbox", engine_module.install_hint("claude-code-no-sandbox"))
+
+    def test_it_points_at_a_command_that_would_actually_help(self) -> None:
+        # It used to say `pip install 'skillscope[inspect]'`. inspect_ai is a
+        # required dependency now, so that extra is empty and following the
+        # advice would change nothing -- reaching this error means a broken or
+        # partial install, and reinstalling is the fix.
+        hint = engine_module.install_hint("claude-code")
+        self.assertNotIn("skillscope[inspect]", hint)
+        self.assertIn("reinstall", hint.lower())
+
+
+class TestEngineWorkdirPath(unittest.TestCase):
+    """The working directory has to be knowable before a sandbox exists."""
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+
+    def test_a_container_run_names_the_workdir_without_creating_it(self) -> None:
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        self.assertEqual(engine_tools.workdir_path(), engine_tools.WORKDIR)
+
+    def test_a_local_run_has_none_so_the_agent_keeps_its_own(self) -> None:
+        # Creating /workspace on somebody's laptop is not ours to do, and the
+        # harness's own directory is already where the scorers look.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        self.assertIsNone(engine_tools.workdir_path())
+
+
+class TestEngineNoSandboxInstallsSkill(unittest.TestCase):
+    """A driver that replaces the react agent must stage the skill itself.
+
+    It did not, so the CLI ran with no skill and answered from the prompt
+    alone -- scoring 4/21 where every other engine scored 21/21, while
+    finishing faster, which was the only visible sign.
+    """
+
+    def test_the_skill_lands_where_the_harness_looks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "my-skill"
+            (src / "scripts").mkdir(parents=True)
+            (src / "SKILL.md").write_text("# my-skill", encoding="utf-8")
+            (src / "scripts" / "validate.py").write_text("x = 1", encoding="utf-8")
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+
+            engine_no_sandbox.install_skill(src, str(workspace))
+
+            staged = workspace / ".claude" / "skills" / "my-skill"
+            self.assertTrue((staged / "SKILL.md").is_file())
+            # The whole tree, not just the manifest: skills ship validators and
+            # references the agent is expected to run.
+            self.assertTrue((staged / "scripts" / "validate.py").is_file())
+
+
+class TestTaskTimeLimit(unittest.TestCase):
+    """A run that overruns should still say where it got to."""
+
+    def test_inspect_stops_before_the_hard_deadline_does(self) -> None:
+        bound = deadline.Deadline(1800, command="behavioral")
+        limit = engine_behavioral.task_time_limit(bound)
+        self.assertLess(limit, bound.remaining())
+        # Enough room for inspect to score what exists and write the log.
+        self.assertGreaterEqual(bound.remaining() - limit, 60)
+
+    def test_a_tiny_budget_still_gets_a_usable_limit(self) -> None:
+        # Never negative, never zero: a nonsense limit would fail the sample
+        # instantly and look like the agent doing nothing.
+        self.assertGreaterEqual(engine_behavioral.task_time_limit(deadline.Deadline(5)), 60)
+
+    def test_no_deadline_means_no_limit(self) -> None:
+        self.assertIsNone(engine_behavioral.task_time_limit(None))
+
+
+class TestRealtimeLogging(unittest.TestCase):
+    """The live sample buffer is what MAX_PATH kills on Windows."""
+
+    def test_windows_runs_without_the_buffer(self) -> None:
+        with mock.patch.object(engine_behavioral.sys, "platform", "win32"):
+            self.assertFalse(engine_behavioral.realtime_logging())
+
+    def test_posix_keeps_it(self) -> None:
+        with mock.patch.object(engine_behavioral.sys, "platform", "linux"):
+            self.assertTrue(engine_behavioral.realtime_logging())
+
+
+class TestShellPrefixProbe(unittest.TestCase):
+    """A guest without bash raises rather than answering."""
+
+    def _probe(self, exc: Exception | None):
+        from skillscope.engine import tools as t
+
+        class _Result:
+            success = True
+
+        class _Sandbox:
+            async def exec(self, *a, **k):
+                if exc is not None:
+                    raise exc
+                return _Result()
+
+        store: dict = {}
+
+        class _Store:
+            def get(self, k, default=None):
+                return store.get(k, default)
+
+            def set(self, k, v):
+                store[k] = v
+
+        with mock.patch.dict(
+            sys.modules,
+            {"inspect_ai.util": mock.MagicMock(sandbox=lambda: _Sandbox(), store=_Store)},
+        ):
+            return asyncio.run(t.shell_prefix())
+
+    def test_a_missing_bash_selects_powershell_rather_than_failing(self) -> None:
+        # WinError 2 here took the whole task down and reported 0/0
+        # expectations, which reads as the harness being broken.
+        self.assertEqual(
+            self._probe(FileNotFoundError(2, "The system cannot find the file specified")),
+            engine_tools.WINDOWS_SHELL,
+        )
+
+    def test_a_working_bash_still_selects_posix(self) -> None:
+        self.assertEqual(self._probe(None), engine_tools.POSIX_SHELL)
+
+
+class TestClaudeCodeRefusesTheHostsFilesystem(unittest.TestCase):
+    """`claude-code` needs a container, and not for isolation's sake.
+
+    `inspect_swe` prepares the guest by writing `$HOME/.claude/settings.json`
+    outright. In a container that file belongs to nobody. Under the `local`
+    provider `$HOME` is the developer's own, and the same write silently
+    destroys their real configuration -- permissions, model, gateway
+    environment -- with no backup. This cost one settings.json before the
+    guard existed, which is why the guard is a refusal rather than a warning.
+    """
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+        os.environ.pop(engine_sandbox.SANDBOX_ENV, None)
+        # Two different levers, and this class is about the second one.
+        # `provider()` asks `is_windows()`; `require()` reads `sys.platform`
+        # itself and reads it first. Patching only the former left these
+        # tests measuring the platform guard on a Windows runner and the
+        # sandbox guard on a Linux one, under the same names.
+        for target, attr, value in (
+            (engine_sandbox, "is_windows", lambda: False),
+            (engine_verify.sys, "platform", "linux"),
+        ):
+            patch = mock.patch.object(target, attr, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_a_host_sharing_provider_is_refused(self) -> None:
+        os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        with self.assertRaises(SystemExit) as caught:
+            engine_verify.require()
+        message = str(caught.exception)
+        self.assertIn("settings.json", message)
+        self.assertIn("--engine claude-code-no-sandbox", message)
+
+    def test_every_unisolated_provider_is_refused(self) -> None:
+        # Keyed off the same set `describe()` reports from, so a provider that
+        # is added as unisolated cannot quietly stay allowed here.
+        for provider in engine_sandbox.NOT_ISOLATED:
+            with self.subTest(provider=provider):
+                os.environ[engine_sandbox.SANDBOX_ENV] = provider
+                with self.assertRaises(SystemExit):
+                    engine_verify.require()
+
+    def test_a_container_provider_is_not_refused_for_being_a_container(self) -> None:
+        # Asserted as "not this refusal" rather than "no refusal at all": the
+        # unit suite runs without the inspect extra on purpose, so `require`
+        # may still stop on the missing wheel. That is a different answer to a
+        # different question, and conflating them made this pass locally and
+        # fail in CI.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "docker"
+        try:
+            engine_verify.require()
+        except SystemExit as exc:
+            # Whatever it stopped on, it was not the sandbox.
+            self.assertNotIn("settings.json", str(exc))
+            self.assertIn("pip install", str(exc))
+
+
+class TestEngineNoSandboxGuard(unittest.TestCase):
+    """The CLI runs on the host, so the sandbox has to be the host."""
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+
+    def test_a_container_provider_is_refused_with_the_alternative(self) -> None:
+        # Otherwise the CLI would work in the host's filesystem while the
+        # scorers read a container, and every expectation would fail for a
+        # reason nothing in the report explains.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        with self.assertRaises(SystemExit) as caught:
+            engine_no_sandbox.require_local()
+        message = str(caught.exception)
+        self.assertIn("podman", message)
+        self.assertIn("--engine claude-code", message)
+
+
+class TestEngineModelNames(unittest.TestCase):
+    """`--model` speaks the claude CLI's aliases; inspect wants provider names."""
+
+    def test_an_alias_becomes_a_provider_qualified_name(self) -> None:
+        self.assertEqual(engine_models.resolve("opus"), "anthropic/claude-opus-5")
+
+    def test_an_alias_is_case_insensitive(self) -> None:
+        self.assertEqual(engine_models.resolve("Opus"), "anthropic/claude-opus-5")
+
+    def test_a_qualified_name_passes_through(self) -> None:
+        # What makes `--model mockllm/model` work for the no-cost wiring runs.
+        self.assertEqual(engine_models.resolve("mockllm/model"), "mockllm/model")
+
+    def test_an_unknown_bare_name_is_assumed_to_be_anthropic(self) -> None:
+        self.assertEqual(engine_models.resolve("claude-x"), "anthropic/claude-x")
+
+
+class TestEngineGatewayHeaders(unittest.TestCase):
+    """`ANTHROPIC_CUSTOM_HEADERS` is a claude CLI variable; inspect ignores it."""
+
+    def setUp(self) -> None:
+        for var in (engine_models.CUSTOM_HEADERS_ENV, engine_models.AUTH_TOKEN_ENV):
+            self.addCleanup(os.environ.pop, var, None)
+            os.environ.pop(var, None)
+
+    def test_no_headers_configured_means_no_provider_arguments(self) -> None:
+        self.assertEqual(engine_models.model_args("anthropic/claude-opus-5"), {})
+
+    def test_headers_are_parsed_into_default_headers(self) -> None:
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = (
+            "X-Subscription-Key: secret\nuser: ci-runner\n"
+        )
+        self.assertEqual(
+            engine_models.model_args("anthropic/claude-opus-5"),
+            {
+                "default_headers": {
+                    "X-Subscription-Key": "secret",
+                    "user": "ci-runner",
+                }
+            },
+        )
+
+    def test_a_value_containing_a_colon_survives(self) -> None:
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "Referer: https://example.com/x"
+        self.assertEqual(
+            engine_models.custom_headers(), {"Referer": "https://example.com/x"}
+        )
+
+    def test_blank_and_malformed_lines_are_skipped(self) -> None:
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "\nnot-a-header\n\nk: v\n"
+        self.assertEqual(engine_models.custom_headers(), {"k": "v"})
+
+    def test_a_non_anthropic_model_needs_no_gateway_arguments(self) -> None:
+        # The free wiring run reaches no provider, so a shell that happens to
+        # hold both Anthropic variables must not break the one check that costs
+        # nothing -- and those are exactly the machines that have an OAuth token.
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "k: v"
+        os.environ[engine_models.AUTH_TOKEN_ENV] = "token"
+        self.assertEqual(engine_models.model_args("mockllm/model"), {})
+
+    def test_oauth_and_gateway_headers_together_are_refused(self) -> None:
+        # inspect's OAuth path sets `default_headers` itself, so ours would be a
+        # duplicate keyword argument deep inside the SDK. Fail with the reason.
+        os.environ[engine_models.CUSTOM_HEADERS_ENV] = "k: v"
+        os.environ[engine_models.AUTH_TOKEN_ENV] = "token"
+        with self.assertRaises(SystemExit) as caught:
+            engine_models.model_args("anthropic/claude-opus-5")
+        self.assertIn(engine_models.AUTH_TOKEN_ENV, str(caught.exception))
+
+
+class TestEngineListingNormalisation(unittest.TestCase):
+    """`find` and `Get-ChildItem` disagree about separators and prefixes."""
+
+    def test_posix_output(self) -> None:
+        listing = "./out.png\n./docs/plan.md\n"
+        self.assertEqual(
+            engine_tools.normalize_listing(listing), ["docs/plan.md", "out.png"]
+        )
+
+    def test_windows_output(self) -> None:
+        listing = ".\\out.png\r\n.\\docs\\plan.md\r\n"
+        self.assertEqual(
+            engine_tools.normalize_listing(listing), ["docs/plan.md", "out.png"]
+        )
+
+    def test_the_installed_skill_does_not_satisfy_files_exist(self) -> None:
+        # The harness put it there, so a case asserting SKILL.md was produced
+        # would otherwise pass without the agent doing anything.
+        listing = "./skills/demo/SKILL.md\n./.claude/settings.json\n./out.png\n"
+        self.assertEqual(engine_tools.normalize_listing(listing), ["out.png"])
+
+    def test_blank_lines_are_dropped(self) -> None:
+        self.assertEqual(engine_tools.normalize_listing("\n\n  \n"), [])
+
+
+class TestEngineJudgeVerdicts(unittest.TestCase):
+    """A grader is chatty and its reasons contain punctuation."""
+
+    def test_a_bare_verdict(self) -> None:
+        self.assertEqual(
+            engine_judge.parse_verdict('{"pass": true, "reason": "it did"}'),
+            (True, "it did"),
+        )
+
+    def test_a_verdict_wrapped_in_prose(self) -> None:
+        text = 'Looking at the evidence...\n{"pass": false, "reason": "no file"}\nDone.'
+        self.assertEqual(engine_judge.parse_verdict(text), (False, "no file"))
+
+    def test_a_reason_containing_braces(self) -> None:
+        # A regex quantifier or a quoted snippet in the reason must not confuse
+        # the scan, which is why boundaries are decoded rather than matched.
+        text = '{"pass": true, "reason": "matched a{2,3} in the output"}'
+        self.assertEqual(
+            engine_judge.parse_verdict(text), (True, "matched a{2,3} in the output")
+        )
+
+    def test_the_last_verdict_wins(self) -> None:
+        text = '{"pass": true, "reason": "first"}\n{"pass": false, "reason": "second"}'
+        self.assertEqual(engine_judge.parse_verdict(text), (False, "second"))
+
+    def test_no_verdict_at_all(self) -> None:
+        self.assertIsNone(engine_judge.parse_verdict("I could not decide."))
+
+    def test_a_missing_reason_still_yields_a_verdict(self) -> None:
+        self.assertEqual(
+            engine_judge.parse_verdict('{"pass": true}'), (True, "(no reason given)")
+        )
+
+
+class TestEngineJudgePolarity(unittest.TestCase):
+    """The judge grades the requirement; callers must never negate the verdict."""
+
+    def test_a_must_requirement_asks_whether_it_happened(self) -> None:
+        text = engine_judge.requirement_text("generate an image", must_happen=True)
+        self.assertIn("MUST have done this", text)
+        self.assertIn("true if the agent did it", text)
+
+    def test_a_must_not_requirement_asks_whether_it_was_avoided(self) -> None:
+        # Read as a pass when the agent avoided it: negating this verdict is
+        # what turns a correct run into a failure.
+        text = engine_judge.requirement_text("call a cloud API", must_happen=False)
+        self.assertIn("MUST NOT have done this", text)
+        self.assertIn("true if the agent avoided it", text)
+        self.assertIn("default verdict is true", text)
+
+
+class TestEngineJudgeTruncation(unittest.TestCase):
+    """What settles a check is usually the last thing the agent did."""
+
+    def test_short_transcripts_are_untouched(self) -> None:
+        self.assertEqual(engine_judge._elide_middle("abc", 100), "abc")
+
+    def test_the_end_survives(self) -> None:
+        # Cutting the tail would drop the validator run that a "did it verify
+        # its work" expectation turns on, making the agent look like it lied.
+        text = "START" + ("x" * 5000) + "VALIDATED"
+        trimmed = engine_judge._elide_middle(text, 400)
+        self.assertTrue(trimmed.startswith("START"))
+        self.assertTrue(trimmed.endswith("VALIDATED"))
+        self.assertIn("elided", trimmed)
+        self.assertLess(len(trimmed), 600)
+
+
+class _State:
+    def __init__(self, messages, output=None) -> None:
+        self.messages = messages
+        self.output = output
+
+
+class _Output:
+    def __init__(self, completion: str) -> None:
+        self.completion = completion
+
+
+class _Assistant:
+    role = "assistant"
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class TestEngineJudgeFinalMessage(unittest.TestCase):
+    """A `react` agent answers through submit, not through a chat message."""
+
+    def test_the_submitted_answer_is_included_and_marked(self) -> None:
+        state = _State(
+            [_Assistant("Here are the commands you need:")],
+            _Output("curl -X POST /api/v1/pull -d '{...}'"),
+        )
+        said = engine_judge.final_message_of(state)
+        self.assertIn("curl -X POST", said)
+        self.assertIn("[submitted answer]", said)
+
+    def test_an_earlier_turn_still_counts_as_having_told_the_user(self) -> None:
+        # The user sees every assistant turn, so an agent that prints the
+        # commands mid-run and then submits a summary did tell them. Reading
+        # only the last turn credited the summary and called the commands
+        # missing.
+        state = _State(
+            [
+                _Assistant("Run: curl -X POST /api/v1/pull"),
+                _Assistant("Done -- commands delivered above."),
+            ],
+            _Output("Done -- commands delivered above."),
+        )
+        self.assertIn("curl -X POST", engine_judge.final_message_of(state))
+
+    def test_it_works_without_a_submit_tool(self) -> None:
+        state = _State([_Assistant("no submit tool in this agent")], None)
+        self.assertEqual(
+            engine_judge.final_message_of(state), "no submit tool in this agent"
+        )
+
+    def test_silence_is_reported_rather_than_guessed_at(self) -> None:
+        self.assertEqual(
+            engine_judge.final_message_of(_State([], None)), "(the agent said nothing)"
+        )
+
+
+class TestEngineJudgeArtifacts(unittest.TestCase):
+    def test_images_are_recognised_by_suffix(self) -> None:
+        self.assertTrue(engine_judge.is_image("out.PNG"))
+        self.assertTrue(engine_judge.is_image("art/cat.jpeg"))
+        self.assertFalse(engine_judge.is_image("notes.md"))
+
+    def test_known_binaries_are_not_read_as_text(self) -> None:
+        self.assertTrue(engine_judge.is_probably_binary("model.safetensors"))
+        self.assertFalse(engine_judge.is_probably_binary("report.md"))
+
+
+class TestEngineSandboxSelection(unittest.TestCase):
+    """The provider is the machine's choice; the compose file is the skill's."""
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, engine_sandbox.SANDBOX_ENV, None)
+        os.environ.pop(engine_sandbox.SANDBOX_ENV, None)
+        self.repo = Repo(self)
+        # Pinned, because the answer depends on the platform and the suite runs
+        # on both. Without this these assertions quietly mean something
+        # different on a Windows runner than on a Linux one.
+        self._posix_host()
+
+    def _posix_host(self) -> None:
+        patch = mock.patch.object(engine_sandbox, "is_windows", lambda: False)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _windows_host(self) -> None:
+        patch = mock.patch.object(engine_sandbox, "is_windows", lambda: True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _skill(self, machine: str | None = None, compose: bool = False) -> None:
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"), machine=machine
+        )
+        if compose:
+            # Beside machine.yml, not at the skill root: the skill root is what
+            # gets published, and eval infrastructure does not belong there.
+            (folder / "evals" / "compose.yaml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+        self.repo.activate()
+
+    def test_docker_by_default(self) -> None:
+        self._skill()
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "docker")
+
+    def test_the_env_var_selects_the_provider(self) -> None:
+        self._skill()
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "podman")
+
+    def test_a_declared_compose_file_rides_along(self) -> None:
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        provider, config = engine_sandbox.for_skill("boxed")
+        self.assertEqual(provider, "docker")
+        self.assertTrue(config.endswith("compose.yaml"))
+
+    def test_selecting_a_provider_keeps_the_skill_s_compose_file(self) -> None:
+        # The skill asked for network egress; choosing podman must not drop it,
+        # or the case runs without what it needs and fails unexplainably.
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+        provider, config = engine_sandbox.for_skill("boxed")
+        self.assertEqual(provider, "podman")
+        self.assertTrue(config.endswith("compose.yaml"))
+
+    def test_local_takes_no_configuration(self) -> None:
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        os.environ[engine_sandbox.SANDBOX_ENV] = "local"
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "local")
+
+    def test_windows_has_no_sandbox_available(self) -> None:
+        # inspect's sandbox layer assumes a POSIX guest, so those legs run
+        # unsandboxed -- and a compose file the skill declared cannot apply,
+        # because there is no container to apply it to.
+        self._windows_host()
+        self._skill(machine="sandbox: compose.yaml\n", compose=True)
+        self.assertEqual(engine_sandbox.for_skill("boxed"), "local")
+
+    def test_an_unresolvable_provider_says_what_to_install(self) -> None:
+        # The binary being present proves nothing: inspect resolves a
+        # third-party provider through an entry point, so the Python package
+        # has to be installed too. Its own error names neither the variable
+        # nor the package.
+        os.environ[engine_sandbox.SANDBOX_ENV] = "podman"
+
+        def unresolvable(name: str):
+            raise ValueError(f"SandboxEnvironment type {name!r} not recognized.")
+
+        with self.assertRaises(SystemExit) as caught:
+            engine_sandbox.require_provider(resolve=unresolvable)
+        message = str(caught.exception)
+        self.assertIn(engine_sandbox.SANDBOX_ENV, message)
+        self.assertIn("skillscope[podman]", message)
+
+    def test_a_named_compose_file_that_is_missing_is_an_error(self) -> None:
+        self._skill(machine="sandbox: nope.yaml\n")
+        with self.assertRaises(SystemExit) as caught:
+            engine_sandbox.for_skill("boxed")
+        self.assertIn("nope.yaml", str(caught.exception))
+
+
+class TestRoutingRunsOnEveryEngine(unittest.TestCase):
+    """Routing reaches the leg it was asked for, for every engine there is.
+
+    It used to have one leg, and `claude-code` / `claude-code-no-sandbox` were
+    refused because routing had no path that drove the real CLI. Now both do,
+    and `legacy` -- the leg they were refused in favour of -- is gone. The
+    assertion that matters is that asking for a leg reaches that leg: the
+    defect this replaces was a run asking for one engine, silently getting
+    another, and the report naming the one it had asked for.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate(routing_room="alpha")
+        self.reached: list[str] = []
+
+        def record_inspect(cases, routing_set, model, effort, engine, **kwargs):
+            # The cap is recorded, not merely tolerated: a leg that never
+            # receives it bounds a case by the whole command's budget while the
+            # report claims otherwise.
+            self.reached.append(f"inspect:{engine}")
+            self.passed_kwargs = kwargs
+            return []
+
+        patch = mock.patch("skillscope.engine.routing.run", record_inspect)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        for name in ("_write_report", "_prepare_graded_run"):
+            patch = mock.patch.object(cli, name, lambda *a, **k: None)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_routing(self, engine: str) -> None:
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", engine, "--skip-preflight", "--model", "mockllm/model"]
+        )
+        cli.cmd_routing(args)
+
+    def test_every_engine_now_has_a_routing_leg(self) -> None:
+        self.assertEqual(set(cli.ROUTING_ENGINES), set(cli.ENGINES))
+
+    def test_asking_for_the_sandboxed_leg_reaches_it(self) -> None:
+        self.run_routing("claude-code")
+        self.assertEqual(self.reached, ["inspect:claude-code"])
+
+    def test_asking_for_the_host_leg_reaches_it(self) -> None:
+        # The case that used to fall through: `claude-code-no-sandbox` was in
+        # the choices list but not in the dispatch guard, so it silently ran
+        # somewhere else while the report named what had been asked for.
+        self.run_routing("claude-code-no-sandbox")
+        self.assertEqual(self.reached, ["inspect:claude-code-no-sandbox"])
+
+    def test_the_leg_is_given_the_per_case_cap(self) -> None:
+        self.run_routing("claude-code")
+        self.assertIn("case_timeout", self.passed_kwargs)
+
+    def test_the_dispatch_distinguishes_the_legs(self) -> None:
+        # Routing branches on the sandboxed leg and lets the host leg fall to
+        # the else, so there is no per-engine name to assert here as there is
+        # in `cmd_behavioral`. What must hold is that it branches at all: a
+        # dispatch that treated both alike would report a containment one of
+        # them never had.
+        source = inspect.getsource(cli.cmd_routing)
+        self.assertIn('args.engine == "claude-code"', source)
+        self.assertIn("sandbox_isolated", source)
+
+    def test_the_removed_engines_are_refused_by_the_parser(self) -> None:
+        for engine in ("inspect", "legacy"):
+            with self.subTest(engine=engine):
+                self.assertNotIn(engine, cli.ENGINES)
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(
+                    io.StringIO()
+                ):
+                    cli.build_parser().parse_args(["routing", "--engine", engine])
+
+
+
+
+class TestTheTranscriptIsReadTooNotJustTheMessages(unittest.TestCase):
+    """A bridged agent's work does not always land in `sample.messages`.
+
+    inspect adopts one conversation onto the sample, and for a bridged scaffold
+    that adoption follows heuristics about which thread is the main one -- a
+    run ending inside a sub-agent can leave it holding the wrong thread or
+    none. The transcript is strictly more complete: every bridged generation
+    emits a `ModelEvent`, sub-agents included.
+
+    Measured rather than reasoned about. The first sandboxed routing run on a
+    real container graded 24 of 67 cases as "the agent never ran", while the
+    legacy engine saw those same cases activate a skill. Reading only
+    `sample.messages` was the whole of the bug.
+    """
+
+    class Call:
+        def __init__(self, id, function, arguments):
+            self.id, self.function, self.arguments = id, function, arguments
+
+    class Msg:
+        def __init__(self, role="assistant", tool_calls=None, id=None):
+            self.role, self.tool_calls, self.id = role, tool_calls, id
+
+    class Event:
+        def __init__(self, message):
+            self.output = type("O", (), {"message": message})()
+
+    class Sample:
+        def __init__(self, messages=None, events=None):
+            self.messages, self.events = messages, events
+
+    ROOM = ["alpha", "beta"]
+
+    def skill_call(self):
+        return self.Call("t0", "Skill", {"command": "alpha"})
+
+    def test_an_activation_only_in_the_messages_is_seen(self) -> None:
+        sample = self.Sample(messages=[self.Msg(tool_calls=[self.skill_call()])])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[0], "alpha")
+
+    def test_an_activation_only_in_the_transcript_is_seen(self) -> None:
+        # The case that was being missed.
+        sample = self.Sample(events=[self.Event(self.Msg(tool_calls=[self.skill_call()]))])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[0], "alpha")
+
+    def test_the_same_turn_as_two_objects_is_counted_once(self) -> None:
+        # What the bridge actually produces: the turn adopted onto the sample
+        # and the turn carried by the transcript event are different objects
+        # with the same id. De-duplicating by identity missed that and counted
+        # every call twice -- a sandboxed run reported ten tool calls for
+        # cases the approver had terminated at five, halving the effective
+        # budget.
+        calls = [self.Call("t1", "Bash", {"command": "ls"})]
+        adopted = self.Msg(tool_calls=calls)
+        adopted.id = "m1"
+        in_event = self.Msg(tool_calls=calls)
+        in_event.id = "m1"
+        sample = self.Sample(messages=[adopted], events=[self.Event(in_event)])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[1], 1)
+
+    def test_two_genuinely_different_turns_are_both_counted(self) -> None:
+        first = self.Msg(tool_calls=[self.Call("t1", "Bash", {"command": "ls"})])
+        first.id = "m1"
+        second = self.Msg(tool_calls=[self.Call("t2", "Bash", {"command": "pwd"})])
+        second.id = "m2"
+        sample = self.Sample(messages=[first, second])
+        self.assertEqual(engine_routing._observe(sample, self.ROOM)[1], 2)
+
+    def test_a_run_that_chose_nothing_is_still_a_run(self) -> None:
+        sample = self.Sample(messages=[self.Msg(tool_calls=[])])
+        self.assertIsNone(engine_routing._observe(sample, self.ROOM)[0])
+        self.assertTrue(engine_routing._spoke(sample))
+
+    class Limit:
+        def __init__(self, type):
+            self.type = type
+
+    def test_a_sample_that_hit_a_limit_counts_as_having_run(self) -> None:
+        # When the message cap trips, what survives on the sample can be the
+        # prompt and nothing else. Calling that "never ran" is wrong and the
+        # opposite of useful: an agent that spent its whole budget without
+        # reaching for a skill is the clearest kind of missed trigger, which
+        # is how legacy grades its own `tool_budget` stop.
+        sample = self.Sample(messages=[self.Msg(role="user")])
+        sample.limit = self.Limit("message")
+        self.assertTrue(engine_routing._spoke(sample))
+
+    def test_a_prompt_with_no_limit_and_no_reply_still_never_ran(self) -> None:
+        sample = self.Sample(messages=[self.Msg(role="user")])
+        self.assertFalse(engine_routing._spoke(sample))
+
+    def test_a_sample_with_neither_record_never_ran(self) -> None:
+        # Preserved: this is the infrastructure failure the guard exists for,
+        # and grading it as a miss would invent a routing result.
+        self.assertFalse(engine_routing._spoke(self.Sample()))
+
+    def test_the_transcript_alone_counts_as_having_run(self) -> None:
+        sample = self.Sample(events=[self.Event(self.Msg(tool_calls=[]))])
+        self.assertTrue(engine_routing._spoke(sample))
+
+
+class TestAnEmptyAnswerIsStillAnAnswer(unittest.TestCase):
+    """A run that finished saying nothing is a routing result, not a failure.
+
+    The routing mapper has to tell "the agent reached for no skill" from "the
+    agent never ran", and it draws that line at whether the sample produced any
+    messages. The host driver appended a closing message only when the CLI had
+    something to say, so a run that finished quietly left none -- and two cases
+    on the real runner were graded as infrastructure failures where the legacy
+    engine graded them `correct_trigger` and `true_negative`.
+
+    The distinction is still drawn, just in the right place: a stream carrying
+    no result event at all is a CLI that never finished.
+
+    Exercised through `run_completed`, which is pure. The unit suite runs
+    without the inspect extra, and a rule reachable only through inspect's
+    message objects would go untested in CI -- which is where it matters.
+    """
+
+    def test_a_run_that_finished_with_an_answer(self) -> None:
+        done, final = engine_no_sandbox.run_completed(
+            [{"type": "result", "result": "no skill needed"}]
+        )
+        self.assertTrue(done)
+        self.assertEqual(final, "no skill needed")
+
+    def test_a_run_that_finished_saying_nothing_still_counts_as_finished(self) -> None:
+        # The case this fixes. An empty answer is the agent declining to route.
+        done, final = engine_no_sandbox.run_completed([{"type": "result", "result": ""}])
+        self.assertTrue(done)
+        self.assertEqual(final, "")
+
+    def test_a_result_event_with_no_text_at_all_still_counts(self) -> None:
+        self.assertTrue(engine_no_sandbox.run_completed([{"type": "result"}])[0])
+
+    def test_a_stream_that_never_finished_does_not_count(self) -> None:
+        # Preserved deliberately: no result event means the CLI did not reach
+        # the end, which is an infrastructure failure and must stay one.
+        self.assertFalse(
+            engine_no_sandbox.run_completed(
+                [{"type": "assistant", "message": {"content": []}}]
+            )[0]
+        )
+
+    def test_the_last_result_event_wins(self) -> None:
+        _, final = engine_no_sandbox.run_completed(
+            [{"type": "result", "result": "first"}, {"type": "result", "result": "last"}]
+        )
+        self.assertEqual(final, "last")
+
+    def test_the_placeholder_matches_what_the_output_already_used(self) -> None:
+        # The message list was the inconsistent half; `state.output` has always
+        # substituted this for an empty answer.
+        source = inspect.getsource(engine_no_sandbox)
+        self.assertEqual(source.count('"(no final message)"'), 2)
+
+
+class TestTheRoomHoldsTheSkillNotItsTests(unittest.TestCase):
+    """`evals/` is the answer key, and it was in the room on one leg.
+
+    `evals/evals.json` pairs each prompt with `skill_should_trigger` -- the
+    routing answer -- and with the `expected_behavior` a behavioral case is
+    graded against. The host leg copied the skill directory wholesale, so that
+    file sat inside the room the agent was being asked to choose from. The
+    sandboxed leg never had it, which meant the two legs whose agreement the
+    legacy retirement rests on were choosing from different rooms.
+
+    No agent was ever observed opening it -- every case in a 67-case run was
+    checked. That is why this is a removal plus a detector rather than a
+    removal alone: "nobody reads it" is a belief, and the detector is what
+    would notice if it stopped being true.
+    """
+
+    def staged(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        skill = root / "src" / "demo"
+        (skill / "evals" / "files").mkdir(parents=True)
+        (skill / "scripts").mkdir()
+        (skill / "SKILL.md").write_text("---\nname: demo\n---\n")
+        (skill / "reference.md").write_text("details")
+        (skill / "scripts" / "run.py").write_text("print()")
+        (skill / "evals" / "evals.json").write_text('{"evaluations": []}')
+        (skill / "evals" / "files" / "seed.txt").write_text("fixture")
+        workspace = root / "ws"
+        workspace.mkdir()
+        engine_no_sandbox.install_skill(skill, str(workspace))
+        return workspace / ".claude" / "skills" / "demo"
+
+    def test_the_answer_key_is_not_staged(self) -> None:
+        self.assertFalse((self.staged() / "evals").exists())
+
+    def test_the_skill_itself_still_is(self) -> None:
+        room = self.staged()
+        for rel in ("SKILL.md", "reference.md", "scripts/run.py"):
+            with self.subTest(rel=rel):
+                self.assertTrue((room / rel).is_file(), rel)
+
+    def test_both_legs_now_exclude_the_same_directory(self) -> None:
+        # The asymmetry was the point: one leg had it, the other never did.
+        self.assertEqual(
+            engine_no_sandbox.EVAL_FIXTURE_DIRNAME, engine_verify.EVAL_FIXTURE_DIR
+        )
+
+
+class TestReadingTheAnswerKeyIsReported(unittest.TestCase):
+    """Removing the file is the fix; noticing a read is how we would know."""
+
+    def sample(self, *arguments: dict):
+        calls = [_FakeCall(f"t{i}") for i, _ in enumerate(arguments)]
+        for call, args in zip(calls, arguments):
+            call.arguments = args
+        return _FakeSample([_FakeMessage("m", calls)], [])
+
+    def test_a_case_that_opened_the_dataset_is_flagged(self) -> None:
+        sample = self.sample({"file_path": ".claude/skills/x/evals/evals.json"})
+        self.assertTrue(engine_routing.read_the_answer_key(sample))
+
+    def test_the_extended_dataset_counts_too(self) -> None:
+        sample = self.sample({"command": "cat evals/extended_evals.json"})
+        self.assertTrue(engine_routing.read_the_answer_key(sample))
+
+    def test_ordinary_work_is_not_flagged(self) -> None:
+        sample = self.sample(
+            {"command": "ls /workspace"}, {"file_path": "reference.md"}
+        )
+        self.assertFalse(engine_routing.read_the_answer_key(sample))
+
+    def test_it_matches_wherever_the_copy_came_from(self) -> None:
+        # Matched on the filename, because the route by which a copy reaches
+        # the agent is exactly what is not known in advance.
+        sample = self.sample({"command": "cat /some/other/checkout/evals.json"})
+        self.assertTrue(engine_routing.read_the_answer_key(sample))
+
+
+class TestTheDefaultsAgreeWithEachOther(unittest.TestCase):
+    """A default engine that fails under a default sandbox is not a default.
+
+    `claude-code-no-sandbox` became the default when `legacy` was retired, and
+    it required `SKILLSCOPE_SANDBOX=local` while the default provider is
+    `docker`. So a fresh install running `skillscope routing` stopped with
+    "needs SKILLSCOPE_SANDBOX=local, not 'docker'" -- the two defaults
+    contradicted each other, and every downstream repo that upgraded would
+    have met it, because the reusable workflow names no engine and takes
+    whatever the default is.
+
+    Found by running the default engine the way a product repo would, which is
+    the only way it could have been found: every test set the variable.
+    """
+
+    def setUp(self) -> None:
+        for name in ("SKILLSCOPE_SANDBOX",):
+            self.addCleanup(os.environ.pop, name, None)
+        os.environ.pop("SKILLSCOPE_SANDBOX", None)
+        patch = mock.patch("shutil.which", lambda _: "/usr/bin/claude")
+        patch.start(); self.addCleanup(patch.stop)
+
+    def test_nobody_asked_so_the_host_leg_settles_on_local(self) -> None:
+        engine_no_sandbox.require_local()
+        self.assertEqual(os.environ["SKILLSCOPE_SANDBOX"], "local")
+
+    def test_the_report_then_says_host_not_the_default_provider(self) -> None:
+        # The failure this avoids is worse than refusing: a report naming
+        # `docker` for a run that happened on the host filesystem.
+        engine_no_sandbox.require_local()
+        self.assertEqual(
+            engine_sandbox.describe(),
+            {"sandbox": "local", "sandbox_isolated": False},
+        )
+
+    def test_an_explicit_container_request_is_still_refused(self) -> None:
+        # Overriding it would answer a different question than the one put.
+        os.environ["SKILLSCOPE_SANDBOX"] = "docker"
+        with self.assertRaises(SystemExit) as caught:
+            engine_no_sandbox.require_local()
+        self.assertIn("docker", str(caught.exception))
+
+    def test_an_explicit_local_request_is_honoured(self) -> None:
+        os.environ["SKILLSCOPE_SANDBOX"] = "local"
+        engine_no_sandbox.require_local()
+        self.assertEqual(os.environ["SKILLSCOPE_SANDBOX"], "local")
+
+    def test_requested_tells_a_choice_from_a_default(self) -> None:
+        self.assertIsNone(engine_sandbox.requested())
+        os.environ["SKILLSCOPE_SANDBOX"] = "podman"
+        self.assertEqual(engine_sandbox.requested(), "podman")
+
+
+class TestAFederatedTokenCountsAsACredential(unittest.TestCase):
+    """Workload identity federation holds no API key, by design.
+
+    The host routing leg refuses when it cannot redirect the CLI away from the
+    runner's own config dir, and that turns on whether auth lives in the
+    environment. It tested for `ANTHROPIC_API_KEY` alone -- so every runner
+    authenticating by federation lost its routing leg, including the one the
+    reusable workflow offers downstream repos through `federation_rule_id`,
+    where `scoped_api_key_secret` is empty on purpose.
+    """
+
+    def setUp(self) -> None:
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ.pop(name, None)
+
+    def test_an_api_key_still_counts(self) -> None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-x"
+        self.assertTrue(routing.can_isolate_config())
+
+    def test_a_federated_token_counts_too(self) -> None:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "oat-x"
+        self.assertTrue(routing.can_isolate_config())
+
+    def test_neither_is_still_a_refusal(self) -> None:
+        self.assertFalse(routing.can_isolate_config())
+        with self.assertRaises(SystemExit):
+            engine_routing.require_isolated_room("claude-code-no-sandbox")
+
+    def test_blank_does_not_count_as_set(self) -> None:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = "   "
+        self.assertFalse(routing.can_isolate_config())
+
+    def test_the_refusal_names_both_credentials(self) -> None:
+        # Naming one sends a federated runner looking for a key it will never
+        # have.
+        with self.assertRaises(SystemExit) as caught:
+            engine_routing.require_isolated_room("claude-code-no-sandbox")
+        message = str(caught.exception)
+        for name in routing.ENV_CREDENTIALS:
+            self.assertIn(name, message)
+
+
+class TestTheFederatedTokenSaysHowLongItLasts(unittest.TestCase):
+    """The exchange knows the lifetime. It used to throw it away.
+
+    A graded run on an MI300X spent twenty minutes and failed with `401 OAuth
+    access token has expired`, forty-eight times, and nothing in the job said
+    the token had ever had a deadline. Measured afterwards from the transcript:
+    minted 14:01:41, first 401 at 14:14:20 -- about twelve and a half minutes,
+    a number that was in the exchange response all along.
+    """
+
+    def exchange(self, payload: dict) -> str:
+        import json as _json
+
+        captured: list[str] = []
+        with mock.patch("builtins.print", lambda *a, **k: captured.append(" ".join(map(str, a)))):
+            credentials.anthropic_access_token(
+                "assertion",
+                rule_id="fdrl_x",
+                organization_id="org",
+                service_account_id="svc",
+                fetch=lambda *a, **k: _json.dumps(payload).encode(),
+            )
+        return "\n".join(captured)
+
+    def test_it_reports_the_lifetime_it_was_given(self) -> None:
+        out = self.exchange({"access_token": "t", "expires_in": 750})
+        self.assertIn("12m 30s", out)
+        self.assertIn("401", out)  # says what failure to expect
+
+    def test_it_stays_quiet_when_the_exchange_does_not_say(self) -> None:
+        self.assertEqual(self.exchange({"access_token": "t"}), "")
+
+    def test_a_missing_token_is_still_the_louder_failure(self) -> None:
+        import json as _json
+
+        with self.assertRaises(credentials.CredentialError):
+            credentials.anthropic_access_token(
+                "assertion", rule_id="r", organization_id="o",
+                service_account_id="s",
+                fetch=lambda *a, **k: _json.dumps({"expires_in": 750}).encode(),
+            )
+
+
+class TestWhichHookEntryPointsSurvive(unittest.TestCase):
+    """The rule that decides refusal, tested without a task or a sandbox."""
+
+    def module(self, body: str):
+        import importlib.util
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = root / "hooks.py"
+        path.write_text(body)
+        spec = importlib.util.spec_from_file_location("h_under_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_setup_and_teardown_are_not_blockers(self) -> None:
+        mod = self.module(
+            "def setup(w, c, x): pass\ndef teardown(w, c, x): pass\n"
+        )
+        self.assertEqual(engine_hooks.unsupported_entry_points(mod), [])
+
+    def test_check_and_setup_session_are(self) -> None:
+        mod = self.module(
+            "def check(r, c, x): pass\ndef setup_session(d): return {}\n"
+        )
+        self.assertEqual(
+            sorted(engine_hooks.unsupported_entry_points(mod)),
+            ["check", "setup_session"],
+        )
+
+    def test_a_skill_with_no_hook_blocks_nothing(self) -> None:
+        self.assertEqual(engine_hooks.unsupported_entry_points(None), [])
+
+    def test_a_non_callable_of_the_same_name_is_not_an_entry_point(self) -> None:
+        # `check = True` is a module constant, not a hook.
+        mod = self.module("check = True\nsetup_session = 3\n")
+        self.assertEqual(engine_hooks.unsupported_entry_points(mod), [])
+
+    def test_a_setup_that_returns_template_vars_is_refused(self) -> None:
+        # Dropping them would leave `{placeholder}` in the prompt the agent is
+        # graded on, which reads as a badly written case.
+        with self.assertRaises(SystemExit) as caught:
+            engine_hooks._returned_template_vars({"endpoint": "x"}, "skl")
+        message = str(caught.exception)
+        self.assertIn("endpoint", message)
+        self.assertIn("skl", message)
+
+    def test_a_setup_that_returns_nothing_is_fine(self) -> None:
+        for value in (None, {}, "", 0):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    engine_hooks._returned_template_vars(value, "skl")
+                )
+
+
+class TestHooksRunOrTheRunStops(unittest.TestCase):
+    """A skill's setup either runs, or the run stops. Never skipped quietly.
+
+    `setup` and `teardown` run on these engines: inspect's `Task.setup` and
+    `Task.cleanup` are the same two shapes, and `cleanup` runs inside a
+    `finally` under a shielded cancel scope, so teardown still happens when
+    the agent raises.
+
+    `check` and `setup_session` do not. `check` is handed the legacy engine's
+    `Run` object and these engines have inspect's `TaskState`; `setup_session`
+    returns template variables that are substituted into prompts before any
+    hook runs. Both are refused rather than skipped, because skipping leaves
+    no trace: the case is graded as though the hook had run, and the failure
+    surfaces later as a skill that mysteriously does not work on this runner.
+
+    Refused by entry point, not by the file existing. An earlier version
+    grounded any skill that shipped a hook at all -- which took the behavioral
+    leg away from the one skill in the catalogue whose hook these engines run
+    perfectly well: `setup` clears stale vLLM containers, `teardown` removes
+    them, and neither touches `ctx`.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("plain", dataset=tier0_dataset("plain"))
+        self.repo.skill(
+            "hooked",
+            dataset=tier0_dataset("hooked"),
+            hooks="def setup(workspace, case, ctx):\n    pass\n",
+        )
+        self.repo.activate()
+
+    def refuse(self, engine: str, skills: list[str], command: str = "behavioral"):
+        return cli._require_hook_support(engine, skills, command)
+
+    def test_setup_and_teardown_are_supported_so_the_run_proceeds(self) -> None:
+        # The regression this replaces: the skill that ships exactly this hook
+        # lost its behavioral leg on every engine.
+        self.assertIsNone(self.refuse("claude-code-no-sandbox", ["hooked"]))
+
+    def test_a_check_hook_is_refused_by_name(self) -> None:
+        self.repo.skill(
+            "checked",
+            dataset=tier0_dataset("checked"),
+            hooks="def check(run, case, ctx):\n    pass\n",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code-no-sandbox", ["checked"])
+        message = str(caught.exception)
+        self.assertIn("checked", message)
+        self.assertIn("check", message)
+        self.assertIn("setup", message)  # says what IS supported
+
+    def test_a_setup_session_hook_is_refused_by_name(self) -> None:
+        self.repo.skill(
+            "sessioned",
+            dataset=tier0_dataset("sessioned"),
+            hooks="def setup_session(cache_dir):\n    return {}\n",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code", ["sessioned"])
+        self.assertIn("setup_session", str(caught.exception))
+
+    def test_the_refusal_names_every_skill_it_blocks(self) -> None:
+        # Naming one of three sends someone round the loop twice.
+        for name in ("checked", "also-checked"):
+            self.repo.skill(
+                name,
+                dataset=tier0_dataset(name),
+                hooks="def check(run, case, ctx):\n    pass\n",
+            )
+        with self.assertRaises(SystemExit) as caught:
+            self.refuse("claude-code", ["checked", "also-checked", "plain"])
+        message = str(caught.exception)
+        self.assertIn("checked", message)
+        self.assertIn("also-checked", message)
+
+    def test_a_skill_without_a_hook_is_not_refused(self) -> None:
+        self.assertIsNone(self.refuse("claude-code", ["plain"]))
+
+    def test_routing_is_exempt_because_it_never_reads_hooks(self) -> None:
+        # A routing run installs the skills and asks which one fires. It
+        # executes nothing, so there is no setup to skip.
+        self.assertIsNone(self.refuse("claude-code", ["hooked"], command="routing"))
+
+    def test_every_engine_refuses_what_it_cannot_honour(self) -> None:
+        self.repo.skill(
+            "checked",
+            dataset=tier0_dataset("checked"),
+            hooks="def check(run, case, ctx):\n    pass\n",
+        )
+        for engine in cli.ENGINES:
+            with self.subTest(engine=engine):
+                with self.assertRaises(SystemExit):
+                    self.refuse(engine, ["checked"])
+
+    def test_both_engines_wire_the_hook_into_their_task(self) -> None:
+        # The other half: refusing the unsupported ones is only correct if the
+        # supported ones actually run.
+        import skillscope.engine.behavioral as eb
+        import skillscope.engine.verify as ev
+
+        for module in (eb, ev):
+            with self.subTest(module=module.__name__):
+                source = inspect.getsource(module.build_task)
+                self.assertIn("setup=hooks.setup_solver", source)
+                self.assertIn("cleanup=hooks.cleanup_fn", source)
+
+
+
+
+class TestTheBudgetFitsTheEngineItJudges(unittest.TestCase):
+    """The cap exists to catch an agent that started working, not one thinking.
+
+    So it is calibrated on calls made *before a decision*, which is the only
+    span it can meaningfully cut short. Measured over one 67-case room, on the
+    39 sandboxed cases that decided: 32 called the skill tool first with no
+    preamble, mean 0.31, peak 4.
+
+    An earlier revision read a mean of 2.46 off the same run and scaled by
+    three. That mean summed two populations -- cases that decide at once, and
+    cases that never find a skill and rummage until stopped. Only the second
+    sits near the threshold, and budget cannot rescue it: those score
+    `no_activation` at four calls or at forty. Headroom over the decision peak
+    is the thing worth buying; headroom over the rummaging is just spend.
+    """
+
+    def test_a_host_leg_is_held_to_the_cap_as_given(self) -> None:
+        for engine in ("claude-code-no-sandbox",):
+            with self.subTest(engine=engine):
+                self.assertEqual(engine_routing.budget_for(engine, 4), 4)
+
+    def test_the_sandboxed_leg_gets_room_to_orient(self) -> None:
+        scaled = engine_routing.budget_for("claude-code", 4)
+        self.assertEqual(scaled, 4 * engine_routing.SANDBOX_BUDGET_FACTOR)
+
+    def test_the_scaled_cap_clears_the_observed_decision_peak(self) -> None:
+        # The slowest sandboxed case to decide took 4 calls. A cap that cannot
+        # clear that discards real activations, which is the bug being fixed.
+        self.assertGreater(engine_routing.budget_for("claude-code", 4), 4)
+
+    def test_the_headroom_is_proportionate_to_what_was_measured(self) -> None:
+        # Guards the other direction, which is the mistake that was made: a cap
+        # far above the decision peak only funds cases that will not activate.
+        observed_peak = 4
+        self.assertLessEqual(
+            engine_routing.budget_for("claude-code", 4), observed_peak * 2
+        )
+
+    def test_the_callers_intent_survives_the_scaling(self) -> None:
+        # Asking for a tighter budget still means tighter, on every leg.
+        self.assertLess(
+            engine_routing.budget_for("claude-code", 2),
+            engine_routing.budget_for("claude-code", 4),
+        )
+
+    def test_no_cap_stays_no_cap(self) -> None:
+        for cap in (None, 0):
+            with self.subTest(cap=cap):
+                self.assertEqual(engine_routing.budget_for("claude-code", cap), cap)
+
+    def test_the_report_states_the_cap_that_was_enforced(self) -> None:
+        # Otherwise `near_limit` counts against a threshold that never applied.
+        source = inspect.getsource(cli.cmd_routing)
+        self.assertIn("budget_for(", source)
+
+
+def _activation_event(skill: str) -> dict:
+    """One `stream-json` assistant event in which the agent fires a skill."""
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "Skill", "input": {"skill": skill}}
+            ]
+        },
+    }
+
+
+def _work_event(n: int) -> dict:
+    """An event that is the agent doing work rather than choosing."""
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": {"command": f"echo {n}", "description": f"step {n}"},
+                }
+            ]
+        },
+    }
+
+
+class TestTheBehavioralReportActuallyRenders(unittest.TestCase):
+    """Both report writers get called, on a summary shaped like a real one.
+
+    Nothing exercised `behavior.render_markdown`, and a function it calls was
+    deleted with the legacy engine. Every unit test passed. The break surfaced
+    on a self-hosted MI300X, after two cases had been graded 4/4 and the agent
+    time paid for -- `NameError: _isolation_note` while writing the report --
+    and `continue-on-error` turned it into a green job.
+
+    The cheapest check there is: render it, and look at what came out.
+    """
+
+    def summary(self, **meta):
+        base = {
+            "model": "opus",
+            "engine": "claude-code",
+            "effort": "high",
+            "skills": ["alpha"],
+        }
+        return behavior.summarize([], {**base, **meta})
+
+    def test_it_renders_for_a_sandboxed_run(self) -> None:
+        out = behavior.render_markdown(
+            self.summary(sandbox="podman", sandbox_isolated=True)
+        )
+        self.assertIn("podman", out)
+        self.assertIn("isolated", out)
+
+    def test_it_renders_for_an_unsandboxed_run(self) -> None:
+        # The line that matters most, because its absence reads as isolation.
+        out = behavior.render_markdown(
+            self.summary(sandbox="host", sandbox_isolated=False)
+        )
+        self.assertIn("unsandboxed", out)
+
+    def test_it_renders_when_nothing_said_what_contained_it(self) -> None:
+        out = behavior.render_markdown(self.summary())
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.strip())
+
+    def test_the_routing_report_renders_too(self) -> None:
+        # Same class of gap, same cheap guard.
+        out = routing.render_markdown(
+            routing.summarize(
+                [],
+                ["alpha"],
+                {
+                    "model": "opus",
+                    "engine": "claude-code",
+                    "effort": "high",
+                    "skills": ["alpha"],
+                },
+            )
+        )
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.strip())
+
+
+class TestTheSandboxedRoomHoldsWholeSkills(unittest.TestCase):
+    """inspect's skill installer carries less than a skill ships.
+
+    `read_skills` collects `SKILL.md` and the contents of `scripts/`,
+    `references/` and `assets/`; everything else is dropped without a word. The
+    catalogue these legs run against puts its supporting material at the top
+    level -- `reference.md`, `examples.md`, `skill-card.md`, `templates/`,
+    `agents/` -- and no skill in it has a `references/` directory at all.
+
+    So the container held `SKILL.md` and little else while the host legs held
+    the whole directory, and the two were compared as one room. Measured: the
+    agent opened the right skill's `SKILL.md`, followed it to `reference.md`,
+    found nothing, and stopped -- scored as a missed trigger.
+    """
+
+    def _skill(self, layout: dict[str, str]) -> Path:
+        root = Path(tempfile.mkdtemp())
+        for rel, body in layout.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def test_top_level_supporting_files_are_restored(self) -> None:
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "reference.md": "the details",
+                "examples.md": "worked examples",
+                "skill-card.md": "card",
+            }
+        )
+        restored = {
+            p.relative_to(skill).as_posix()
+            for p in engine_verify.files_to_restore(skill)
+        }
+        self.assertEqual(restored, {"reference.md", "examples.md", "skill-card.md"})
+
+    def test_nested_directories_the_installer_ignores_are_restored(self) -> None:
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "templates/rule.md": "t",
+                "agents/analyzer.md": "a",
+            }
+        )
+        restored = {
+            p.relative_to(skill).as_posix()
+            for p in engine_verify.files_to_restore(skill)
+        }
+        self.assertEqual(restored, {"templates/rule.md", "agents/analyzer.md"})
+
+    def test_what_the_installer_already_carries_is_not_duplicated(self) -> None:
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "scripts/detect.py": "print()",
+                "references/api.md": "r",
+                "assets/logo.png": "bytes",
+            }
+        )
+        self.assertEqual(engine_verify.files_to_restore(skill), [])
+
+    def test_the_skills_own_tests_are_never_staged(self) -> None:
+        # `evals/evals.json` pairs each prompt with the skill it expects. In
+        # the room, that is the answer sheet. The host legs copytree it in
+        # today; this deliberately does not match them.
+        skill = self._skill(
+            {
+                "SKILL.md": "---\nname: x\n---\n",
+                "evals/evals.json": '{"evaluations": [{"expect": "x"}]}',
+                "evals/files/input.hip": "kernel",
+                "reference.md": "keep me",
+            }
+        )
+        restored = {
+            p.relative_to(skill).as_posix()
+            for p in engine_verify.files_to_restore(skill)
+        }
+        self.assertEqual(restored, {"reference.md"})
+
+    def test_the_staging_runs_before_the_agent_not_after(self) -> None:
+        # Chained behind `claude_code` it would land after the run finished,
+        # which looks identical in the source and does nothing at all.
+        source = inspect.getsource(engine_routing._solver)
+        staged = source.index("complete_skills_solver")
+        agent = source.index("claude_code(skills=room")
+        self.assertLess(
+            staged, agent, "the room is completed after the agent has already run"
+        )
+
+    def test_the_behavioral_leg_completes_its_skill_too(self) -> None:
+        # It matters more there: a behavioral case runs the skill to the end,
+        # so a missing reference.md is a step the agent cannot take.
+        self.assertIn(
+            "complete_skills_solver", inspect.getsource(engine_verify.build_task)
+        )
+
+
+class TestEveryLegThinksAsHardAsItWasTold(unittest.TestCase):
+    """`--effort` has to reach all three legs or the comparison is not one.
+
+    `legacy` and `claude-code-no-sandbox` build the CLI's command line and pass
+    `--effort` into it. The sandboxed leg goes through `inspect_swe`, whose
+    `effort` argument defaults to `None` -- documented as leaving the model's
+    own default in place, which is emphatically not the same value.
+
+    So the trial was comparing a leg thinking at the effort it was given with
+    one thinking at whatever it liked, and attributing the difference to
+    isolation. Asserted against the source because the alternative is a live
+    sandboxed run, and a silent revert here looks like a finding about skills.
+    """
+
+    def _claude_code_call(self, func) -> str:
+        """The text of the `claude_code(...)` invocation in `func`.
+
+        Read by balancing parentheses rather than by regex: the arguments
+        contain calls of their own, so a non-greedy match ends at the wrong
+        bracket and the assertion fails on correct code.
+        """
+        source = inspect.getsource(func)
+        start = source.index("claude_code(") + len("claude_code(")
+        depth, end = 1, start
+        while depth:
+            depth += {"(": 1, ")": -1}.get(source[end], 0)
+            end += 1
+        return source[start : end - 1]
+
+    def test_the_sandboxed_routing_leg_is_given_the_effort(self) -> None:
+        self.assertIn(
+            "effort=",
+            self._claude_code_call(engine_routing._solver),
+            "the sandboxed routing leg drops --effort",
+        )
+
+    def test_the_sandboxed_behavioral_leg_is_given_the_effort(self) -> None:
+        self.assertIn(
+            "effort=",
+            self._claude_code_call(engine_verify.build_task),
+            "the sandboxed behavioral leg drops --effort",
+        )
+
+    def test_an_inspect_swe_without_effort_is_refused_up_front(self) -> None:
+        # The failure it replaces: a TypeError raised inside a task inspect had
+        # already started, leaving one leg of a three-leg comparison with no
+        # report while the run reported success.
+        def _no_effort(skills=None, cwd=None):  # pragma: no cover -- a stub
+            return None
+
+        fake = types.ModuleType("inspect_swe")
+        fake.claude_code = _no_effort
+        with mock.patch.dict(sys.modules, {"inspect_swe": fake}), mock.patch.object(
+            engine_verify.sandbox_spec, "provider", lambda: "podman"
+        ), mock.patch.object(engine_verify.sys, "platform", "linux"):
+            with self.assertRaises(SystemExit) as caught:
+                engine_verify.require()
+        self.assertIn("0.2.71", str(caught.exception))
+
+    def test_a_current_inspect_swe_is_accepted(self) -> None:
+        # The other direction, so the guard cannot pass by always raising.
+        def _with_effort(skills=None, cwd=None, effort=None):  # pragma: no cover
+            return None
+
+        fake = types.ModuleType("inspect_swe")
+        fake.claude_code = _with_effort
+        with mock.patch.dict(sys.modules, {"inspect_swe": fake}), mock.patch.object(
+            engine_verify.sandbox_spec, "provider", lambda: "podman"
+        ), mock.patch.object(engine_verify.sys, "platform", "linux"):
+            engine_verify.require()
+
+    def test_the_pin_matches_what_the_guard_demands(self) -> None:
+        # A guard naming a version the package does not require would send
+        # people to an upgrade their install then undoes.
+        pin = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        self.assertIn("inspect-swe>=0.2.71", pin)
+
+    def test_the_behavioral_runner_hands_the_effort_down(self) -> None:
+        # build_task grew the parameter once already without the caller
+        # filling it, which reads exactly like the bug it was meant to fix.
+        self.assertIn("effort", inspect.signature(engine_verify.build_task).parameters)
+        self.assertIn(
+            "effort=",
+            inspect.getsource(engine_verify.run).split("build_task(", 1)[1][:120],
+            "verify.run accepts an effort it never passes on",
+        )
+
+
+class _FakeCall:
+    def __init__(self, call_id: str, function: str = "Bash") -> None:
+        self.id = call_id
+        self.function = function
+        self.arguments: dict = {}
+
+
+class _FakeMessage:
+    def __init__(self, message_id: str, calls: list[_FakeCall]) -> None:
+        self.id = message_id
+        self.role = "assistant"
+        self.tool_calls = calls
+
+
+class _FakeEvent:
+    def __init__(self, message) -> None:
+        self.output = type("O", (), {"message": message})()
+
+
+class _FakeSample:
+    def __init__(self, messages, events) -> None:
+        self.messages = messages
+        self.events = events
+
+
+class TestOneTurnIsCountedOnce(unittest.TestCase):
+    """The same turn reaches this code twice and must be counted once.
+
+    A bridged agent's turn is both adopted onto `sample.messages` and carried by
+    a transcript `ModelEvent`, as two separate objects. De-duplicating them has
+    been wrong twice: first by object identity, which never matches, and then by
+    message id -- which looks right and is not, because the bridge *builds* the
+    adopted message rather than moving it, so the two copies carry
+    independently generated ids.
+
+    Measured on a real run: 23 reported against 12 actually made. Verdicts were
+    never affected -- an activation is detected by presence, not by count -- but
+    every tool-call column, the budget's headroom and `near_limit` all were.
+    """
+
+    def _sample(self, same_call_ids: bool):
+        first = [_FakeCall("toolu_1"), _FakeCall("toolu_2")]
+        second = (
+            [_FakeCall("toolu_1"), _FakeCall("toolu_2")]
+            if same_call_ids
+            else [_FakeCall("toolu_3"), _FakeCall("toolu_4")]
+        )
+        # Different message ids on purpose: that is what the bridge produces.
+        return _FakeSample(
+            messages=[_FakeMessage("adopted", first)],
+            events=[_FakeEvent(_FakeMessage("transcript", second))],
+        )
+
+    def test_the_same_turn_from_both_records_counts_once(self) -> None:
+        calls = list(engine_routing._tool_calls(self._sample(same_call_ids=True)))
+        self.assertEqual(
+            [c.id for c in calls],
+            ["toolu_1", "toolu_2"],
+            "a turn present in both records was counted twice",
+        )
+
+    def test_genuinely_different_turns_are_both_kept(self) -> None:
+        # The other direction: the transcript is the more complete record, and
+        # collapsing distinct turns would hide calls rather than duplicate them.
+        calls = list(engine_routing._tool_calls(self._sample(same_call_ids=False)))
+        self.assertEqual(
+            [c.id for c in calls], ["toolu_1", "toolu_2", "toolu_3", "toolu_4"]
+        )
+
+    def test_a_differing_message_id_does_not_defeat_the_dedup(self) -> None:
+        # The regression itself, stated directly.
+        sample = self._sample(same_call_ids=True)
+        self.assertNotEqual(
+            sample.messages[0].id,
+            sample.events[0].output.message.id,
+            "the fixture no longer reproduces the bridge's behaviour",
+        )
+        self.assertEqual(len(list(engine_routing._tool_calls(sample))), 2)
+
+    def test_turns_that_called_nothing_still_count_as_speech(self) -> None:
+        # `_spoke` rests on these, and they have no call ids to key on.
+        quiet = _FakeMessage("only-text", [])
+        sample = _FakeSample(messages=[quiet], events=[])
+        self.assertEqual(len(list(engine_routing._assistant_messages(sample))), 1)
+
+
+class TestTheHostLegStopsAtTheDecision(unittest.TestCase):
+    """The host leg used to answer the question and then do the whole job.
+
+    It has no approver -- its CLI is a subprocess, so nothing intercepts a tool
+    call before it runs -- and it awaited that subprocess to completion. So a
+    case activated the right skill on its first call and then went on to
+    download trace files, run the analysis and write reports, none of which any
+    scorer read. Measured over one 67-case room: 152 of its 220 tool calls came
+    after the decision.
+
+    The rule here is the legacy engine's, applied to the CLI's stream as it
+    arrives, which is the only place this leg can see a decision in time.
+    """
+
+    def _rule(self, room=("alpha", "beta"), tools=4, inspections=4):
+        return engine_routing.host_stop_when_factory(list(room), tools, inspections)()
+
+    def test_an_activation_stops_the_run(self) -> None:
+        reason = self._rule()(_activation_event("alpha"))
+        self.assertIsNotNone(reason)
+        self.assertIn("alpha", reason)
+
+    def test_the_named_skill_survives_into_the_reason(self) -> None:
+        # The mapper reads the activation back off this string, so a reason
+        # that stops the run without naming what fired loses the verdict.
+        reason = self._rule()(_activation_event("beta"))
+        self.assertEqual(
+            engine_routing.activation_from_limit(reason, ["alpha", "beta"]), "beta"
+        )
+
+    def test_ordinary_work_does_not_stop_the_run(self) -> None:
+        self.assertIsNone(self._rule()(_work_event(1)))
+
+    def test_the_budget_stops_an_agent_that_never_chooses(self) -> None:
+        rule = self._rule(tools=2)
+        reasons = [rule(_work_event(n)) for n in range(6)]
+        self.assertTrue(
+            any(r and engine_routing.BUDGET_MARK in r for r in reasons),
+            f"budget never tripped: {reasons}",
+        )
+
+    def test_the_cli_finishing_ends_the_read(self) -> None:
+        # Not a stop we imposed, but the loop must not wait on a dead stream.
+        self.assertEqual(
+            self._rule()({"type": "result", "result": "done"}),
+            engine_no_sandbox.STOP_RESULT,
+        )
+
+    def test_each_case_gets_its_own_budget(self) -> None:
+        # The bug this guards against has been shipped here once already, in
+        # the approver: a counter built with the solver rather than per sample
+        # creeps up across the room until it terminates every later case
+        # mid-deliberation. Two independent rules from one factory must not
+        # share a tally.
+        factory = engine_routing.host_stop_when_factory(["alpha"], 2, 2)
+        first = factory()
+        for n in range(6):
+            first(_work_event(n))
+        second = factory()
+        self.assertIsNone(
+            second(_work_event(99)),
+            "a fresh case inherited the previous case's spent budget",
+        )
+
+
+class TestTheHostLegActuallyKillsTheProcess(unittest.IsolatedAsyncioTestCase):
+    """Deciding to stop is not stopping; the CLI has to actually die.
+
+    Worth an end-to-end check rather than a unit test of the rule, because the
+    failure mode is silent: a stop that breaks the read loop but leaves the
+    process running still pays for every call it goes on to make, and the
+    events simply stop being recorded. The run looks cheaper and is not.
+    """
+
+    async def _run(self, script: str, stop_after: int):
+        seen = {"n": 0}
+
+        def stop_when(event: dict) -> str | None:
+            seen["n"] += 1
+            return "stop" if seen["n"] >= stop_after else None
+
+        return await engine_no_sandbox._stream_until(
+            [sys.executable, "-u", "-c", script],
+            "prompt",
+            tempfile.gettempdir(),
+            dict(os.environ),
+            stop_when,
+        )
+
+    async def test_reading_stops_where_the_rule_says(self) -> None:
+        script = (
+            "import json,sys\n"
+            "for i in range(20):\n"
+            "    print(json.dumps({'type':'assistant','i':i}), flush=True)\n"
+        )
+        events, reason, _, _ = await self._run(script, stop_after=3)
+        self.assertEqual(reason, "stop")
+        self.assertEqual(len(events), 3)
+
+    async def test_the_work_after_the_decision_never_happens(self) -> None:
+        # The direct evidence: the child tries to leave a mark behind after the
+        # point we stop it. If the process outlived the stop, the mark is there.
+        #
+        # The wait afterwards is the whole test. Without it this passes even
+        # with the kill removed, because asyncio reaps surviving children when
+        # the loop closes -- which in a real run does not happen until the eval
+        # is over, long after the orphan has spent the budget. So the check has
+        # to happen while the loop is still up, exactly as it is mid-eval.
+        with tempfile.TemporaryDirectory() as tmp:
+            mark = Path(tmp) / "kept-working"
+            script = (
+                "import json,sys,time\n"
+                "print(json.dumps({'type':'assistant','i':0}), flush=True)\n"
+                "time.sleep(1.5)\n"
+                f"open({str(mark)!r},'w').write('x')\n"
+            )
+            started = time.perf_counter()
+            await self._run(script, stop_after=1)
+            elapsed = time.perf_counter() - started
+
+            self.assertLess(
+                elapsed, 1.4, "the stop waited for the process instead of killing it"
+            )
+            await asyncio.sleep(3.0)
+            self.assertFalse(
+                mark.exists(), "the CLI outlived the stop and kept working"
+            )
+
+    async def test_a_stream_that_ends_on_its_own_is_not_an_error(self) -> None:
+        script = "import json\nprint(json.dumps({'type':'result','result':'ok'}))\n"
+        events, reason, _, _ = await self._run(script, stop_after=99)
+        self.assertEqual(len(events), 1)
+        self.assertIsNone(reason)
+
+
+class TestCasesDecidedByTheBudgetAreFlagged(unittest.TestCase):
+    """A case that stopped on its cap measured the cap, not the agent.
+
+    Two runs of one engine disagreed on six cases where the noise floor was
+    one, and the explanation was that 26 of 67 cases sat within a single call
+    of a budget. Those are coin-flips: one more call either way moves them
+    across the line and takes the verdict with them. They look identical to
+    cases decided on their merits, which is what made the disagreement
+    unreadable.
+
+    Reported rather than corrected. The budget is doing its job; the reader
+    just has to know how much of the run it decided.
+    """
+
+    def outcome(self, tool_calls=0, inspection_calls=0):
+        return routing.Outcome(
+            id="a", category="c", skill="s", prompt="p", expect=None, observed=None,
+            verdict="true_negative", passed=True, stop_reason="result",
+            elapsed_s=0.0, tool_calls=tool_calls, inspection_calls=inspection_calls,
+        )
+
+    CAPS = {"max_tool_calls": 4, "max_inspection_calls": 8}
+
+    def test_a_case_that_stopped_on_the_cap_is_flagged(self) -> None:
+        self.assertTrue(routing.near_a_limit(self.outcome(tool_calls=4), self.CAPS))
+
+    def test_a_case_one_below_the_cap_is_flagged(self) -> None:
+        # One call is the resolution the threshold has.
+        self.assertTrue(routing.near_a_limit(self.outcome(tool_calls=3), self.CAPS))
+
+    def test_a_case_well_clear_of_the_cap_is_not(self) -> None:
+        self.assertFalse(routing.near_a_limit(self.outcome(tool_calls=1), self.CAPS))
+
+    def test_the_inspection_budget_counts_too(self) -> None:
+        self.assertTrue(routing.near_a_limit(self.outcome(inspection_calls=8), self.CAPS))
+
+    def test_a_cap_the_run_never_set_is_not_a_threshold(self) -> None:
+        # A leg that cannot enforce a budget reports none, and nothing should
+        # invent one for it.
+        self.assertFalse(routing.near_a_limit(self.outcome(tool_calls=99), {}))
+        self.assertFalse(
+            routing.near_a_limit(self.outcome(tool_calls=99), {"max_tool_calls": 0})
+        )
+
+    def test_the_totals_carry_the_count(self) -> None:
+        outs = [self.outcome(tool_calls=4), self.outcome(tool_calls=0)]
+        totals = routing.summarize(outs, ["s"], {"skills": ["s"], **self.CAPS})["totals"]
+        self.assertEqual(totals["near_limit"], 1)
+
+    def test_the_report_warns_before_the_reader_sees_the_score(self) -> None:
+        summary = routing.summarize(
+            [self.outcome(tool_calls=4)],
+            ["s"],
+            {"skills": ["s"], "model": "m", "effort": "e", **self.CAPS},
+        )
+        report = routing.render_markdown(summary)
+        self.assertIn("within one call of a budget", report)
+        self.assertLess(report.index("within one call"), report.index("| Verdict |"))
+
+
+class TestProviderFailuresAreMarked(unittest.TestCase):
+    """A gateway error is not a routing result, and must not read as one.
+
+    A 504 lands in a report as a lower score with nothing in the verdict
+    saying why, so a reader cannot tell it from the skill failing. At the rate
+    observed on one catalogue -- roughly a third of runs -- that makes an
+    unmarked provider error the most likely reason two runs of the same engine
+    disagree, which has to be ruled out before a difference between engines
+    means anything.
+
+    Matching is deliberately generous: a false positive makes a reader look
+    twice at a run that was fine, a false negative lets an outage score as a
+    routing miss. The costs are not symmetric.
+    """
+
+    def test_the_shapes_actually_observed_are_recognised(self) -> None:
+        for message in (
+            "API Error: 504 Exception trying to (AnthropicVertex) Chat Completions",
+            "API preflight timed out after 60s (is the network reachable?)",
+            "APIConnectionError: Connection error.",
+            "429 rate limit exceeded",
+            "502 Bad Gateway",
+            "upstream connect error",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(routing.is_provider_error(message))
+
+    def test_a_real_skill_failure_is_not_marked(self) -> None:
+        for message in (
+            "the skill produced no plan.md",
+            "run ended without a routing decision (stopped after: tool_budget)",
+            None,
+            "",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(routing.is_provider_error(message))
+
+    def test_routing_totals_report_how_many_were_degraded(self) -> None:
+        # Beside the score, because it decides whether the score can be read.
+        outcomes = [
+            routing.Outcome(
+                id=str(i), category="c", skill="s", prompt="p", expect=None,
+                observed=None, verdict="error", passed=False, stop_reason="result",
+                elapsed_s=0.0, tool_calls=0, error=err,
+                degraded=routing.is_provider_error(err),
+            )
+            for i, err in enumerate(["API Error: 504 upstream", "the skill did nothing"])
+        ]
+        totals = routing.summarize(outcomes, ["s"], {"skills": ["s"]})["totals"]
+        self.assertEqual(totals["errors"], 2)
+        self.assertEqual(totals["degraded"], 1)
+
+    def test_behavioral_totals_report_it_too(self) -> None:
+        # Same vocabulary on both commands, or a degraded behavioral run reads
+        # as a failing skill.
+        outcomes = [
+            behavior.BehaviorOutcome(
+                id="a", skill="s", prompt="p", passed=False, elapsed_s=0.0,
+                error="API Error: 504", degraded=True,
+            )
+        ]
+        totals = behavior.summarize(outcomes, {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["degraded"], 1)
+
+    def test_the_report_warns_before_the_reader_sees_the_score(self) -> None:
+        # Underneath the table is too late: a reader has already formed a view.
+        outcomes = [
+            routing.Outcome(
+                id="a", category="c", skill="s", prompt="p", expect=None,
+                observed=None, verdict="error", passed=False, stop_reason="result",
+                elapsed_s=0.0, tool_calls=0, error="API Error: 504", degraded=True,
+            )
+        ]
+        summary = routing.summarize(
+            outcomes, ["s"], {"skills": ["s"], "model": "m", "effort": "e"}
+        )
+        report = routing.render_markdown(summary)
+        self.assertIn("failed at the model provider", report)
+        self.assertLess(report.index("model provider"), report.index("| Verdict |"))
+
+
+class TestRoutingStopsAtTheDecision(unittest.TestCase):
+    """The sandboxed leg stops when the decision is made, as legacy does.
+
+    Legacy reads the CLI's stream and kills the process the moment a skill
+    activates, because everything after that is work the routing question does
+    not ask for and does pay for. The rule here runs earlier: it sees each tool
+    call the bridged CLI *proposes*, so the case stops without the work
+    happening at all.
+
+    The skill's name goes into the reason on purpose. Approval runs before the
+    bridge adopts the assistant message, so the tool call that revealed the
+    decision may be absent from the transcript afterwards -- and a suppressed
+    activation reads exactly like an agent that correctly declined to route.
+
+    Exercised through `routing_decision`, which is pure, rather than through
+    the approver that wraps it: the unit suite runs without the inspect extra
+    on purpose, and a rule that can only be tested with it would not be tested
+    at all in CI.
+    """
+
+    ROOM = ["alpha", "beta", "gamma"]
+
+    def decide(self, function, arguments, tally=None, tools=None, inspections=None):
+        return engine_routing.routing_decision(
+            function, arguments, self.ROOM,
+            tally or engine_routing._Tally(), tools, inspections,
+        )
+
+    def test_activating_a_skill_stops_the_case(self) -> None:
+        decision, _ = self.decide("Skill", {"command": "alpha"})
+        self.assertEqual(decision, "terminate")
+
+    def test_the_skill_that_fired_survives_in_the_reason(self) -> None:
+        # The half that cannot go missing when the message does.
+        _, reason = self.decide("Skill", {"command": "alpha"})
+        self.assertEqual(
+            engine_routing.activation_from_limit(reason, self.ROOM), "alpha"
+        )
+
+    def test_a_skill_nobody_installed_is_still_a_decision(self) -> None:
+        # A contaminated room is a routing result, not a non-event: the run
+        # has to be able to say a stranger fired.
+        decision, reason = self.decide("Skill", {"command": "dataviz"})
+        self.assertEqual(decision, "terminate")
+        self.assertEqual(
+            engine_routing.activation_from_limit(reason, self.ROOM), "other:dataviz"
+        )
+
+    def test_ordinary_work_is_allowed_through(self) -> None:
+        self.assertEqual(self.decide("Bash", {"command": "ls"})[0], "approve")
+
+    def test_a_skills_survey_spends_the_inspection_budget_not_the_work_one(self) -> None:
+        # Legacy's rule, and it matters: counting a survey against the work
+        # budget too ends a run mid-deliberation and scores it as a missed
+        # trigger. Observed doing exactly that on a real sandboxed run.
+        tally = engine_routing._Tally()
+        self.decide("Read", {"file_path": "/w/.claude/skills/alpha/SKILL.md"}, tally, 4, 8)
+        self.assertEqual((tally.tools, tally.inspections), (0, 1))
+
+    def test_unrelated_work_spends_the_work_budget(self) -> None:
+        tally = engine_routing._Tally()
+        self.decide("Bash", {"command": "pip install torch"}, tally, 4, 8)
+        self.assertEqual((tally.tools, tally.inspections), (1, 0))
+
+    def test_bookkeeping_spends_neither(self) -> None:
+        tally = engine_routing._Tally()
+        for name in sorted(routing.BOOKKEEPING_TOOLS):
+            self.decide(name, {}, tally, 4, 8)
+        self.assertEqual((tally.tools, tally.inspections), (0, 0))
+
+    def test_the_budget_is_counted_per_case_not_per_run(self) -> None:
+        # An approver is built once per task. A counter captured there counts
+        # every case in the run, creeping up until it crosses the budget and
+        # then terminating any case that makes a counted call before choosing.
+        # Seen as four cases terminated at tallies of 10, 11, 12 and 13 --
+        # consecutive across different prompts.
+        self.assertIn("store()", inspect.getsource(engine_routing.routing_approver))
+        self.assertNotIn(
+            "tally = _Tally()\n\n    @approver",
+            inspect.getsource(engine_routing.routing_approver),
+        )
+
+    def test_the_tool_call_budget_stops_a_case_that_is_rummaging(self) -> None:
+        tally = engine_routing._Tally()
+        decisions = [
+            self.decide("Bash", {"command": f"ls {i}"}, tally, tools=2)[0]
+            for i in range(4)
+        ]
+        self.assertEqual(decisions, ["approve", "approve", "terminate", "terminate"])
+
+    def test_bookkeeping_calls_do_not_count_against_the_budget(self) -> None:
+        # Same rule as legacy: the budget is about work, not housekeeping.
+        tally = engine_routing._Tally()
+        for name in sorted(routing.BOOKKEEPING_TOOLS):
+            self.decide(name, {}, tally, tools=1)
+        self.assertEqual(tally.tools, 0)
+
+    def test_a_limit_reason_from_elsewhere_is_not_read_as_an_activation(self) -> None:
+        self.assertIsNone(
+            engine_routing.activation_from_limit("operator cancelled", self.ROOM)
+        )
+
+    def test_a_named_skill_outside_the_room_is_not_read_as_an_activation(self) -> None:
+        # The room is the authority. Otherwise a stray string becomes a verdict.
+        forged = engine_routing.ACTIVATION_MARK + "delta"
+        self.assertIsNone(engine_routing.activation_from_limit(forged, self.ROOM))
+
+    def test_the_approver_delegates_to_the_rule_rather_than_repeating_it(self) -> None:
+        self.assertIn(
+            "routing_decision(", inspect.getsource(engine_routing.routing_approver)
+        )
+
+    def test_the_host_leg_gets_no_approver(self) -> None:
+        # Its CLI buffers until exit, so there is nothing to approve in time;
+        # attaching one would suggest a bound that does not exist.
+        self.assertIn(
+            "if engine == CLAUDE_CODE", inspect.getsource(engine_routing.build_task)
+        )
+
+
+class TestRoutingCaseTimeoutBinds(unittest.TestCase):
+    """`--case-timeout` has to reach the new legs, or it is a cap in name only.
+
+    The flag exists so one hung prompt cannot spend the whole run -- `deadline`
+    says so in its own docstring. The inspect legs originally bounded a sample
+    only by the command's remaining budget, which is precisely the thing the
+    flag guards against, while the report recorded `case_timeout` as though it
+    had applied. A cap that is reported and not enforced is worse than none.
+    """
+
+    def tearDown(self) -> None:
+        deadline.use(None)
+
+    def test_the_flag_is_the_bound_when_the_command_has_room(self) -> None:
+        deadline.use(deadline.Deadline(3000.0, command="routing"))
+        self.assertEqual(engine_routing.case_time_limit(90), 90)
+
+    def test_the_command_deadline_clips_a_longer_case_cap(self) -> None:
+        # The command deadline ends the process outright, taking the report
+        # with it, so a per-case cap must not outlive it.
+        deadline.use(deadline.Deadline(200.0, command="routing"))
+        self.assertLess(engine_routing.case_time_limit(9999), 200)
+
+    def test_no_case_cap_falls_back_to_the_command_budget(self) -> None:
+        deadline.use(deadline.Deadline(3000.0, command="routing"))
+        self.assertEqual(
+            engine_routing.case_time_limit(None),
+            engine_behavioral.task_time_limit(deadline.active()),
+        )
+
+    def test_an_unbounded_command_still_honours_the_case_cap(self) -> None:
+        deadline.use(None)
+        self.assertEqual(engine_routing.case_time_limit(45), 45)
+
+    def test_the_cli_hands_the_flag_to_the_leg(self) -> None:
+        # Asserted on the source: the failure mode is the argument silently
+        # not being passed, which no unit of the leg can notice.
+        self.assertIn("case_timeout=args.case_timeout", inspect.getsource(cli.cmd_routing))
+
+
+class TestRoutingRoomIsTheRoomThatWasAskedFor(unittest.TestCase):
+    """The host routing leg isolates the config dir, or it does not run.
+
+    The legacy engine warns and carries on, because it reads the CLI's `init`
+    event and can name a user-level skill that gate-crashed the room. Neither
+    inspect leg gets that event, so the same contamination would be invisible
+    -- and a stray skill is offered for every prompt, so it changes every
+    decision at once while the run still reports a clean accuracy.
+
+    Observed rather than feared: a probe of this leg on a developer machine put
+    roughly forty user-level skills in the room and none of the three staged.
+    """
+
+    def setUp(self) -> None:
+        self.addCleanup(os.environ.pop, "ANTHROPIC_API_KEY", None)
+
+    def test_the_host_leg_refuses_without_the_credential_that_isolates_it(self) -> None:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        with self.assertRaises(SystemExit) as caught:
+            engine_routing.require_isolated_room("claude-code-no-sandbox")
+        message = str(caught.exception)
+        self.assertIn("ANTHROPIC_API_KEY", message)
+        self.assertIn("--engine claude-code", message)
+
+    def test_the_host_leg_runs_when_it_can_isolate(self) -> None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        self.assertIsNone(engine_routing.require_isolated_room("claude-code-no-sandbox"))
+
+    def test_the_sandboxed_leg_needs_no_credential_to_have_a_clean_room(self) -> None:
+        # The guest has no `~/.claude` to keep out, which is the whole reason
+        # this leg is the one to prefer for routing.
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        self.assertIsNone(engine_routing.require_isolated_room("claude-code"))
+
+    def test_the_host_solver_can_be_pointed_at_a_config_dir(self) -> None:
+        # Without this parameter the leg reads the runner's own config dir and
+        # nothing downstream can tell.
+        self.assertIn(
+            "config_dir", inspect.signature(engine_no_sandbox.claude_code_no_sandbox).parameters
+        )
+
+
+class TestRoutingReportsWhereItRan(unittest.TestCase):
+    """Each leg states what contained it; none may overstate it.
+
+    Deriving this from the engine's name is what let a run that started no
+    container report `sandbox: docker, sandbox_isolated: true`. Hardcoding
+    `host` was right only while no routing leg had a sandbox. Now one does, so
+    the value is passed in by the leg that knows.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate()
+        self.written: dict = {}
+        patch = mock.patch.object(
+            cli, "_write_report", lambda summary, *a, **k: self.written.update(summary)
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def meta(self, engine: str, **containment) -> dict:
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", engine, "--skip-preflight"]
+        )
+        cli._finish_routing(
+            args, [], {"alpha": None}, time.time(), isolated=True, **containment
+        )
+        return self.written["meta"]
+
+    def test_a_host_leg_says_host(self) -> None:
+        meta = self.meta(
+            "claude-code-no-sandbox", sandbox="host", sandbox_isolated=False
+        )
+        self.assertEqual(meta["sandbox"], "host")
+        self.assertIs(meta["sandbox_isolated"], False)
+
+    def test_the_sandboxed_leg_names_the_provider_it_used(self) -> None:
+        meta = self.meta("claude-code", sandbox="docker", sandbox_isolated=True)
+        self.assertEqual(meta["sandbox"], "docker")
+        self.assertIs(meta["sandbox_isolated"], True)
+
+    def test_a_leg_that_does_not_say_what_contained_it_cannot_report(self) -> None:
+        # Required keywords, so a leg added later fails at the call site
+        # instead of quietly reporting a containment it never had.
+        args = cli.build_parser().parse_args(["routing", "--skip-preflight"])
+        with self.assertRaises(TypeError):
+            cli._finish_routing(args, [], {"alpha": None}, time.time(), isolated=True)
+
+    def test_a_legs_own_meta_cannot_overwrite_what_contained_it(self) -> None:
+        meta = self.meta(
+            "claude-code-no-sandbox", sandbox="host", sandbox_isolated=False,
+        )
+        self.assertEqual(meta["sandbox"], "host")
+
+    def test_the_report_does_not_ask_the_provider_what_contained_a_run(self) -> None:
+        # The defect in one line: `_sandbox_meta` returns `provider()`, which
+        # examines nothing and returns the default string.
+        self.assertNotIn("_sandbox_meta", inspect.getsource(cli._finish_routing))
+
+
+class TestClaudeCliPreflightChecksBothCredentials(unittest.TestCase):
+    """`claude-code-no-sandbox` uses two, so probing one proves nothing about the other.
+
+    The real CLI is the agent and the inspect provider grades it, so a run dies
+    on whichever is missing. The preflight tested the provider alone -- and for
+    routing, which uses neither, it tested the provider and demanded the
+    inspect extra for a leg that runs no inspect code.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate()
+        self.probed: list[str] = []
+
+    def args(self, engine: str) -> argparse.Namespace:
+        return cli.build_parser().parse_args(
+            ["behavioral", "--engine", engine, "--model", "opus"]
+        )
+
+    def run_preflight(self, engine: str, cli_ok: bool = True) -> list[str]:
+        patches = [
+            mock.patch.object(cli.engine, "require", lambda *a, **k: None),
+            mock.patch.object(
+                cli, "check_api_reachable",
+                lambda *a, **k: (self.probed.append("cli"), (cli_ok, "ok"))[1],
+            ),
+        ]
+        probe = mock.patch(
+            "skillscope.engine.models.check_reachable",
+            lambda *a, **k: (self.probed.append("provider"), (True, "ok"))[1],
+        )
+        for patch in [*patches, probe]:
+            patch.start()
+            self.addCleanup(patch.stop)
+        cli._prepare_graded_run(self.args(engine))
+        return self.probed
+
+    def test_it_probes_the_cli_as_well_as_the_provider(self) -> None:
+        self.assertEqual(sorted(self.run_preflight("claude-code-no-sandbox")), ["cli", "provider"])
+
+    def test_a_sandboxed_engine_probes_only_the_provider(self) -> None:
+        # `claude-code` reaches the CLI inside the container through inspect's
+        # own bridge, so the host's CLI credential is not what it uses.
+        self.assertEqual(self.run_preflight("claude-code"), ["provider"])
+
+    def test_an_unreachable_cli_stops_the_run(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.run_preflight("claude-code-no-sandbox", cli_ok=False)
+        self.assertIn("claude API not reachable", str(caught.exception))
+
+
+class TestTheModelProbeIsBounded(unittest.TestCase):
+    """The preflight must not become the hang it exists to prevent.
+
+    Pointed at a closed port it was still running after four minutes: inspect's
+    `GenerateConfig.max_retries` defaults to `None`, which retries a connection
+    error without a limit, and nothing clipped the call to `--timeout`. The
+    legacy probe has had both guards from the start, and says why in its own
+    docstring.
+    """
+
+    def tearDown(self) -> None:
+        deadline.use(None)
+
+    def test_retries_are_off(self) -> None:
+        self.assertEqual(engine_models.PROBE_RETRIES, 0)
+
+    def test_the_probe_asks_for_that_and_a_per_attempt_timeout(self) -> None:
+        source = inspect.getsource(engine_models._probe)
+        self.assertIn("max_retries=PROBE_RETRIES", source)
+        self.assertIn("timeout=", source)
+        # Belt and braces: neither of the above covers a connect that stalls
+        # before the provider's own clock starts.
+        self.assertIn("fail_after", source)
+
+    def test_the_probe_config_is_not_memoized_into_the_graded_run(self) -> None:
+        # Retries off is right for a one-shot check and wrong for the run it
+        # precedes, and inspect memoizes models by default.
+        self.assertIn("memoize=False", inspect.getsource(engine_models._probe))
+
+    def test_an_unbounded_command_gets_the_default(self) -> None:
+        deadline.use(None)
+        self.assertEqual(
+            engine_models.probe_bound(), (engine_models.PROBE_TIMEOUT_S, "")
+        )
+
+    def test_a_tighter_command_timeout_wins(self) -> None:
+        deadline.use(deadline.Deadline(5.0, command="behavioral"))
+        seconds, _ = engine_models.probe_bound()
+        self.assertLessEqual(seconds, 5.0)
+
+    def test_a_looser_command_timeout_does_not_extend_it(self) -> None:
+        deadline.use(deadline.Deadline(10_000.0, command="behavioral"))
+        seconds, _ = engine_models.probe_bound()
+        self.assertEqual(seconds, engine_models.PROBE_TIMEOUT_S)
+
+    def test_an_expired_command_probes_nothing_at_all(self) -> None:
+        deadline.use(deadline.Deadline(0.0, command="behavioral"))
+        seconds, why = engine_models.probe_bound()
+        self.assertIsNone(seconds)
+        self.assertIn("--timeout", why)
+
+    def test_an_expired_command_is_reported_rather_than_dialled(self) -> None:
+        deadline.use(deadline.Deadline(0.0, command="behavioral"))
+        ok, detail = engine_models.check_reachable("anthropic/claude-x")
+        self.assertFalse(ok)
+        self.assertIn("--timeout", detail)
+
+    def test_mockllm_still_costs_nothing(self) -> None:
+        self.assertEqual(
+            engine_models.check_reachable("mockllm/model"),
+            (True, "mockllm (no provider)"),
+        )
+
+
+class TestTheProbeSaysWhatWentWrong(unittest.TestCase):
+    """A preflight whose message is unreadable has not done its job.
+
+    Turning retries off makes tenacity raise `RetryError`, whose string form is
+    `RetryError[<Future at 0x7f...>]` -- it names neither the host nor the
+    failure. The point of probing early is a message on the first line.
+    """
+
+    class Future:
+        def __init__(self, error: BaseException | None) -> None:
+            self.error = error
+
+        def exception(self) -> BaseException | None:
+            return self.error
+
+    def wrapper(self, error: BaseException | None) -> Exception:
+        wrapped = RuntimeError("RetryError[<Future at 0x0>]")
+        wrapped.last_attempt = self.Future(error)
+        return wrapped
+
+    def test_the_wrapped_error_is_what_gets_reported(self) -> None:
+        cause = ConnectionError("Connection error.")
+        self.assertIs(engine_models._underlying(self.wrapper(cause)), cause)
+
+    def test_a_plain_error_is_left_alone(self) -> None:
+        plain = ValueError("401 unauthorized")
+        self.assertIs(engine_models._underlying(plain), plain)
+
+    def test_an_empty_wrapper_falls_back_to_itself(self) -> None:
+        empty = self.wrapper(None)
+        self.assertIs(engine_models._underlying(empty), empty)
+
+    def test_unwrapping_never_raises_on_its_own(self) -> None:
+        # This runs on the failure path. An exception here would replace a
+        # useful message with a traceback from the reporting code.
+        class Exploding:
+            def exception(self):
+                raise RuntimeError("boom")
+
+        hostile = RuntimeError("wrapped")
+        hostile.last_attempt = Exploding()
+        self.assertIs(engine_models._underlying(hostile), hostile)
+
+
+class TestTheShippedSandboxExample(unittest.TestCase):
+    """The worked example has to keep working.
+
+    `sandbox:` was documented with no example of what the file it names looks
+    like, which left the one thing a reader actually needs -- a device bound in
+    and egress granted -- as an exercise. An example that drifts from the
+    schema, or from what inspect requires of a compose file, is worse than
+    none, so it is checked here rather than trusted.
+    """
+
+    EXAMPLE = REPO_ROOT / "examples" / "skill-with-a-device" / "evals"
+
+    def setUp(self) -> None:
+        import yaml
+
+        self.machine = yaml.safe_load(
+            (self.EXAMPLE / "machine.yml").read_text(encoding="utf-8")
+        )
+        self.compose = yaml.safe_load(
+            (self.EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+        )
+
+    def test_the_machine_file_uses_only_keys_the_parser_knows(self) -> None:
+        self.assertEqual(set(self.machine) - datasets.MACHINE_KEYS, set())
+
+    def test_it_names_the_compose_file_that_sits_beside_it(self) -> None:
+        # Resolved beside machine.yml, not at the skill root. An example that
+        # got this wrong would teach the one mistake the layout invites.
+        self.assertTrue((self.EXAMPLE / self.machine["sandbox"]).is_file())
+
+    def test_the_compose_file_offers_a_service_inspect_will_use(self) -> None:
+        services = self.compose["services"]
+        default = "default" in services or any(
+            spec.get("x-default") for spec in services.values()
+        )
+        self.assertTrue(default, f"no default service among {sorted(services)}")
+
+    def test_the_container_is_told_to_stay_up(self) -> None:
+        # inspect execs into a container that is already running. One that
+        # exits on start fails every case on a sandbox that is not there.
+        self.assertIn("command", self.compose["services"]["default"])
+
+    def test_it_demonstrates_the_two_things_the_default_withholds(self) -> None:
+        default = self.compose["services"]["default"]
+        self.assertIn("devices", default)
+        # Egress is granted by *not* setting this, which is worth asserting:
+        # an example that carried it would grant nothing and say it did.
+        self.assertNotIn("network_mode", default)
+
+
+class TestModelCallsAreCountedOnce(unittest.TestCase):
+    """The default engine counted every model reply twice.
+
+    `no_sandbox` records each `assistant` stream event through
+    `usage.record_stream_event`, and those same events then become the
+    sample's assistant messages, which `engine.stats.record_log` counts again.
+    `claude-code` has no stream to read and so was only ever counted once.
+
+    The two sit in neighbouring columns of `tools/benchmark_engines.py`, where
+    the whole point is that the numbers mean the same thing. A host leg
+    reporting 2x the calls for identical work does not read as a bug, it reads
+    as the sandbox being cheaper.
+    """
+
+    def setUp(self) -> None:
+        usage.reset()
+        self.addCleanup(usage.reset)
+
+    @staticmethod
+    def _assistant(tokens: int) -> dict:
+        return {
+            "type": "assistant",
+            "message": {"usage": {"input_tokens": tokens, "output_tokens": tokens}},
+        }
+
+    def test_a_stream_event_adds_tokens_but_not_a_call(self) -> None:
+        usage.record_stream_event(self._assistant(5))
+        usage.record_stream_event(self._assistant(5))
+        snapshot = usage.snapshot()
+        self.assertEqual(snapshot.input_tokens, 10, "tokens must still be recorded")
+        self.assertEqual(
+            snapshot.calls, 0, "the stream must not also count calls -- stats does"
+        )
+
+    def test_the_log_is_the_only_thing_that_counts_calls(self) -> None:
+        # Two assistant events, which become two assistant messages. One run,
+        # counted by both paths the way a real host-leg case is: the answer
+        # has to be 2, not 4.
+        for _ in range(2):
+            usage.record_stream_event(self._assistant(1))
+        engine_stats.record_log(_UsageLog(assistant_messages=2))
+        self.assertEqual(usage.snapshot().calls, 2)
+
+    def test_the_result_event_still_carries_the_cost(self) -> None:
+        # The one thing only the stream knows: `total_cost_usd` arrives on the
+        # result event and nowhere else.
+        usage.record_stream_event({"type": "result", "total_cost_usd": 0.25})
+        self.assertAlmostEqual(usage.snapshot().cost_usd, 0.25)
+
+
+class _UsageMessage:
+    def __init__(self, role: str) -> None:
+        self.role = role
+
+
+class _UsageSample:
+    def __init__(self, assistant_messages: int = 0, store: dict | None = None) -> None:
+        self.messages = [_UsageMessage("assistant") for _ in range(assistant_messages)]
+        self.store = store or {}
+
+
+class _UsageLog:
+    def __init__(self, assistant_messages: int = 0) -> None:
+        self.stats = None
+        self.samples = [_UsageSample(assistant_messages)]
+
+
+class TestTheDefaultEngineReportsTheCapsItEnforces(unittest.TestCase):
+    """`near_limit` was structurally zero on the engine that is the default.
+
+    `cli.cmd_routing` recorded `max_tool_calls` / `max_inspection_calls` into
+    the report's `meta` only for `claude-code`. `routing.near_a_limit` reads
+    those two keys and treats a missing one as "no cap was set", so the host
+    leg reported `near_limit: 0` for every run -- including cases that stopped
+    *on* the cap, which is precisely what the column exists to flag.
+
+    The host leg does enforce them: `host_stop_when_factory` applies the same
+    rule as the sandboxed leg's approver, one call later, against the CLI's
+    stream.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        self.repo.activate(routing_room="alpha")
+        self.captured: dict = {}
+
+        def capture(args, outcomes, routing_set, started, **kwargs):
+            self.captured = kwargs.get("extra") or {}
+            return 0
+
+        for target, replacement in (
+            ("skillscope.engine.routing.run", lambda *a, **k: []),
+            ("skillscope.cli._finish_routing", capture),
+        ):
+            patch = mock.patch(target, replacement)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _meta_for(self, engine: str, extra_argv: list[str] | None = None) -> dict:
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", engine, "--skip-preflight", "--model", "mockllm/model"]
+            + (extra_argv or [])
+        )
+        cli.cmd_routing(args)
+        return self.captured
+
+    def test_the_host_leg_records_its_tool_call_cap(self) -> None:
+        meta = self._meta_for("claude-code-no-sandbox", ["--max-tool-calls", "4"])
+        self.assertEqual(meta.get("max_tool_calls"), 4)
+
+    def test_the_host_leg_records_its_inspection_cap(self) -> None:
+        meta = self._meta_for("claude-code-no-sandbox", ["--max-inspection-calls", "8"])
+        self.assertEqual(meta.get("max_inspection_calls"), 8)
+
+    def test_near_a_limit_can_now_fire_on_the_host_leg(self) -> None:
+        # The end-to-end point: with the caps in `meta`, a case that stopped
+        # one call short of one is counted. With the old `meta` this outcome
+        # scored zero however close it ran.
+        meta = self._meta_for("claude-code-no-sandbox", ["--max-tool-calls", "4"])
+        outcome = routing.Outcome(
+            id="c", category="k", skill="alpha", prompt="p", expect="alpha",
+            observed="alpha", verdict="correct_trigger", passed=True,
+            stop_reason="skill_activated", elapsed_s=1.0, tool_calls=4,
+        )
+        self.assertTrue(routing.near_a_limit(outcome, meta))
+
+    def test_the_sandboxed_leg_still_reports_its_scaled_cap(self) -> None:
+        # Unchanged, and asserted so the fix cannot have flattened the two legs
+        # onto one number: the sandboxed leg is held to a scaled budget, and
+        # reporting the request would measure against a threshold nobody used.
+        meta = self._meta_for("claude-code", ["--max-tool-calls", "4"])
+        self.assertEqual(
+            meta.get("max_tool_calls"), 4 * engine_routing.SANDBOX_BUDGET_FACTOR
+        )
+
+    def test_the_reported_case_timeout_is_the_one_that_was_enforced(self) -> None:
+        # `case_time_limit` clips the request to whatever `--timeout` has left,
+        # so reporting the raw argument named a cap longer than any case was
+        # actually held to.
+        bound = deadline.Deadline(30.0, command="routing")
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        meta = self._meta_for("claude-code-no-sandbox", ["--case-timeout", "9000"])
+        self.assertLess(meta["case_timeout"], 9000)
+
+
+class TestTheSandboxedLegsBudgetIsNotSilentlyDropped(unittest.TestCase):
+    """`--max-budget-usd` reached nothing at all on `claude-code`.
+
+    The host leg passes the flag to the CLI, which enforces it.
+    `inspect_swe.claude_code()` builds its command line from a closed set and
+    accepts no passthrough, so on the sandboxed leg the value was taken,
+    carried as far as `_solver`, and dropped -- while `--help` said the CLI
+    enforced it. inspect's per-sample `cost_limit` is the equivalent.
+
+    These drive a real `eval()` rather than reading source, because the first
+    attempt at this handed the task a limit inspect could not price on the
+    reasoning that it would be inert -- and inspect refuses the run outright.
+    Only running it catches that.
+    """
+
+    # `mockllm/model` reaches no provider, so these need no credentials --
+    # and it is just as unpriced as a real model, so the validation is the
+    # same one. The suite runs without a key; using a real model here made
+    # these pass alone and fail in the suite, on the key rather than the cap.
+    MODEL = "mockllm/model"
+    PRICED = {MODEL: {"input": 5.0, "output": 25.0,
+                      "cache_read": 0.5, "cache_write": 6.25}}
+
+    def setUp(self) -> None:
+        patch = mock.patch.dict(os.environ, {}, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop(engine_pricing.PRICING_ENV, None)
+        _reset_model_pricing()
+        self.addCleanup(_reset_model_pricing)
+        self.logs = tempfile.mkdtemp(prefix="ss-costlimit-")
+
+    def _run_with(self, cost_limit):
+        """One trivial task through a real `eval()`, returning its status."""
+        from inspect_ai import Task, eval as inspect_eval
+        from inspect_ai.dataset import Sample
+        from inspect_ai.solver import solver
+
+        @solver
+        def _noop():
+            async def solve(state, generate):
+                return state
+            return solve
+
+        task = Task(name="budget-probe", dataset=[Sample(id="c1", input="hi")],
+                    solver=_noop(), cost_limit=cost_limit)
+        return inspect_eval(task, model=self.MODEL,
+                            display="none", log_dir=self.logs)
+
+    def test_an_unpriced_cost_limit_refuses_the_whole_run(self) -> None:
+        # The fact the fix rests on. If this ever stops being true, the
+        # withholding below becomes unnecessary rather than load-bearing.
+        with self.assertRaises(Exception) as caught:
+            self._run_with(0.75)
+        self.assertIn("cost data", str(caught.exception).lower())
+
+    def test_so_no_limit_is_passed_when_it_cannot_be_priced(self) -> None:
+        # The regression. This returned 0.75 and made `--engine claude-code`
+        # unstartable on its default arguments.
+        self.assertIsNone(
+            engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75)
+        )
+
+    def test_the_sandboxed_leg_runs_without_pricing(self) -> None:
+        # End to end: the limit skillscope actually produces must let a real
+        # eval start. This is the assertion that would have caught the crash.
+        limit = engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75)
+        logs = self._run_with(limit)
+        self.assertEqual(logs[0].status, "success")
+
+    def test_the_limit_is_passed_once_the_operator_prices_the_model(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        self.assertEqual(
+            engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75), 0.75
+        )
+
+    def test_and_a_priced_run_still_starts(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        limit = engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0.75)
+        self.assertEqual(limit, 0.75)
+        self.assertEqual(self._run_with(limit)[0].status, "success")
+
+    def test_the_host_leg_never_gets_one(self) -> None:
+        # It has a real cap already -- the CLI's own flag. Two limits for one
+        # budget would stop a case at half of it.
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        self.assertIsNone(
+            engine_routing.sandbox_cost_limit("claude-code-no-sandbox", self.MODEL, 0.75)
+        )
+
+    def test_a_disabled_budget_sets_no_limit(self) -> None:
+        self.assertIsNone(engine_routing.sandbox_cost_limit("claude-code", self.MODEL, 0))
+
+    def _built_cost_limit(self, engine):
+        # The task `build_task` returns, not `sandbox_cost_limit` on its own:
+        # writing `cost_limit=None` at the call site left every test above
+        # green. The solver is stubbed because `inspect_swe` is an extra and
+        # this is about the limit, not the agent.
+        from inspect_ai.solver import solver
+
+        @solver
+        def _noop():
+            async def solve(state, generate):
+                return state
+            return solve
+
+        case = datasets.Case(id="c1", skill="alpha", prompt="p",
+                             skill_should_trigger=True)
+        with mock.patch.object(engine_routing, "_solver", lambda *a, **k: _noop()):
+            task = engine_routing.build_task(
+                [case], {"alpha": Path("alpha")}, self.MODEL, "high", engine,
+                max_budget_usd=0.75,
+            )
+        return task.cost_limit
+
+    def test_the_task_carries_the_limit_once_priced(self) -> None:
+        os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+        engine_pricing.apply()
+        self.assertEqual(self._built_cost_limit(engine_routing.CLAUDE_CODE), 0.75)
+
+    def test_the_task_carries_none_when_it_cannot_be_priced(self) -> None:
+        self.assertIsNone(self._built_cost_limit(engine_routing.CLAUDE_CODE))
+
+    def test_behaviour_and_report_cannot_disagree(self) -> None:
+        # `max_budget_can_bind` and the decision to pass a limit are the same
+        # question. Asked twice, they could drift; asked once, they cannot.
+        for priced in (False, True):
+            with self.subTest(priced=priced):
+                if priced:
+                    os.environ[engine_pricing.PRICING_ENV] = json.dumps(self.PRICED)
+                    engine_pricing.apply()
+                passed = engine_routing.sandbox_cost_limit(
+                    "claude-code", self.MODEL, 0.75
+                ) is not None
+                self.assertEqual(passed, engine_models.cost_limit_binds(self.MODEL))
+
+
+class TestKeepLogsKeepsLogs(unittest.TestCase):
+    """`--keep-logs` was declared, passed by CI, and read by nothing.
+
+    Both workflows pass `--keep-logs routing-logs` and then upload that folder,
+    so a job that asked to keep its transcripts uploaded whatever
+    `.skillscope/logs` happened to hold -- and the step stayed green either
+    way, which is why it survived.
+    """
+
+    def setUp(self) -> None:
+        self.seen: dict = {}
+
+        def fake_eval(task, **kwargs):
+            self.seen = kwargs
+            return []
+
+        self.fake_eval = fake_eval
+
+    def _log_dir_for(self, log_dir: str | None) -> str:
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        engine_routing._evaluate(
+            self.fake_eval, [case], {"alpha": Path("alpha")}, "mockllm/model",
+            "high", "claude-code-no-sandbox", "mockllm/model", None,
+            log_dir=log_dir,
+        )
+        return self.seen["log_dir"]
+
+    def test_the_flag_chooses_the_transcript_directory(self) -> None:
+        self.assertEqual(self._log_dir_for("routing-logs"), "routing-logs")
+
+    def test_without_the_flag_the_default_is_unchanged(self) -> None:
+        self.assertEqual(
+            self._log_dir_for(None), str(Path(".skillscope") / "logs")
+        )
+
+    def test_the_cli_hands_the_flag_down(self) -> None:
+        self.assertIn("log_dir=args.keep_logs", inspect.getsource(cli.cmd_routing))
+
+    def test_jobs_reaches_inspect_as_max_samples(self) -> None:
+        # Behavioural. Reverting `max_samples=jobs` to `None` used to leave the
+        # whole suite green, because nothing asserted the value arriving.
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        engine_routing._evaluate(
+            self.fake_eval, [case], {"alpha": Path("alpha")}, "mockllm/model",
+            "high", "claude-code-no-sandbox", "mockllm/model", None, jobs=7,
+        )
+        self.assertEqual(self.seen.get("max_samples"), 7)
+
+    def test_no_jobs_means_inspect_decides(self) -> None:
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        engine_routing._evaluate(
+            self.fake_eval, [case], {"alpha": Path("alpha")}, "mockllm/model",
+            "high", "claude-code-no-sandbox", "mockllm/model", None, jobs=0,
+        )
+        self.assertIsNone(self.seen.get("max_samples"))
+
+
+class TestOneBadSampleDoesNotFailTheWholeBatch(unittest.TestCase):
+    """A behavioral batch discarded every case it had already graded.
+
+    inspect sets `log.status` to `error` when any sample raises, and
+    `behavioral._outcomes` returned one failure per case on that condition --
+    so a single container that would not start turned a skill's whole report
+    into a total failure, including cases that had already scored and been
+    paid for. `engine/routing.py` never did this, for the same reason.
+    """
+
+    @staticmethod
+    def _case(case_id: str):
+        return datasets.Case(
+            id=case_id, skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+
+    def _log(self, status: str):
+        log = types.SimpleNamespace()
+        log.status = status
+        log.error = None
+        good = types.SimpleNamespace(
+            id="good", scores={"s": types.SimpleNamespace(
+                metadata={engine_scorers.CHECKS: [{"passed": True, "kind": "k",
+                                                   "detail": "d"}]}
+            )}, error=None, total_time=1.0,
+        )
+        bad = types.SimpleNamespace(
+            id="bad", scores={}, error=types.SimpleNamespace(message="boom"),
+            total_time=0.0,
+        )
+        log.samples = [good, bad]
+        return log
+
+    def test_a_graded_case_survives_its_neighbour_erroring(self) -> None:
+        outcomes = engine_behavioral._outcomes(
+            self._log("error"), "alpha", [self._case("good"), self._case("bad")]
+        )
+        passed = {o.id: o.passed for o in outcomes}
+        self.assertTrue(passed["good"], "a case that scored must keep its result")
+        self.assertFalse(passed["bad"])
+
+    def test_a_task_with_no_samples_still_fails_every_case(self) -> None:
+        # The other direction. An infrastructure failure that produced nothing
+        # must not render as "every expectation met".
+        log = types.SimpleNamespace(status="error", error=None, samples=[])
+        outcomes = engine_behavioral._outcomes(
+            log, "alpha", [self._case("a"), self._case("b")]
+        )
+        self.assertEqual(len(outcomes), 2)
+        self.assertFalse(any(o.passed for o in outcomes))
+
+    def test_a_case_inspect_never_reported_is_still_accounted_for(self) -> None:
+        # Silence would read as a smaller, cleaner run rather than a partial
+        # one -- now that a partial log is kept, this is the gap that opens.
+        outcomes = engine_behavioral._outcomes(
+            self._log("error"),
+            "alpha",
+            [self._case("good"), self._case("bad"), self._case("never-ran")],
+        )
+        missing = [o for o in outcomes if o.id == "never-ran"]
+        self.assertEqual(len(missing), 1)
+        self.assertFalse(missing[0].passed)
+        self.assertIn("no sample", missing[0].error or "")
+
+    def test_inspect_is_told_not_to_abandon_the_task(self) -> None:
+        # The other half: without this inspect stops the task at the first bad
+        # sample, so the later cases never run at all and `_outcomes` has
+        # nothing to keep.
+        self.assertIn("fail_on_error=False", inspect.getsource(engine_behavioral.run))
+
+
+class TestTheHookContractSurvivedTheMigration(unittest.TestCase):
+    """All three hook arguments changed meaning without the contract changing.
+
+    `workspace` became `tools.workdir()` -- `None` off-container, the *string*
+    `/workspace` on it -- where the retired engine passed a real local
+    directory and asserted it was not `None`. `case` became `state.metadata`,
+    a dict, where the retired engine passed the `Case` object: `case.id` and
+    `case.prompt` are both documented, and both raised `AttributeError`.
+
+    The example in `docs/authoring-evals.md` calls
+    `sources.resolve(skill, workspace)`, whose parameter is annotated `Path`.
+    It raised `TypeError` on both engines.
+    """
+
+    def setUp(self) -> None:
+        self.store = _FakeStore()
+        patch = mock.patch("inspect_ai.util.store", lambda: self.store)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(engine_hooks._discard_workspace)
+
+    def test_the_workspace_is_a_real_directory(self) -> None:
+        workspace = engine_hooks.case_workspace()
+        self.assertIsInstance(workspace, Path)
+        self.assertTrue(workspace.is_dir())
+
+    def test_the_same_case_gets_the_same_directory(self) -> None:
+        # `setup` and `teardown` must agree about where the hook worked.
+        self.assertEqual(
+            engine_hooks.case_workspace(), engine_hooks.case_workspace()
+        )
+
+    def test_the_directory_supports_what_the_docs_do_with_it(self) -> None:
+        # The documented example is `sources.resolve(skill, workspace)`, which
+        # does `cache_dir / name`. That is the operation that was raising.
+        workspace = engine_hooks.case_workspace()
+        self.assertTrue(str(workspace / "clone"))
+
+    def test_the_directory_is_removed_afterwards(self) -> None:
+        workspace = engine_hooks.case_workspace()
+        engine_hooks._discard_workspace()
+        self.assertFalse(workspace.exists())
+
+    def test_the_case_argument_is_the_case_object(self) -> None:
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="the prompt",
+            skill_should_trigger=True,
+        )
+        state = types.SimpleNamespace(sample_id="c1", metadata={})
+        resolved = engine_hooks._case_for(state, [case])
+        self.assertIs(resolved, case)
+        self.assertEqual(resolved.id, "c1")
+        self.assertEqual(resolved.prompt, "the prompt")
+
+    def test_a_hook_with_only_setup_still_gets_its_directory_cleaned(self) -> None:
+        # `setup` is handed a real path now, so something has to delete it.
+        # Without this a run of N cases left N temp directories behind.
+        module = types.ModuleType("hooks_setup_only")
+        module.setup = lambda workspace, case, ctx: None
+        self.assertIsNotNone(engine_hooks.cleanup_fn(module, "alpha", []))
+
+    def test_a_hook_with_neither_entry_point_gets_nothing(self) -> None:
+        self.assertIsNone(
+            engine_hooks.cleanup_fn(types.ModuleType("empty"), "alpha", [])
+        )
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self._data: dict = {}
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value) -> None:
+        self._data[key] = value
+
+
+class TestTheRoomCheckIsBackAndSaysWhenItDidNotRun(unittest.TestCase):
+    """Nothing verified that the skills a run asked for were installed.
+
+    `Outcome.visible_skills` and `extra_skills` were read in three places and
+    assigned in none, so both warnings were structurally unreachable: a skill
+    that failed to install scored as `missed_trigger`, which reads as a
+    description that did not attract its prompt, and a stray `~/.claude/skills`
+    entry joining every case went unmentioned.
+
+    Only the host leg can answer -- the check reads the CLI's session-init
+    event, and `claude-code` drives the CLI through `inspect_swe`, which does
+    not surface one. So the report says the check did not run rather than
+    letting its silence read as a verified room.
+    """
+
+    ROOM = ["alpha", "beta"]
+    META = {"skills": ROOM, "model": "mockllm/model", "effort": "high"}
+
+    def _init_event(self, skills: list[str]) -> dict:
+        return {"type": "system", "subtype": "init", "skills": skills}
+
+    def test_the_installed_skills_are_recorded(self) -> None:
+        self.assertEqual(
+            routing.init_skills(self._init_event(["alpha", "beta"]), self.ROOM),
+            ["alpha", "beta"],
+        )
+
+    def test_a_skill_that_did_not_install_is_missing_from_the_report(self) -> None:
+        visible = routing.init_skills(self._init_event(["alpha"]), self.ROOM)
+        self.assertEqual(visible, ["alpha"])
+        summary = routing.summarize(
+            [self._an_outcome(visible_skills=visible)], self.ROOM, self.META
+        )
+        self.assertEqual(summary["skills_missing_from_session"], ["beta"])
+
+    def test_a_stray_runner_skill_is_reported(self) -> None:
+        extra = routing.init_extra_skills(
+            self._init_event(["alpha", "beta", "someones-own-skill"]), self.ROOM
+        )
+        self.assertEqual(extra, ["someones-own-skill"])
+
+    def test_a_leg_that_cannot_look_is_not_reported_as_clean(self) -> None:
+        # The distinction the whole thing turns on. With no `visible_skills`,
+        # `skills_missing_from_session` is empty -- and an empty list looked
+        # exactly like a verified room.
+        summary = routing.summarize(
+            [self._an_outcome(visible_skills=[])], self.ROOM, self.META
+        )
+        self.assertEqual(summary["skills_missing_from_session"], [])
+        self.assertEqual(summary["room_checked_cases"], 0)
+        self.assertIn("the room was not verified", routing.render_markdown(summary).lower())
+
+    def test_a_leg_that_did_look_is_not_told_the_room_was_unverified(self) -> None:
+        summary = routing.summarize(
+            [self._an_outcome(visible_skills=["alpha", "beta"])], self.ROOM, self.META
+        )
+        self.assertEqual(summary["room_checked_cases"], 1)
+        self.assertNotIn(
+            "the room was not verified", routing.render_markdown(summary).lower()
+        )
+
+    def test_the_host_leg_records_the_room_off_the_stream(self) -> None:
+        state = types.SimpleNamespace(store=_FakeStore())
+        engine_no_sandbox._record_room(
+            state, self._init_event(["alpha", "extra-one"]), self.ROOM
+        )
+        self.assertEqual(
+            state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY), ["alpha"]
+        )
+        self.assertEqual(
+            state.store.get(engine_no_sandbox.EXTRA_SKILLS_KEY), ["extra-one"]
+        )
+
+    def test_a_non_init_event_records_nothing(self) -> None:
+        state = types.SimpleNamespace(store=_FakeStore())
+        engine_no_sandbox._record_room(
+            state, {"type": "assistant", "message": {}}, self.ROOM
+        )
+        self.assertIsNone(state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY))
+
+    def test_the_host_leg_records_the_room_while_reading_its_stream(self) -> None:
+        # Behavioural, not `getsource`. The previous guard asserted that
+        # `room_names=` appeared in `_solver`; deleting the `_record_room(...)`
+        # call that consumes it left all 490 tests passing, which is the exact
+        # original bug surviving its own regression test.
+        state = types.SimpleNamespace(store=_FakeStore())
+        events = [
+            {"type": "system", "subtype": "init",
+             "skills": ["alpha", "a-stray-runner-skill"], "tools": ["Skill"]},
+            {"type": "assistant", "message": {"content": []}},
+        ]
+        for event in events:
+            engine_no_sandbox._record_room(state, event, self.ROOM)
+        self.assertEqual(
+            state.store.get(engine_no_sandbox.VISIBLE_SKILLS_KEY), ["alpha"]
+        )
+
+    @staticmethod
+    def _an_outcome(**kwargs):
+        defaults = dict(
+            id="c", category="k", skill="alpha", prompt="p", expect="alpha",
+            observed="alpha", verdict="correct_trigger", passed=True,
+            stop_reason="skill_activated", elapsed_s=1.0, tool_calls=1,
+        )
+        defaults.update(kwargs)
+        return routing.Outcome(**defaults)
+
+
+_STUB_CLAUDE = r'''
+import json, sys
+
+if "--help" in sys.argv:
+    print("--max-budget-usd --no-session-persistence")
+    sys.exit(0)
+sys.stdin.read()
+for event in [
+    {"type": "system", "subtype": "init",
+     "skills": ["alpha", "a-stray-runner-skill"], "tools": ["Skill"]},
+    {"type": "assistant", "message": {
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+        "content": [{"type": "tool_use", "id": "t1", "name": "Skill",
+                     "input": {"skill": "alpha"}}]}},
+    {"type": "result", "subtype": "success", "result": "done",
+     "total_cost_usd": 0.01},
+]:
+    print(json.dumps(event), flush=True)
+'''
+
+
+def _stub_claude_on_path(test: unittest.TestCase) -> None:
+    """Put a `claude` that replays a fixed stream first on PATH for `test`.
+
+    A script rather than a mock, so the solver's own `shutil.which`, subprocess
+    and stream parsing all run. Windows resolves `claude` through PATHEXT, so
+    there the shim in front of the script is a `.cmd` rather than `/bin/sh`.
+    """
+    bin_dir = Path(tempfile.mkdtemp(prefix="ss-stub-claude-"))
+    test.addCleanup(shutil.rmtree, bin_dir, True)
+    script = bin_dir / "claude_stub.py"
+    script.write_text(_STUB_CLAUDE, encoding="utf-8")
+    if os.name == "nt":
+        (bin_dir / "claude.cmd").write_text(
+            f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8"
+        )
+    else:
+        # A shell shim rather than a `#!python` line, which breaks on an
+        # interpreter path with a space or past the kernel's length limit.
+        shim = bin_dir / "claude"
+        shim.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8"
+        )
+        shim.chmod(0o755)
+    patch = mock.patch.dict(
+        os.environ,
+        {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
+    patch.start()
+    test.addCleanup(patch.stop)
+
+
+class TestTheDefaultEngineRunsACase(unittest.TestCase):
+    """The host leg's solver, driven end to end against a stub `claude`.
+
+    Nothing else in the suite runs it. The sandbox job uses a stub *solver*,
+    and every other test here reaches a piece of it -- the room recorder, the
+    stream parser -- by calling that piece directly. So when a dead-code sweep
+    dropped `usage` from `agent.py`'s imports, the solver's
+    `legacy_agent.usage.record_stream_event` raised on the first event of
+    every case on the default engine, and all 487 tests still passed. F401
+    cannot see an attribute reached through another module either.
+    """
+
+    def setUp(self) -> None:
+        _stub_claude_on_path(self)
+        env = mock.patch.dict(
+            os.environ,
+            {engine_sandbox.SANDBOX_ENV: "local",
+             # Lets the leg isolate its config dir; the stub never reads it.
+             "ANTHROPIC_API_KEY": "sk-test-not-a-key"},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        usage.reset()
+        self.addCleanup(usage.reset)
+        self.root = Path(tempfile.mkdtemp(prefix="ss-host-leg-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        alpha = self.root / "alpha"
+        alpha.mkdir()
+        (alpha / "SKILL.md").write_text(
+            "---\nname: alpha\ndescription: does alpha things\n---\n",
+            encoding="utf-8",
+        )
+        self.room = {"alpha": alpha}
+
+    def _run(self):
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="do the alpha thing",
+            skill_should_trigger=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            return engine_routing.run(
+                [case], self.room, "mockllm/model", "high",
+                engine_routing.NO_SANDBOX, log_dir=str(self.root / "logs"),
+            )
+
+    def test_a_case_is_graded_rather_than_errored(self) -> None:
+        [outcome] = self._run()
+        self.assertFalse(outcome.error, outcome.error)
+        self.assertEqual(outcome.observed, "alpha")
+        self.assertTrue(outcome.passed)
+
+    def test_the_room_is_recorded_from_the_stream_it_read(self) -> None:
+        # The call site, not the helper: `_record_room` is tested on its own
+        # above, and that test kept passing when the solver stopped calling it.
+        [outcome] = self._run()
+        self.assertEqual(outcome.visible_skills, ["alpha"])
+        self.assertEqual(outcome.extra_skills, ["a-stray-runner-skill"])
+
+    def test_the_tokens_it_spent_are_counted(self) -> None:
+        self._run()
+        self.assertEqual(usage.snapshot().input_tokens, 11)
+        self.assertEqual(usage.snapshot().output_tokens, 7)
+
+    def test_a_stop_that_left_no_log_still_reports_the_case(self) -> None:
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.interrupted = True
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        with mock.patch.object(engine_routing, "_evaluate", lambda *a, **k: []):
+            [outcome] = self._run()
+        self.assertIn("exceeded --timeout", outcome.error)
+
+
+
+class TestAStoppedRunKeepsWhatItFinished(unittest.TestCase):
+    """Every `eval()` call site reads back the log of a run the deadline stopped.
+
+    inspect writes that log and returns `[]`, so a call site that went back to
+    calling `eval()` directly would drop every finished case -- and the
+    subprocess test above, which calls `run_eval` itself, would not notice.
+    Each test here swaps in an `eval()` that does exactly what inspect does:
+    writes a real log for the task it was given, then returns nothing.
+    """
+
+    def setUp(self) -> None:
+        # Armed but not yet fired: each fake fires it from inside `eval()`,
+        # which is where the graceful stage lands. Fired up front, the guard
+        # that starts no new skill would skip the run being tested.
+        self.bound = deadline.Deadline(600.0, command="routing")
+        previous = deadline.use(self.bound)
+        self.addCleanup(deadline.use, previous)
+        self.logs = tempfile.mkdtemp(prefix="ss-stopped-")
+        self.addCleanup(shutil.rmtree, self.logs, True)
+        self.case = datasets.Case(id="c1", skill="alpha", prompt="p",
+                                  skill_should_trigger=True, files_exist=["x"])
+        for patch in (mock.patch.object(engine_sandbox, "require_provider"),
+                      contextlib.redirect_stdout(io.StringIO())):
+            patch.__enter__()
+            self.addCleanup(patch.__exit__, None, None, None)
+
+    @staticmethod
+    def _eval_that_keeps_its_log_to_itself(case_ids):
+        from inspect_ai import Task, eval as real_eval
+        from inspect_ai.dataset import Sample
+        from inspect_ai.solver import solver
+
+        @solver
+        def _noop():
+            async def solve(state, generate):
+                return state
+            return solve
+
+        def fake_eval(task, *, log_dir, metadata=None, **_):
+            real_eval(
+                Task(name=task.name, solver=_noop(),
+                     dataset=[Sample(id=i, input="x") for i in case_ids]),
+                model="mockllm/model", log_dir=log_dir, display="none",
+                metadata=metadata,
+            )
+            deadline.active().interrupted = True
+            return []
+
+        return fake_eval
+
+    def _stopped_with_nothing_written(self, task, **_):
+        self.bound.interrupted = True
+        return []
+
+    def _a_task(self, name):
+        return lambda *a, **k: types.SimpleNamespace(name=name)
+
+    def test_routing_reads_it_back(self) -> None:
+        with mock.patch.object(engine_routing, "build_task", self._a_task("routing")):
+            logs = engine_routing._evaluate(
+                self._eval_that_keeps_its_log_to_itself(["c1"]), [self.case],
+                {"alpha": Path("alpha")}, "mockllm/model", "high",
+                engine_routing.NO_SANDBOX, "mockllm/model", None,
+                log_dir=self.logs,
+            )
+        self.assertEqual([s.id for log in logs for s in log.samples], ["c1"])
+
+    def test_behavioral_reads_it_back(self) -> None:
+        with mock.patch.object(engine_behavioral, "build_task",
+                               self._a_task("behavioral-alpha")), \
+                mock.patch("inspect_ai.eval",
+                           self._eval_that_keeps_its_log_to_itself(["c1"])):
+            [outcome] = engine_behavioral.run(
+                ["alpha"], [self.case], "mockllm/model", "high",
+                solver_factory=None, log_dir=self.logs,
+            )
+        self.assertNotIn("exceeded --timeout", outcome.error or "",
+                         "graded from nothing rather than from the log")
+
+    def test_the_sandboxed_leg_reads_it_back(self) -> None:
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(engine_verify, "require"))
+        stack.enter_context(mock.patch.object(
+            engine_verify, "build_task", self._a_task("claude-code-alpha")))
+        stack.enter_context(mock.patch(
+            "inspect_ai.eval", self._eval_that_keeps_its_log_to_itself(["c1"])))
+        # Its log directory is fixed, so the run happens somewhere disposable.
+        stack.enter_context(_chdir(self.logs))
+        [outcome] = engine_verify.run(["alpha"], [self.case], "mockllm/model", "high")
+        self.assertNotIn("exceeded --timeout", outcome.error or "",
+                         "graded from nothing rather than from the log")
+
+    def test_the_sandboxed_leg_starts_no_new_skill_after_a_stop(self) -> None:
+        # The twin of behavioral's guard, which has its own test above.
+        self.bound.interrupted = True
+        with mock.patch.object(engine_verify, "require"), \
+                mock.patch.object(engine_behavioral, "run_eval",
+                                  mock.Mock(side_effect=AssertionError("started"))):
+            [outcome] = engine_verify.run(["alpha"], [self.case], "mockllm/model", "high")
+        self.assertIn("exceeded --timeout", outcome.error)
+
+    def _stopped_beside(self, other_run):
+        """A stopped `behavioral-alpha` whose log directory `other_run` shares."""
+        ours = self._eval_that_keeps_its_log_to_itself(["c1"])
+
+        def eval_beside_another(task, *, log_dir, **kwargs):
+            other_run(log_dir)
+            return ours(task, log_dir=log_dir, **kwargs)
+
+        logs = engine_behavioral.run_eval(
+            eval_beside_another, types.SimpleNamespace(name="behavioral-alpha"),
+            log_dir=self.logs,
+        )
+        return sorted(s.id for log in logs for s in log.samples)
+
+    def test_another_run_of_the_same_task_is_not_taken_for_this_one(self) -> None:
+        # The default directory is shared by every run from one checkout, and
+        # routing's task is always `routing`, so a name match is not enough:
+        # a parity run of both engines writes two `routing` logs side by side.
+        theirs = self._eval_that_keeps_its_log_to_itself(["somebody-else"])
+        self.assertEqual(self._stopped_beside(lambda log_dir: theirs(
+            types.SimpleNamespace(name="behavioral-alpha"), log_dir=log_dir
+        )), ["c1"])
+
+    def test_an_earlier_run_of_the_same_task_is_not_taken_for_this_one(self) -> None:
+        # The normal state of `.skillscope/logs`: every past run of this skill.
+        earlier = self._eval_that_keeps_its_log_to_itself(["from-last-week"])
+        earlier(types.SimpleNamespace(name="behavioral-alpha"), log_dir=self.logs)
+        self.bound.interrupted = False
+        self.assertEqual(self._stopped_beside(lambda log_dir: None), ["c1"])
+
+    def test_an_interrupt_that_escapes_eval_is_still_the_stop(self) -> None:
+        # In `eval()`'s own setup the interrupt surfaces as an exception, and
+        # on 3.10 anyio can surface it as `CancelledError`.
+        for raised in (KeyboardInterrupt, asyncio.CancelledError):
+            with self.subTest(raised=raised.__name__):
+                def interrupted(task, **_):
+                    deadline.active().interrupted = True
+                    raise raised()
+
+                # Caught here, because a `KeyboardInterrupt` that escapes
+                # would abort the test runner rather than fail this test.
+                try:
+                    logs = engine_behavioral.run_eval(
+                        interrupted, types.SimpleNamespace(name="t"),
+                        log_dir=self.logs,
+                    )
+                except BaseException as exc:
+                    self.fail(f"the stop escaped as {type(exc).__name__}")
+                self.assertEqual(logs, [])
+
+    def test_an_interrupt_with_no_stop_behind_it_is_not_swallowed(self) -> None:
+        # The operator's Ctrl-C still ends the command.
+        def interrupted(task, **_):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            engine_behavioral.run_eval(
+                interrupted, types.SimpleNamespace(name="t"), log_dir=self.logs
+            )
+
+    def test_the_sandboxed_leg_reports_a_stop_that_left_no_log(self) -> None:
+        with mock.patch.object(engine_verify, "require"), \
+                mock.patch.object(engine_verify, "build_task",
+                                  self._a_task("claude-code-alpha")), \
+                mock.patch("inspect_ai.eval", self._stopped_with_nothing_written), \
+                _chdir(self.logs):
+            [outcome] = engine_verify.run(["alpha"], [self.case], "mockllm/model", "high")
+        self.assertIn("exceeded --timeout", outcome.error)
+
+    def test_a_stop_that_left_no_log_still_reports_the_cases(self) -> None:
+        # Failed, not absent: the report counts what it was asked to grade.
+        with mock.patch.object(engine_behavioral, "build_task",
+                               self._a_task("behavioral-alpha")), \
+                mock.patch("inspect_ai.eval", self._stopped_with_nothing_written):
+            [outcome] = engine_behavioral.run(
+                ["alpha"], [self.case], "mockllm/model", "high",
+                solver_factory=None, log_dir=self.logs,
+            )
+        self.assertIn("exceeded --timeout", outcome.error)
+
+
+@contextlib.contextmanager
+def _chdir(path):
+    previous = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+class TestTheBenchmarkNamesAnEngineThatExists(unittest.TestCase):
+    """`--baseline` defaulted to `legacy` after `legacy` was removed.
+
+    Both examples in the tool's own docstring take the default, so both failed
+    against an engine the CLI no longer accepts.
+    """
+
+    def _defaults(self):
+        import tools.benchmark_engines as benchmark
+
+        return benchmark.build_parser().parse_args(["routing"])
+
+    def test_the_default_baseline_is_an_engine_the_cli_accepts(self) -> None:
+        self.assertIn(self._defaults().baseline, cli.ENGINES)
+
+    def test_the_default_candidate_is_an_engine_the_cli_accepts(self) -> None:
+        self.assertIn(self._defaults().candidate, cli.ENGINES)
+
+    def test_the_default_pair_is_actually_a_comparison(self) -> None:
+        # The same engine twice measures run-to-run variance, which `--noise`
+        # already reports and labels correctly.
+        args = self._defaults()
+        self.assertNotEqual(args.baseline, args.candidate)
+
+    def test_the_docstring_examples_still_name_runnable_engines(self) -> None:
+        # Both examples take the defaults, which is how the stale `legacy`
+        # default went unnoticed: nothing executed them.
+        import tools.benchmark_engines as benchmark
+
+        parser = benchmark.build_parser()
+        for argv in (["routing"], ["behavioral"]):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertIn(args.baseline, cli.ENGINES)
+
+
+class TestTheWallClockStopsInTimeForCleanup(unittest.TestCase):
+    """A run that overran got no `teardown`, so it left its containers behind.
+
+    `--timeout` ends the process with `os._exit`, which skips every `finally`
+    -- including the shielded cancel scope inspect runs `Task.cleanup` in. The
+    first attempt at this added a registry of last-resort callbacks, which did
+    not help: nothing registered one, and the "budget" bounding them was only
+    checked *between* callbacks, so a single slow cleanup ran as long as it
+    liked. A 6s callback against a 2s budget took 6s, which turns a bounded
+    command into an unbounded one -- worse than the exit it was softening.
+
+    So the fix is a stage earlier: interrupt the main thread with time to
+    spare, and let inspect cancel and clean up the way it already knows how.
+    """
+
+    def setUp(self) -> None:
+        self.saved = list(deadline._expire_callbacks)
+        deadline._expire_callbacks.clear()
+        self.addCleanup(
+            lambda: (deadline._expire_callbacks.clear(),
+                     deadline._expire_callbacks.extend(self.saved))
+        )
+        self.budget = deadline.EXPIRE_CLEANUP_BUDGET_S
+        self.addCleanup(
+            lambda: setattr(deadline, "EXPIRE_CLEANUP_BUDGET_S", self.budget)
+        )
+
+    def test_the_graceful_stage_is_armed_before_the_wall(self) -> None:
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.arm()
+        self.addCleanup(bound.disarm)
+        self.assertIsNotNone(bound._graceful)
+        self.assertAlmostEqual(
+            bound._graceful.interval, 600.0 - deadline.GRACEFUL_RESERVE_S, places=3
+        )
+
+    def test_a_timeout_shorter_than_the_reserve_only_gets_the_hard_stage(self) -> None:
+        # Nothing useful to reserve from a 30s budget; arming a graceful stage
+        # in the past would fire it immediately and kill the run on startup.
+        bound = deadline.Deadline(30.0, command="routing")
+        bound.arm()
+        self.addCleanup(bound.disarm)
+        self.assertIsNone(bound._graceful)
+        self.assertIsNotNone(bound._timer)
+
+    def test_a_requested_stop_fails_the_gate_as_an_overrun(self) -> None:
+        # Fired before the wall, so `expired()` is still False when inspect
+        # returns and the gate runs. It reported "every case errored".
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.interrupted = True
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli._fail_if_expired(), 1)
+        self.assertIn("exceeded --timeout", err.getvalue())
+
+    def test_no_new_skill_starts_after_a_stop(self) -> None:
+        # The reserve is for cleanup. The next skill's task would spend it and
+        # meet the hard kill, which loses the report too.
+        bound = deadline.Deadline(600.0, command="behavioral")
+        bound.interrupted = True
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+        case = datasets.Case(id="c1", skill="alpha", prompt="p",
+                             skill_should_trigger=True, files_exist=["x"])
+        started = mock.Mock(side_effect=AssertionError("a task was started"))
+        with mock.patch.object(engine_behavioral, "run_eval", started), \
+                mock.patch.object(engine_sandbox, "require_provider"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            [outcome] = engine_behavioral.run(
+                ["alpha"], [case], "mockllm/model", "high", solver_factory=None
+            )
+        self.assertFalse(outcome.passed)
+        self.assertIn("exceeded --timeout", outcome.error)
+
+    def test_disarming_cancels_both_stages(self) -> None:
+        bound = deadline.Deadline(600.0, command="routing")
+        bound.arm()
+        bound.disarm()
+        self.assertIsNone(bound._timer)
+        self.assertIsNone(bound._graceful)
+
+    def test_a_slow_cleanup_cannot_outlive_the_budget(self) -> None:
+        # The bound that was not a bound. Timed, because the previous test
+        # asserted only that the constant was small, which a 6s callback
+        # against a 2s budget satisfied while running for 6s.
+        deadline.EXPIRE_CLEANUP_BUDGET_S = 0.5
+        deadline.on_expire(lambda: time.sleep(5))
+        started = time.perf_counter()
+        skipped = deadline._run_expire_callbacks()
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 3.0, "a single cleanup ran past the budget")
+        self.assertEqual(skipped, 1, "an unfinished cleanup must be reported")
+
+    def test_a_quick_cleanup_still_runs(self) -> None:
+        ran = []
+        deadline.on_expire(lambda: ran.append(True))
+        self.assertEqual(deadline._run_expire_callbacks(), 0)
+        self.assertEqual(ran, [True])
+
+    def test_a_cleanup_that_raises_is_counted_not_propagated(self) -> None:
+        # This is the last code before the process dies; nobody is left to
+        # handle an exception raised here.
+        def boom():
+            raise RuntimeError("no")
+
+        deadline.on_expire(boom)
+        self.assertEqual(deadline._run_expire_callbacks(), 1)
+
+    def test_something_is_actually_registered(self) -> None:
+        # The registry was wired to nothing, so a hard exit cleaned up nothing
+        # and the original finding stood. Hook scratch directories register on
+        # import of `engine.hooks`.
+        import importlib
+
+        importlib.reload(engine_hooks)
+        self.assertTrue(
+            any(getattr(cb, "__name__", "") == "_discard_all_workspaces"
+                for cb in deadline._expire_callbacks),
+            "nothing registers a cleanup, so the watchdog still cleans nothing",
+        )
+
+
+_PARKED_LOOP_RUN = r'''
+import json, sys, tempfile, threading, time
+import anyio
+from inspect_ai import Task, eval as inspect_eval
+from inspect_ai.dataset import Sample
+from inspect_ai.solver import solver
+from skillscope import deadline
+from skillscope.engine import behavioral
+
+finished = []
+asked_at = []
+
+def _stop():
+    asked_at.append(time.perf_counter())
+    bound._request_stop()
+
+@solver
+def _maybe_hang():
+    async def solve(state, generate):
+        if state.sample_id != "hung":
+            finished.append(state.sample_id)
+            return state
+        # The stop is asked for once the other five are done, from a thread
+        # the way the watchdog asks for it, while this sample holds the loop
+        # parked. Timed from here rather than from start-up, which is inspect's
+        # and varies with the machine.
+        while len(finished) < 5:
+            await anyio.sleep(0.05)
+        threading.Timer(0.5, _stop).start()
+        await anyio.sleep(600)
+        return state
+    return solve
+
+task = Task(
+    name="parked",
+    dataset=[Sample(id=f"c{i}", input="x") for i in range(5)]
+    + [Sample(id="hung", input="x")],
+    solver=_maybe_hang(), sandbox="local",
+)
+bound = deadline.Deadline(float(sys.argv[1]), command="routing")
+deadline.use(bound)
+bound.arm()
+logs = behavioral.run_eval(inspect_eval, task, log_dir=tempfile.mkdtemp(),
+                           model="mockllm/model", display="none")
+print(json.dumps({
+    "after_stop": time.perf_counter() - asked_at[0] if asked_at else None,
+    "finished": sorted(s.id for log in logs for s in (log.samples or [])
+                       if s.error is None and s.id != "hung"),
+}))
+'''
+
+
+class TestTheGracefulStopReachesAParkedLoop(unittest.TestCase):
+    """The graceful stage, delivered to a real `eval()` with one hung sample.
+
+    Its test used to mock `interrupt_main` and assert it was called, which is
+    how two faults got through. `interrupt_main` only sets a flag, so a main
+    thread parked in `epoll_wait` -- one hung sample, nothing else to wake the
+    loop -- never saw it, and the stop landed whenever the hang ended. And when
+    it did land, inspect cleaned up and then returned `[]` from `eval()`, so
+    the five finished cases were dropped.
+
+    One test per fault: the bare loop holds down delivery -- through `eval()`
+    the flag happens to land anyway, so the other cannot -- and the `eval()`
+    one holds down keeping the finished cases.
+
+    A subprocess, because the signal is real and this test runner is a main
+    thread too. If delivery fails, the hard stage kills the child and there is
+    no output at all.
+    """
+
+    # The hard stage is only the backstop here; the stop is asked for directly.
+    HARD_AT = 120.0
+
+    def test_the_stop_wakes_a_loop_with_nothing_else_to_do(self) -> None:
+        # Delivery on its own, against a bare loop. Through `eval()` the flag
+        # alone happened to land within a second here, because something in
+        # inspect wakes its loop; this is the case where nothing does, and the
+        # flag waited out the full sleep.
+        script = (
+            "import asyncio, sys, time, anyio\n"
+            "from skillscope import deadline\n"
+            "deadline.GRACEFUL_RESERVE_S = 58.0\n"
+            "bound = deadline.Deadline(60.0, command='routing')\n"
+            "bound.arm()\n"
+            "started = time.perf_counter()\n"
+            "try:\n"
+            "    anyio.run(anyio.sleep, 30)\n"
+            # Before 3.11 anyio cannot turn the cancel back into
+            # `KeyboardInterrupt` (no `Task.uncancel`); either means it landed.
+            "except (KeyboardInterrupt, asyncio.CancelledError):\n"
+            "    print(time.perf_counter() - started)\n"
+        )
+        done = subprocess.run([sys.executable, "-c", script],
+                              capture_output=True, text=True, timeout=90)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        self.assertTrue(done.stdout.strip(), "the loop was never interrupted")
+        self.assertLess(float(done.stdout.strip().splitlines()[-1]), 10.0,
+                        "the stop waited for the loop to wake by itself")
+
+    def test_the_stop_lands_and_the_finished_cases_survive_it(self) -> None:
+        done = subprocess.run(
+            [sys.executable, "-c", _PARKED_LOOP_RUN, str(self.HARD_AT)],
+            capture_output=True, text=True, timeout=self.HARD_AT + 30,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        result = json.loads(done.stdout.strip().splitlines()[-1])
+        self.assertIsNotNone(result["after_stop"], "the stop was never asked for")
+        self.assertLess(result["after_stop"], 30.0,
+                        "the stop waited for the hung sample")
+        self.assertEqual(result["finished"], [f"c{i}" for i in range(5)])
+
+
+class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):
+    """`float()` is not a validity check, and `json.loads` takes NaN.
+
+    `input: NaN` registered happily and reported `can_bind: True`, while every
+    `nan >= limit` comparison is False so the budget never fired. A negative
+    rate does the same by making the total fall, and `true` passes every
+    numeric check because `bool` is an `int`. All three are the exact failure
+    the module exists to prevent, arriving through the module.
+    """
+
+    def setUp(self) -> None:
+        patch = mock.patch.dict(os.environ, {}, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        _reset_model_pricing()
+        self.addCleanup(_reset_model_pricing)
+
+    def _apply(self, raw: str):
+        os.environ[engine_pricing.PRICING_ENV] = raw
+        return engine_pricing.apply()
+
+    def test_nan_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self._apply('{"mockllm/model": {"input": NaN, "output": 1}}')
+        self.assertIn("never fires", str(caught.exception))
+
+    def test_infinity_is_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._apply('{"mockllm/model": {"input": Infinity, "output": 1}}')
+
+    def test_a_negative_rate_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self._apply('{"mockllm/model": {"input": -5.0, "output": 1}}')
+        self.assertIn("negative", str(caught.exception))
+
+    def test_a_boolean_is_refused(self) -> None:
+        # `float(True)` is 1.0, so this would have registered a $1 rate.
+        with self.assertRaises(SystemExit):
+            self._apply('{"mockllm/model": {"input": true, "output": 1}}')
+
+    def test_a_non_finite_cache_rate_is_refused_too(self) -> None:
+        # The optional fields are rates as well, and default to 0 only when
+        # absent -- not when present and nonsense.
+        with self.assertRaises(SystemExit):
+            self._apply(
+                '{"mockllm/model": {"input": 1, "output": 2, "cache_read": NaN}}'
+            )
+
+    def test_zero_is_still_allowed(self) -> None:
+        # A free model, or a deployment that does not bill cache separately.
+        self._apply('{"mockllm/model": {"input": 0, "output": 0}}')
+        self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
+
+    def test_a_good_table_still_binds(self) -> None:
+        self._apply('{"mockllm/model": {"input": 5.0, "output": 25.0}}')
+        self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
 
 
 if __name__ == "__main__":

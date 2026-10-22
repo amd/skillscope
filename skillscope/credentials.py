@@ -112,9 +112,24 @@ def anthropic_access_token(
             "`match_subject_prefix` when `sub` did not match the rule."
         ) from error
 
-    token = json.loads(body).get("access_token", "").strip()
+    answer = json.loads(body)
+    token = answer.get("access_token", "").strip()
     if not token:
         raise CredentialError("the token exchange returned no access_token.")
+
+    # Said out loud, because the alternative is what happened without it: a
+    # graded run on scarce hardware spent twenty minutes and then failed with
+    # `401 OAuth access token has expired`, and nothing anywhere said how long
+    # the token was ever good for. A job that grades for longer than this needs
+    # a fresh token part-way, and the number is how anyone would know.
+    lifetime = answer.get("expires_in")
+    if lifetime:
+        print(
+            f"  federated token valid for {int(lifetime) // 60}m "
+            f"{int(lifetime) % 60}s -- a case that runs longer than this will "
+            "fail with a 401 partway through",
+            flush=True,
+        )
     return token
 
 

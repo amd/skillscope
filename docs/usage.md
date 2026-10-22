@@ -60,6 +60,45 @@ whole command. Routing adds `--jobs`, `--case-timeout`, `--max-tool-calls`,
 `--max-budget-usd`, `--keep-logs`, and `--min-accuracy`. `--help` is the
 authority on all of them.
 
+### Making `--max-budget-usd` bind on `claude-code`
+
+The two engines enforce the spend cap differently, and only one of them works
+out of the box.
+
+`claude-code-no-sandbox` hands `--max-budget-usd` to the `claude` CLI, which
+knows what it bills and stops by itself. `claude-code` cannot: `inspect_swe`
+builds its command line from a closed set of arguments and takes no
+passthrough ([inspect_swe#178][swe178]), so that leg uses inspect's own
+per-sample `cost_limit` instead — and inspect computes a cost only when its
+model registry knows the rate. **It ships no rates for any model.**
+
+So without rates that leg simply runs without a spend cap: skillscope withholds
+the limit rather than passing one, because inspect validates `cost_limit` up
+front and would refuse the whole run. `meta.max_budget_can_bind` reports which
+happened.
+
+`SKILLSCOPE_MODEL_PRICING` is how. Point it at a JSON file — or pass the JSON
+directly — mapping each model to its rates in **dollars per million tokens**:
+
+```json
+{
+  "opus": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
+}
+```
+
+Keys may be skillscope aliases (`opus`) or inspect model strings;
+`cache_read` and `cache_write` default to `0`. A malformed table fails the
+command in the preflight rather than one sample into a graded run.
+
+skillscope deliberately ships no price list of its own. Rates change without
+notice and differ by contract, and a stale table would hold a run to a number
+nobody agreed while the report claimed the budget was enforced — worse than no
+cap at all. Whatever you configure is recorded in the report as
+`meta.max_budget_pricing`, beside `max_budget_can_bind`, so a reader can tell a
+cap backed by your figures from one that cannot fire.
+
+[swe178]: https://github.com/meridianlabs-ai/inspect_swe/issues/178
+
 ### Where the skills are
 
 Every path in the table is relative to the repository root, which is the only
@@ -188,8 +227,8 @@ Two failure modes are worth knowing before reading a report. A routing case that
 ends without the agent either activating a skill or answering is reported as an
 **error** rather than a missed trigger. And if the runner has its own skills
 installed (usually `~/.claude/skills`), they join the room for every case and
-the report says so — set `ANTHROPIC_API_KEY` so the run can use an isolated
-config dir.
+the report says so — set `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` so the
+run can use an isolated config dir.
 
 ## Hardware a skill needs
 
@@ -207,6 +246,100 @@ skill is added.
 Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
 environment gets one matrix, labels and all.
+
+## Which engine grades a run
+
+`--engine` chooses what actually runs the cases. The dataset, the CLI and the
+reports are identical whichever you pick; only the thing driving the agent
+changes.
+
+| `--engine` | What runs | Runs in | Needs |
+| --- | --- | --- | --- |
+| `claude-code-no-sandbox` (default) | The real CLI, under `inspect_ai` | the host | the CLI on `PATH` |
+| `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
+
+Both drive the agent a skill is written for, so what differs between them
+is **where the agent runs**, not what it is. That is the axis worth choosing
+along: the host measures the machine as it is, with whatever else is installed
+on it, and the sandbox measures the skill alone. When the two disagree, the
+disagreement is usually a fact about one of those environments rather than
+about the skill -- which is a thing one engine on its own cannot tell you.
+
+`claude-code` is a reporting leg, never a gate. Harness runs are
+nondeterministic and the harness is not what is being graded, so a divergence
+there is a question about the skill rather than a build failure.
+
+**Routing runs on both**, and the choice matters more there than it does
+for behavioral. A stray user-level skill on the runner does not spoil one
+case's grade -- it is offered for every prompt, so it changes every decision at
+once while the run still reports a clean accuracy. `claude-code` is the only
+leg immune by construction: its guest has no `~/.claude` to contribute.
+
+The host leg cannot read the CLI's session-init event, so it has no way to
+notice such contamination or report it -- and therefore refuses to run a
+routing leg at all unless `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
+set, which is what lets it redirect the CLI's config dir away from the
+runner's own. Refusing beats being
+quietly wrong about every case.
+
+Both legs stop at the decision, by different routes. `claude-code`'s calls
+cross inspect's bridge, so the one that reveals the decision is declined
+*before* it runs, and `--max-tool-calls` / `--max-inspection-calls` ride the
+same path. `claude-code-no-sandbox` drives the CLI as a subprocess with nothing
+to intercept its calls, so it reads the `stream-json` the CLI prints as it goes
+and kills the process group the moment a skill fires -- one call of overshoot,
+and the same rule. The report records which caps actually applied rather than
+which were asked for.
+
+### Where a sandboxed run is sandboxed
+
+Two separate decisions, made by different people.
+
+**Which provider** is a property of the runner, chosen with
+`SKILLSCOPE_SANDBOX`. Docker by default; `podman` on a host that has that
+instead; `local` to skip the container. `local` is for working locally rather
+than for CI, because a graded run that quietly dropped its sandbox would report
+the same numbers with none of the isolation.
+
+Podman needs three things, and each was discovered by the next one failing:
+
+* `pip install 'skillscope[podman]'`. The provider is registered by a separate
+  package through an entry point, so the podman binary alone is not enough.
+* `podman-compose`, and `INSPECT_PODMAN_COMPOSE=podman-compose`. Bare
+  `podman compose` is a shim that delegates to whichever compose provider it
+  finds, which on a host that also has Docker is Docker's -- and that then
+  talks to a daemon podman was chosen to avoid.
+* A search registry, because podman will not guess one. Docker assumes Docker
+  Hub for an image name with no registry; podman refuses, and the default
+  sandbox image is named without one. `unqualified-search-registries =
+  ["docker.io"]` in `/etc/containers/registries.conf`.
+
+Podman is worth the setup where the runner's user cannot reach the Docker
+socket, since it is daemonless and rootless and needs neither that nor group
+membership.
+
+**What the sandbox must provide** is a property of the skill, declared as
+`sandbox: compose.yaml` in its `evals/machine.yml`, resolved beside it. Skills get a container with
+no network by default; one that installs a server or pulls a model cannot run
+that way and says so. Selecting a provider does not discard what a skill asked
+for -- the compose file rides along.
+
+[`examples/skill-with-a-device/evals/`](../examples/skill-with-a-device/evals)
+is the pair, worked through: a `machine.yml` that asks for GPU runners and
+names a compose file, and the compose file that binds the devices in and
+grants egress. The two are not substitutes. `labels:` decides which machine the
+job lands on; `sandbox:` decides whether the container on it can see the
+hardware that machine has. A skill that sets only the first gets the right
+runner and a container that cannot reach its device.
+
+Windows is the exception to both: inspect's sandbox layer and every tool built
+on it assume a POSIX guest, so those legs run unsandboxed and trade isolation
+for running on the platform they are meant to test.
+
+To see what changing engine would do to your own datasets before changing it,
+[`tools/benchmark_engines.py`](../tools/benchmark_engines.py) runs the same
+cases through two engines and reports per-case agreement, measured against how
+much one engine already disagrees with itself.
 
 ## In CI: one job
 

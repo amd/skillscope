@@ -38,20 +38,12 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import shutil
-import signal
 import subprocess
-import tempfile
-import threading
-import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
 from . import deadline
-from .agent import claude_env
-from .datasets import Case
 
 # Tools that carry no routing signal. An agent often opens with a todo list or
 # a plan before deciding anything, and spending the non-skill tool budget on
@@ -65,26 +57,53 @@ SKILL_TOOLS = {"skill", "slashcommand"}
 # Where the staged skills live, as they appear in a tool argument.
 STAGED_SKILLS_DIR = ".claude/skills"
 
+# Signatures of a failure that belongs to the model provider rather than to the
+# skill. Matched case-insensitively against whatever the run reported.
+#
+# Worth naming rather than leaving as prose: a gateway that answers 504 lands
+# in a report as a lower score with nothing saying why, and a reader cannot
+# tell it from the skill failing. At the rate these have been observed -- a
+# third of runs on one catalogue -- an unmarked provider error is the single
+# biggest reason two runs of the same engine disagree, which makes it the
+# first thing to rule out before a difference between engines means anything.
+PROVIDER_ERROR_SIGNS = (
+    "api error",
+    "overloaded",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "gateway",
+    "upstream",
+    "server-side",
+    "connection error",
+    "apiconnectionerror",
+    "timed out",
+    "timeout",
+)
+
+
+def is_provider_error(message: str | None) -> bool:
+    """Whether this failure came from the provider rather than from the skill.
+
+    Deliberately generous. A false positive marks a real skill failure as
+    degraded, which makes a reader look twice at a run that was fine. A false
+    negative lets a gateway outage score as a routing miss, which makes a
+    reader trust a number that measured nothing. The costs are not symmetric.
+    """
+    if not message:
+        return False
+    lowered = str(message).lower()
+    return any(sign in lowered for sign in PROVIDER_ERROR_SIGNS)
+
+
 VERDICTS = ("correct_trigger", "true_negative", "missed_trigger", "wrong_skill", "false_trigger", "error")
 PASSING_VERDICTS = {"correct_trigger", "true_negative"}
 
 # Stop reasons that leave the routing decision unknown rather than observed.
 INCONCLUSIVE_STOPS = {"completed", "timeout"}
-
-
-@dataclass
-class RoutingConfig:
-    """Everything ``run_case`` needs that is not the case itself."""
-
-    model: str = "opus"
-    effort: str = "high"
-    case_timeout: float = 240.0
-    max_tool_calls: int = 4
-    max_inspection_calls: int = 8
-    max_budget_usd: float = 0.75
-    keep_logs: str = ""
-    available_flags: set[str] = field(default_factory=set)
-    isolate_config: bool = False
 
 
 @dataclass
@@ -104,23 +123,18 @@ class Outcome:
     visible_skills: list[str] = field(default_factory=list)
     extra_skills: list[str] = field(default_factory=list)
     error: str | None = None
+    # Set when the failure was the provider's. Kept beside `error` rather than
+    # folded into `verdict` so the verdict vocabulary stays about routing, and
+    # so a reader can subtract these without re-parsing error strings.
+    degraded: bool = False
 
 
-def stage_workspace(skills: dict[str, Path]) -> Path:
-    """Install every skill in the routing set into a fresh temp workspace.
 
-    Claude Code loads ``.claude/skills/`` from a directory passed with
-    ``--add-dir``, which registers each skill's name and description in the
-    system prompt without injecting its body -- exactly the state a routing
-    decision is made from. One workspace per case keeps cases isolated (and
-    lets them run concurrently).
-    """
-    workspace = Path(tempfile.mkdtemp(prefix="routing-"))
-    dest_root = workspace / ".claude" / "skills"
-    dest_root.mkdir(parents=True, exist_ok=True)
-    for name, source in skills.items():
-        shutil.copytree(source, dest_root / name)
-    return workspace
+
+def _capped_timeout(seconds: float) -> float:
+    """``seconds``, or whatever the command's ``--timeout`` has left."""
+    bound = deadline.active()
+    return seconds if bound is None else bound.cap(seconds)
 
 
 def supported_flags(flags: list[str]) -> set[str]:
@@ -148,6 +162,12 @@ def supported_flags(flags: list[str]) -> set[str]:
     return {flag for flag in flags if flag in text}
 
 
+# The credentials that live in the environment rather than in the CLI's own
+# config dir. Either can be carried into a throwaway config dir; a login stored
+# in the real one cannot, which is the whole distinction this turns on.
+ENV_CREDENTIALS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
 def can_isolate_config() -> bool:
     """Whether the runner's own ``~/.claude`` can be kept out of the session.
 
@@ -156,8 +176,15 @@ def can_isolate_config() -> bool:
     Pointing the CLI at a throwaway config dir achieves that, but only when
     auth comes from the environment -- if the login lives in the real config
     dir, hiding it means no case even starts.
+
+    `ANTHROPIC_AUTH_TOKEN` counts for the same reason `ANTHROPIC_API_KEY`
+    does: it is in the environment, so it survives the redirect. Testing only
+    for the key refused every runner that authenticates by workload identity
+    federation -- which holds no key at all, by design, and is what the
+    reusable workflow offers downstream repos through `federation_rule_id`.
+    Found by running the default engine the way a product repo would.
     """
-    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    return any(os.environ.get(name, "").strip() for name in ENV_CREDENTIALS)
 
 
 def _iter_tool_uses(obj) -> list[tuple[str, str]]:
@@ -195,6 +222,63 @@ def _match_skill(text: str, skills: list[str]) -> str | None:
         if skill.lower() in lowered:
             return skill
     return None
+
+
+def init_skills(event: dict, skills: list[str]) -> list[str] | None:
+    """Skill names the CLI reported at session init, if this is that event.
+
+    The room check: proof that the agent really saw the whole routing set. A
+    case graded against a room it was never shown is not a routing result, and
+    the failure looks exactly like a skill that failed to attract its prompt --
+    `missed_trigger`, with nothing to say it was the installation rather than
+    the description.
+
+    `None` for any other event, so a caller can feed it the whole stream.
+    """
+    if event.get("type") != "system" or event.get("subtype") != "init":
+        return None
+    seen: list[str] = []
+    for key in ("skills", "slash_commands", "slashCommands", "commands"):
+        entries = event.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            text = entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False)
+            hit = _match_skill(text, skills)
+            if hit and hit not in seen:
+                seen.append(hit)
+    return seen
+
+
+def init_extra_skills(event: dict, skills: list[str]) -> list[str] | None:
+    """Skills the CLI reported at init that this eval did not install.
+
+    The other half of the room check. A user-level skill on the runner --
+    `~/.claude/skills` is the usual source -- is registered alongside the
+    staged ones and competes for every prompt, so the numbers describe a room
+    nobody asked for. Classifying an answer as `other:` notices such a skill
+    only when it actually wins a case; this notices it being present at all,
+    which is the difference between one odd result and a whole run measured in
+    the wrong room.
+    """
+    if event.get("type") != "system" or event.get("subtype") != "init":
+        return None
+    entries = event.get("skills")
+    if not isinstance(entries, list):
+        return []
+    known = {skill.lower() for skill in skills}
+    extra: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, dict):
+            name = str(entry.get("name") or "")
+        else:
+            continue
+        name = name.strip().lstrip("/")
+        if name and name.lower() not in known and name not in extra:
+            extra.append(name)
+    return extra
 
 
 def _skill_from_body_path(text: str, skills: list[str]) -> str | None:
@@ -287,130 +371,18 @@ def detect_activation(event: dict, skills: list[str], allow_body_path: bool = Tr
     return None
 
 
-def _init_skills(event: dict, skills: list[str]) -> list[str] | None:
-    """Skill names the CLI reported at session init, if this is that event.
-
-    Used to prove the agent really saw the whole routing set (and nothing extra):
-    a stray user-level skill on the runner would change every routing decision.
-    """
-    if event.get("type") != "system" or event.get("subtype") != "init":
-        return None
-    seen: list[str] = []
-    for key in ("skills", "slash_commands", "slashCommands", "commands"):
-        entries = event.get(key)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            text = entry if isinstance(entry, str) else json.dumps(entry, ensure_ascii=False)
-            hit = _match_skill(text, skills)
-            if hit and hit not in seen:
-                seen.append(hit)
-    return seen
 
 
-def _init_tools(event: dict) -> set[str] | None:
-    """Tool names the CLI reported at session init, if this is that event.
-
-    Used to decide whether the SKILL.md-path fallback in ``detect_activation``
-    applies to this build. An init event without a tool list leaves the
-    fallback on, which is how older builds behaved.
-    """
-    if event.get("type") != "system" or event.get("subtype") != "init":
-        return None
-    tools = event.get("tools")
-    if not isinstance(tools, list):
-        return set()
-    return {str(tool).lower() for tool in tools}
 
 
-def _init_extra_skills(event: dict, skills: list[str]) -> list[str] | None:
-    """Skills the CLI reported at init that this eval did not install.
-
-    A user-level skill on the runner is registered alongside the staged ones
-    and competes for every prompt, so the routing numbers describe a room
-    nobody asked for. The ``other:`` check only notices such a skill when it
-    actually fires; this notices it being installed at all.
-    """
-    if event.get("type") != "system" or event.get("subtype") != "init":
-        return None
-    entries = event.get("skills")
-    if not isinstance(entries, list):
-        return []
-    known = {skill.lower() for skill in skills}
-    extra: list[str] = []
-    for entry in entries:
-        if isinstance(entry, str):
-            name = entry
-        elif isinstance(entry, dict):
-            name = str(entry.get("name") or "")
-        else:
-            continue
-        name = name.strip().lstrip("/")
-        if name and name.lower() not in known and name not in extra:
-            extra.append(name)
-    return extra
 
 
-def _pump(stream, sink: queue.Queue) -> None:
-    try:
-        for line in stream:
-            sink.put(line)
-    finally:
-        sink.put(None)
 
 
-def _terminate(proc: subprocess.Popen) -> None:
-    """Kill the CLI and its children.
-
-    The `claude` process spawns helpers, so killing only the parent can leave
-    an orphan holding the API call open -- which is the cost this eval exists
-    to avoid. Kill the whole group/tree.
-    """
-    if proc.poll() is not None:
-        return
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                check=False,
-            )
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        pass
 
 
-def _capped_timeout(seconds: float) -> float:
-    """``seconds``, or whatever the command's ``--timeout`` has left."""
-    bound = deadline.active()
-    return seconds if bound is None else bound.cap(seconds)
 
 
-def _command_timeout_outcome(case: Case, bound: deadline.Deadline) -> Outcome:
-    print(f"  [FAIL] {case.id}: {bound.message()}", flush=True)
-    return Outcome(
-        id=case.id,
-        category=case.category,
-        skill=case.skill,
-        prompt=case.prompt,
-        expect=case.expect_skill,
-        observed=None,
-        verdict="error",
-        passed=False,
-        stop_reason="timeout",
-        elapsed_s=0.0,
-        tool_calls=0,
-        error=bound.message(),
-    )
 
 
 def classify(expect: str | None, observed: str | None) -> str:
@@ -421,203 +393,28 @@ def classify(expect: str | None, observed: str | None) -> str:
     return "correct_trigger" if observed == expect else "wrong_skill"
 
 
-def run_case(case: Case, routing_set: dict[str, Path], config: RoutingConfig) -> Outcome:
-    """Run one prompt, stopping as soon as the routing decision is known."""
-    bound = deadline.active()
-    if bound is not None and bound.expired():
-        return _command_timeout_outcome(case, bound)
 
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        raise SystemExit("error: 'claude' CLI not found on PATH")
 
-    skills = list(routing_set)
-    workspace = stage_workspace(routing_set)
-    # Outside the workspace: the agent can list its own cwd, and a config dir
-    # sitting in there would be one more thing for it to find.
-    config_dir = (
-        Path(tempfile.mkdtemp(prefix="routing-config-")) if config.isolate_config else None
-    )
-    cmd = [
-        claude_bin,
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--add-dir",
-        str(workspace),
-        "--model",
-        config.model,
-    ]
-    if config.effort:
-        cmd += ["--effort", config.effort]
-    # Dozens of throwaway sessions per run; don't leave them on disk.
-    if "--no-session-persistence" in config.available_flags:
-        cmd += ["--no-session-persistence"]
-    if config.max_budget_usd > 0 and "--max-budget-usd" in config.available_flags:
-        cmd += ["--max-budget-usd", str(config.max_budget_usd)]
+def near_a_limit(outcome: "Outcome", meta: dict) -> bool:
+    """Whether this case stopped close enough to a cap to be decided by one.
 
-    spawn: dict = {}
-    if os.name == "nt":
-        spawn["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        spawn["start_new_session"] = True
+    A case that used one call of a budget of four is measuring the agent. A
+    case that used four is measuring the budget: ordinary run-to-run variation
+    moves it across the line, and the verdict flips with it. Those two look
+    identical in a report, and the difference is the whole of whether a flip
+    between two runs means anything.
 
-    env = claude_env()
-    if config_dir is not None:
-        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-
-    events: list[dict] = []
-    observed: str | None = None
-    visible: list[str] = []
-    extra: list[str] = []
-    stop_reason = "completed"
-    tool_calls = 0
-    inspection_calls = 0
-    allow_body_path = True
-    error: str | None = None
-    stderr_lines: list[str] = []
-
-    start = time.perf_counter()
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(workspace),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        env=env,
-        **spawn,
-    )
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(case.prompt)
-        proc.stdin.close()
-
-        stdout_q: queue.Queue = queue.Queue()
-        threading.Thread(target=_pump, args=(proc.stdout, stdout_q), daemon=True).start()
-        threading.Thread(
-            target=lambda: stderr_lines.extend(proc.stderr.readlines()), daemon=True
-        ).start()
-
-        case_deadline = time.perf_counter() + _capped_timeout(config.case_timeout)
-        while True:
-            remaining = case_deadline - time.perf_counter()
-            if remaining <= 0:
-                stop_reason = "timeout"
-                break
-            try:
-                line = stdout_q.get(timeout=min(1.0, remaining))
-            except queue.Empty:
-                continue
-            if line is None:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            events.append(event)
-
-            reported = _init_skills(event, skills)
-            if reported is not None:
-                visible = reported
-            uninstalled = _init_extra_skills(event, skills)
-            if uninstalled is not None:
-                extra = uninstalled
-            tools = _init_tools(event)
-            if tools is not None:
-                allow_body_path = not (tools & SKILL_TOOLS)
-
-            hit = detect_activation(event, skills, allow_body_path=allow_body_path)
-            if hit:
-                observed = hit
-                stop_reason = "skill_activated"
-                break
-
-            if event.get("type") == "result":
-                stop_reason = "result"
-                if event.get("is_error"):
-                    error = str(event.get("result") or "result event reported an error")[:400]
-                break
-
-            for name, tool_input in _iter_tool_uses(event):
-                if name.lower() in BOOKKEEPING_TOOLS:
-                    continue
-                if _is_skills_inspection(tool_input, skills):
-                    inspection_calls += 1
-                else:
-                    tool_calls += 1
-            # Inspection is exempt from the tool budget but not unbounded: an
-            # agent that has read every installed skill and still called none
-            # has made its decision, and the run should not idle to timeout.
-            if tool_calls >= config.max_tool_calls or inspection_calls >= config.max_inspection_calls:
-                stop_reason = "tool_budget"
-                break
-    finally:
-        _terminate(proc)
-        elapsed = time.perf_counter() - start
-        if config.keep_logs:
-            logs_dir = Path(config.keep_logs)
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            (logs_dir / f"{case.id}.jsonl").write_text(
-                "\n".join(json.dumps(e, ensure_ascii=False) for e in events),
-                encoding="utf-8",
-            )
-        shutil.rmtree(workspace, ignore_errors=True)
-        if config_dir is not None:
-            shutil.rmtree(config_dir, ignore_errors=True)
-
-    if not events:
-        error = ("".join(stderr_lines).strip() or "claude produced no stream-json output")[:400]
-
-    # "no skill activated" is only a real finding when the run got far enough to
-    # show a decision: the agent answered (`result`) or started doing the work
-    # itself (`tool_budget`). A stream that just ends, or a hang, means the run
-    # never made a routing decision -- grading that as a missed trigger would
-    # invent a result out of an infrastructure failure.
-    if observed is None and stop_reason in INCONCLUSIVE_STOPS:
-        verdict = "error"
-        detail = "".join(stderr_lines).strip()
-        error = error or (
-            f"run ended without a routing decision (stopped after: {stop_reason})"
-            + (f"; stderr: {detail[:300]}" if detail else "")
-        )
-    elif error and observed is None:
-        verdict = "error"
-    else:
-        verdict = classify(case.expect_skill, observed)
-
-    outcome = Outcome(
-        id=case.id,
-        category=case.category,
-        skill=case.skill,
-        prompt=case.prompt,
-        expect=case.expect_skill,
-        observed=observed,
-        verdict=verdict,
-        passed=verdict in PASSING_VERDICTS,
-        stop_reason=stop_reason,
-        elapsed_s=round(elapsed, 2),
-        tool_calls=tool_calls,
-        inspection_calls=inspection_calls,
-        visible_skills=visible,
-        extra_skills=extra,
-        error=error,
-    )
-    print(
-        f"  [{'PASS' if outcome.passed else 'FAIL'}] {case.id}: "
-        f"expected {case.expect_skill or 'no skill'} -> got {observed or 'no skill'} "
-        f"({verdict}, {stop_reason}, {outcome.elapsed_s}s)",
-        flush=True,
-    )
-    return outcome
+    Within one, because that is the resolution a single extra call has. Caps
+    the run did not set are not caps: a leg that could not enforce a budget
+    reports none, and nothing here should invent a threshold for it.
+    """
+    for used, cap in (
+        (outcome.tool_calls, meta.get("max_tool_calls")),
+        (outcome.inspection_calls, meta.get("max_inspection_calls")),
+    ):
+        if isinstance(cap, int) and cap > 0 and used >= cap - 1:
+            return True
+    return False
 
 
 def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
@@ -661,14 +458,15 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
     contaminated = sorted(
         {o.observed for o in outcomes if o.observed and o.observed.startswith("other:")}
     )
+    # The room check, and whether it ran at all. `visible_skills` is populated
+    # from the CLI's session-init event, which only the host leg can read:
+    # `claude-code` drives the CLI through `inspect_swe` and never sees one. So
+    # an empty list is ambiguous between "the agent reported no skills" and
+    # "nobody could ask", and the two must not render the same way -- a report
+    # with no missing-skill warning reads as a verified room.
+    checked = [o for o in outcomes if o.visible_skills]
     missing = sorted(
-        {
-            skill
-            for o in outcomes
-            if o.visible_skills
-            for skill in skills
-            if skill not in o.visible_skills
-        }
+        {skill for o in checked for skill in skills if skill not in o.visible_skills}
     )
     extras = sorted({skill for o in outcomes for skill in o.extra_skills})
 
@@ -686,6 +484,17 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
             # way the numbers are an artifact, not a result.
             "activations": sum(1 for o in graded if o.observed),
             "activations_expected": sum(1 for o in graded if o.expect),
+            # Cases the provider failed rather than the skill. Reported beside
+            # the score because it is the number that decides whether the
+            # score can be read at all: a run with a third of its cases
+            # degraded has measured the gateway, and comparing it against
+            # another run attributes an outage to whatever changed in between.
+            "degraded": sum(1 for o in outcomes if o.degraded),
+            # Cases that stopped within one call of a cap. Not failures --
+            # a flag on how much of this run measured the agent and how much
+            # measured the budget. A flip on one of these between two runs is
+            # a threshold artefact before it is anything else.
+            "near_limit": sum(1 for o in outcomes if near_a_limit(o, meta)),
         },
         "verdicts": {name: verdicts.get(name, 0) for name in VERDICTS},
         "by_category": by_category,
@@ -694,6 +503,10 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
         "unexpected_skills": contaminated,
         "skills_missing_from_session": missing,
         "extra_skills_in_session": extras,
+        # How many cases the room check could actually be made for. Reported
+        # rather than inferred, so "no missing skills" and "nobody looked" are
+        # distinguishable in the JSON as well as in the markdown.
+        "room_checked_cases": len(checked),
         "cases": [asdict(o) for o in outcomes],
     }
 
@@ -716,6 +529,34 @@ def render_markdown(summary: dict) -> str:
         "is only as meaningful as the room is realistic.",
         "",
     ]
+
+    # Before the table, not after it. A reader who has already taken in the
+    # score has formed a view, and a note underneath it does not undo that --
+    # whereas a run with a tenth of its cases degraded is one whose score
+    # should be read differently from the first glance.
+    near = totals.get("near_limit", 0)
+    if near:
+        lines += [
+            f"> **{near} of {totals['cases']} cases stopped within one call of "
+            "a budget.** Those measured the budget as much as the agent: one "
+            "more call either way moves them across the line and the verdict "
+            "with them. Compare two runs on these last, and expect them to "
+            "flip without meaning anything.",
+            "",
+        ]
+
+    degraded = totals.get("degraded", 0)
+    if degraded:
+        share = degraded / totals["cases"] if totals["cases"] else 0
+        lines += [
+            f"> **{degraded} of {totals['cases']} cases failed at the model "
+            f"provider, not in the skill** ({share:.0%}). A gateway error "
+            "lands as a lower score with nothing in the verdict saying why, "
+            "so treat this run as degraded rather than as a measurement: the "
+            "difference between it and another run may be the provider's "
+            "rather than the skill's or the engine's.",
+            "",
+        ]
     lines += [
         "| Verdict | Count | Meaning |",
         "| --- | --- | --- |",
@@ -843,5 +684,19 @@ def render_markdown(summary: dict) -> str:
             f"every prompt, so the room measured here is not the one that was "
             f"asked for. Set `ANTHROPIC_API_KEY` so the run can use an isolated "
             f"config dir, or remove them from the runner.",
+        ]
+    if not summary.get("room_checked_cases"):
+        # Said once, and only when no case could be checked. Both warnings
+        # above are silent on this leg whatever the room actually held, and a
+        # silent warning reads as a passed check -- which is how a contaminated
+        # runner would go unreported rather than unreportable.
+        lines += [
+            "",
+            "> **Note:** the room was not verified. The check reads the skills "
+            "the CLI announces at session init, which only "
+            "`claude-code-no-sandbox` can see -- `claude-code` drives the CLI "
+            "through `inspect_swe`, which does not surface that event. So the "
+            "two warnings above cannot fire on this leg: absence of them is "
+            "not evidence the agent saw the room this report describes.",
         ]
     return "\n".join(lines) + "\n"
