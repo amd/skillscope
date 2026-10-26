@@ -22,7 +22,15 @@ from pathlib import Path
 from .. import agent, config, deadline, routing as routing_core
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
-from . import convert, hooks, models, sandbox as sandbox_spec, scorers, stats
+from . import (
+    convert,
+    hooks,
+    models,
+    prerequisites,
+    sandbox as sandbox_spec,
+    scorers,
+    stats,
+)
 
 # An agent that never decides it is finished must still stop. The legacy engine
 # bounded this with `--case-timeout` and a process kill; inspect expresses it
@@ -85,13 +93,16 @@ def build_task(
     ctx: dict | None = None,
     *,
     solver_factory,
+    env: dict[str, str] | None = None,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
     `solver_factory` is what drives the agent; everything around it -- scoring,
     judging, reporting -- stays the same whichever one is passed. It receives
     the skill's directory because staging is the driver's job: each driver puts
-    the skill where the agent it runs will look for it.
+    the skill where the agent it runs will look for it. It also receives `env`,
+    what the skill's prerequisites need set for the agent (see
+    `prerequisites.on_host`), because the driver is what starts the agent.
 
     Required, and keyword-only. It was optional while a built-in react agent
     was the default, and a caller that forgot it silently graded a different
@@ -113,7 +124,7 @@ def build_task(
         name=f"behavioral-{skill}",
         dataset=samples,
         setup=hooks.setup_solver(hook, skill, cases),
-        solver=solver_factory(skill_dir),
+        solver=solver_factory(skill_dir, dict(env or {})),
         cleanup=hooks.cleanup_fn(hook, skill, cases),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
@@ -122,8 +133,15 @@ def build_task(
     )
 
 
-def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]:
-    """One failed outcome per case, for a skill that could not be run at all."""
+def _failed(
+    skill: str, cases: list[Case], detail: str, degraded: bool | None = None
+) -> list[BehaviorOutcome]:
+    """One failed outcome per case, for a skill that could not be run at all.
+
+    `degraded` defaults to whether `detail` reads as a provider outage. Pass
+    it where the cause is known: a failed install's output is a build log, and
+    a build log is full of the words that heuristic looks for.
+    """
     return [
         BehaviorOutcome(
             id=case.id,
@@ -132,10 +150,27 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
             passed=False,
             elapsed_s=0.0,
             error=detail,
-            degraded=routing_core.is_provider_error(detail),
+            degraded=(
+                routing_core.is_provider_error(detail) if degraded is None else degraded
+            ),
         )
         for case in cases
     ]
+
+
+def _is_outage(sample_error, detail: str | None) -> bool:
+    """Whether a case's error reads as the provider failing rather than the case.
+
+    Not for a prerequisite that could not be provided in the case's container:
+    its message carries the install's output, and a build log is full of the
+    words the provider heuristic looks for. The same failure on the host is
+    reported with `degraded=False` directly.
+    """
+    # Qualified: inspect has a `PrerequisiteError` of its own, which is not this.
+    qualified = f"{prerequisites.PrerequisiteError.__module__}.PrerequisiteError"
+    if qualified in (getattr(sample_error, "traceback", None) or ""):
+        return False
+    return routing_core.is_provider_error(detail)
 
 
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
@@ -182,7 +217,7 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
                 elapsed_s=round(getattr(sample, "total_time", None) or 0.0, 2),
                 checks=checks,
                 error=error,
-                degraded=routing_core.is_provider_error(error),
+                degraded=_is_outage(sample.error, error),
             )
         )
 
@@ -313,33 +348,57 @@ def run(
 
         print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
         try:
-            logs = run_eval(
-                inspect_eval,
-                build_task(skill, skill_cases, model, solver_factory=solver_factory),
-                model=model,
-                model_args=models.model_args(model),
-                log_dir=log_dir or str(Path(".skillscope") / "logs"),
-                log_realtime=realtime_logging(),
-                # A sample that raises is that case's failure, not the batch's.
-                # inspect's default ends the task on the first error, so one
-                # container that would not start discarded every case already
-                # graded -- `_outcomes` then reported the whole skill failed.
-                # Errored samples still come back in the log and are still
-                # graded as failures; what changes is that their neighbours
-                # survive.
-                fail_on_error=False,
-                # skillscope's own progress lines are the report; inspect's rich
-                # display takes over the terminal and produces nothing useful
-                # when a CI job pipes stdout to a file.
-                display="plain",
+            # Around the whole task rather than per case: on the host one
+            # install serves every case, and what it built is removed once the
+            # last of them is graded.
+            with prerequisites.on_host(skill) as env:
+                logs = run_eval(
+                    inspect_eval,
+                    build_task(
+                        skill, skill_cases, model, solver_factory=solver_factory, env=env
+                    ),
+                    model=model,
+                    model_args=models.model_args(model),
+                    log_dir=log_dir or str(Path(".skillscope") / "logs"),
+                    log_realtime=realtime_logging(),
+                    # A sample that raises is that case's failure, not the batch's.
+                    # inspect's default ends the task on the first error, so one
+                    # container that would not start discarded every case already
+                    # graded -- `_outcomes` then reported the whole skill failed.
+                    # Errored samples still come back in the log and are still
+                    # graded as failures; what changes is that their neighbours
+                    # survive.
+                    fail_on_error=False,
+                    # skillscope's own progress lines are the report; inspect's
+                    # rich display takes over the terminal and produces nothing
+                    # useful when a CI job pipes stdout to a file.
+                    display="plain",
+                )
+        except prerequisites.PrerequisiteError as exc:
+            # The skill could not be given what it needs, so none of its cases
+            # were run -- the same disposition as a broken sandbox declaration.
+            # Not a provider outage, whatever a build log happens to contain.
+            outcomes.extend(
+                _failed(skill, skill_cases, f"{skill}: {exc}", degraded=False)
             )
+            continue
+        except KeyboardInterrupt:
+            # The deadline's graceful stop landing in a host install, outside
+            # inspect, which would otherwise have turned it into a cancel. Fail
+            # this skill and keep everything already graded. A Ctrl-C from a
+            # person still stops the command.
+            if not stop_requested():
+                raise
+            outcomes.extend(_failed(skill, skill_cases, deadline.active().message()))
+            continue
         except SystemExit as exc:
             # One skill's broken setup is that skill's failure, not everybody's.
             # A malformed sandbox declaration used to abort the whole command,
             # throwing away results for skills already graded and paid for --
             # the same reason the structural gate reads only the skills a run
-            # is about.
-            outcomes.extend(_failed(skill, skill_cases, str(exc)))
+            # is about. A declaration that does not parse is never a provider
+            # outage, whatever the path in its message happens to contain.
+            outcomes.extend(_failed(skill, skill_cases, str(exc), degraded=False))
             continue
 
         if not logs and stop_requested():

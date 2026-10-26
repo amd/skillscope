@@ -119,6 +119,38 @@ jobs:
             ]
           }
           EOF
+          # A skill that declares a prerequisite: `install` builds a file that
+          # `check` then finds through the env the agent is handed.
+          mkdir -p fixture/prereq-skill/evals
+          cat > fixture/prereq-skill/SKILL.md <<'EOF'
+          ---
+          name: prereq-skill
+          description: Needs a tool its container does not ship, for a test that provides it.
+          ---
+          EOF
+          cat > fixture/prereq-skill/evals/install.sh <<'EOF'
+          echo built > "$SKILL_CACHE_DIR/tool.txt"
+          EOF
+          cat > fixture/prereq-skill/evals/machine.yml <<'EOF'
+          prerequisites:
+            - name: tool
+              check: [sh, -c, 'test -f "${PREREQ_TOOL:-/nonexistent}"']
+              install: [sh, install.sh]
+              env:
+                PREREQ_TOOL: "${SKILL_CACHE_DIR}/tool.txt"
+          EOF
+          cat > fixture/prereq-skill/evals/evals.json <<'EOF'
+          {
+            "evaluations": [
+              {"id": "prereq-a", "skill_should_trigger": true, "prompt": "use the tool",
+               "files_exist": ["prerequisites-ok.txt"]},
+              {"id": "prereq-b", "skill_should_trigger": true, "prompt": "another way to ask"},
+              {"id": "prereq-c", "skill_should_trigger": true, "prompt": "a third phrasing"},
+              {"id": "prereq-d", "skill_should_trigger": false, "prompt": "something adjacent"},
+              {"id": "prereq-e", "skill_should_trigger": false, "prompt": "something else entirely"}
+            ]
+          }
+          EOF
 
       # No key, no model, no agent: a stub solver stands in for the agent so
       # only the machinery beneath it can pass the case. That is what makes
@@ -132,6 +164,16 @@ jobs:
         run: >
           python tools/sandbox_smoketest.py fixture --skill demo-skill
           --expect-sandbox ${{ matrix.os == 'windows-latest' && 'local' || 'docker' }}
+
+      # The `claude-code` leg's prerequisite step in a real container: the
+      # checks, the install, the copied script and its removal, and the env
+      # reaching the agent factory. Linux only, because only a container has a
+      # guest for those to happen in.
+      - name: Provide a skill's prerequisites in the container
+        if: matrix.os == 'ubuntu-latest'
+        run: >
+          python tools/sandbox_smoketest.py fixture --skill prereq-skill
+          --expect-sandbox docker --prerequisites
 
   action:
     name: Action against a throwaway repo
