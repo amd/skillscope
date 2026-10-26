@@ -23,7 +23,17 @@ so it passes only if the fixture was staged, the sandbox was listed, and the
 listing was matched -- and it cannot be passed by an agent that got lucky. No
 model is ever called, so this costs nothing and is deterministic.
 
+With `--prerequisites` the stand-in does one thing more. It runs after the
+skill's `machine.yml` prerequisites have been provided in the container, the
+way `--engine claude-code` provides them, and checks from inside the container
+that the env it was handed names something that was installed and that the
+copied steps are gone. Only then does it write the file the case expects, so
+here the expected file is the stand-in's report rather than a seeded fixture.
+That covers the prerequisite step itself, not `verify.build_task` or the
+real agent's `env=`, which the unit tests cover.
+
     tools/sandbox_smoketest.py <repo> [--skill demo-skill] [--expect-sandbox docker]
+    tools/sandbox_smoketest.py <repo> --skill prereq-skill --expect-sandbox docker --prerequisites
 
 Exits non-zero, loudly, on the first thing that did not hold.
 """
@@ -44,7 +54,7 @@ from skillscope.engine import behavioral, sandbox as sandbox_spec  # noqa: E402
 MODEL = "mockllm/model"
 
 
-def stub_solver(skill_dir: Path):
+def stub_solver(skill_dir: Path, env: dict[str, str]):
     """An agent that does nothing, so only the machinery can pass the case."""
     from inspect_ai.solver import solver
 
@@ -58,6 +68,49 @@ def stub_solver(skill_dir: Path):
     return _noop()
 
 
+def prerequisites_solver(skill: str):
+    """The `claude-code` leg's prerequisite step, with a stub for the agent.
+
+    Runs the skill's declared prerequisites in the real container, then hands
+    their env to a stand-in agent that checks, from inside the same container,
+    the three things the agent relies on: the env arrived, what it names was
+    installed, and the steps directory -- which held files copied from evals/
+    -- is gone. It leaves a marker the case asserts, so a stand-in that never
+    ran cannot pass.
+    """
+    from inspect_ai.agent import agent
+    from inspect_ai.util import sandbox
+
+    from skillscope.engine import prerequisites, tools
+
+    def make_agent(env: dict[str, str]):
+        @agent
+        def stand_in():
+            async def execute(state):
+                box = sandbox()
+                tool = env.get("PREREQ_TOOL")
+                if not tool:
+                    raise RuntimeError(f"the agent was given no PREREQ_TOOL: {env}")
+                if not (await box.exec(["test", "-f", tool])).success:
+                    raise RuntimeError(f"{tool} was not installed in the container")
+                steps = prerequisites.CONTAINER_STEPS
+                if (await box.exec(["test", "-e", steps])).success:
+                    raise RuntimeError(f"{steps} was left for the agent to see")
+                workdir = tools.workdir_path()
+                await box.exec(["mkdir", "-p", workdir])
+                await box.write_file(f"{workdir}/prerequisites-ok.txt", "ok\n")
+                return state
+
+            return execute
+
+        return stand_in()
+
+    solver = prerequisites.claude_code_agent(skill, make_agent)
+    if solver is None:
+        fail(f"{skill} declares no prerequisites, so nothing is proven")
+    return solver
+
+
 def fail(message: str) -> None:
     print(f"FAIL: {message}", file=sys.stderr)
     raise SystemExit(1)
@@ -67,6 +120,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo", help="Repo holding the fixture skill.")
     parser.add_argument("--skill", default="demo-skill")
+    parser.add_argument(
+        "--prerequisites",
+        action="store_true",
+        help=(
+            "Run the skill's machine.yml prerequisites in the sandbox, the way "
+            "`--engine claude-code` does, before a stand-in agent that checks "
+            "what they provided. Needs a real container."
+        ),
+    )
     parser.add_argument(
         "--expect-sandbox",
         default="",
@@ -103,11 +165,28 @@ def main() -> int:
             f"unsandboxed run passes every check below for the wrong reason."
         )
 
+    # The container leg's prerequisite step writes to a fixed path in the
+    # guest. On an unisolated provider the guest is this machine.
+    if args.prerequisites and provider in sandbox_spec.NOT_ISOLATED:
+        fail(
+            f"--prerequisites needs a container; {provider!r} would run the "
+            "steps on this machine"
+        )
+
     sandbox_spec.require_provider()
     from inspect_ai import eval as inspect_eval
 
     logs = inspect_eval(
-        behavioral.build_task(args.skill, cases, MODEL, solver_factory=stub_solver),
+        behavioral.build_task(
+            args.skill,
+            cases,
+            MODEL,
+            solver_factory=(
+                (lambda skill_dir, env: prerequisites_solver(args.skill))
+                if args.prerequisites
+                else stub_solver
+            ),
+        ),
         model=MODEL,
         log_dir=str(Path(".skillscope") / "logs"),
         log_realtime=behavioral.realtime_logging(),
@@ -136,14 +215,14 @@ def main() -> int:
 
     seeded = [c for c in checks if c.get("kind") == "files_exist"]
     if not seeded:
-        fail("the seeded-file check did not run, so staging was never exercised")
+        fail("the expected-file check did not run, so nothing was exercised")
     unmet = [c for c in seeded if not c.get("passed")]
     if unmet:
-        fail(f"a file the case seeded was not found in the sandbox: {unmet}")
+        fail(f"a file the case expects was not found in the sandbox: {unmet}")
 
     print(
         f"[smoketest] ok -- {len(checks)} check(s) graded, "
-        f"{len(seeded)} seeded fixture(s) found, sandbox {provider!r}."
+        f"{len(seeded)} expected file(s) found, sandbox {provider!r}."
     )
     return 0
 
