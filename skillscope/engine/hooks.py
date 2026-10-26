@@ -42,18 +42,16 @@ to fail a case. These engines have inspect's `TaskState`, which is a different
 thing with different attributes; passing one where the other is expected would
 fail inside somebody's skill with an error about their code.
 
-`setup_session(cache_dir)` returns `{name: value}` pairs that `expand()`
-substitutes into prompts and expectations. Those are baked into the `Sample`
-before any solver runs, so honouring it means building the dataset after the
-hook rather than before -- a change to how every case is constructed, for a
-feature nothing in the catalogue uses.
+`setup_session(cache_dir)` is replaced by `prerequisites:` in
+`evals/machine.yml` (see `prerequisites.py`). It ran once, on the host, and
+what it set reached the agent only through this process's environment, so a
+skill that also ran under `claude-code` had to describe its environment again
+for the container, and the two descriptions drifted. A declaration both
+engines read cannot.
 
-A `setup` that *returns* template variables has the same problem, and is caught
-at runtime rather than by inspection because a docstring cannot say what a
-function returns.
-
-Nothing in the catalogue this was written against uses either: one skill ships
-a hook, it defines `setup` and `teardown` only, and neither returns anything.
+A `setup` that *returns* template variables is refused at runtime: prompts and
+expectations are baked into the `Sample` before any solver runs, and a
+docstring cannot say what a function returns.
 """
 
 from __future__ import annotations

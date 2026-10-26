@@ -59,13 +59,15 @@ file a prompt lives in already carry the distinction:
   * an evaluation in the shared pool             -> ``unrelated`` (belongs to
     no skill's domain)
 
-Stdlib only, so a run needs no wheels beyond this package. ``machine_plan`` is
-the one exception and imports PyYAML lazily; nothing on the run path calls it.
+Stdlib only, apart from ``evals/machine.yml``: reading it imports PyYAML
+lazily, so a module importing this one does not pay for it. A behavioral run
+reads it for each skill's prerequisites, so PyYAML is a dependency.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -497,7 +499,12 @@ def structural_errors(skills: list[str] | None = None) -> list[str]:
         # runners, which hangs rather than failing. Surface it here, where it
         # costs seconds.
         try:
-            machine_plan(skill)
+            plan = machine_plan(skill)
+            # Here rather than at run time for the same reason: a prerequisite
+            # that cannot be parsed, or has no command for a platform the skill
+            # runs on, would otherwise surface as every case of the skill
+            # failing, after paying for the runner.
+            errors.extend(_prerequisite_gaps(skill, plan, machine_prerequisites(skill)))
         except SystemExit as exc:
             errors.append(str(exc).removeprefix("error: "))
     return errors
@@ -535,21 +542,66 @@ def tier0_errors(skill: str, cases: list[Case]) -> list[str]:
     return errors
 
 
-MACHINE_KEYS = {"os", "labels", "sandbox"}
+MACHINE_KEYS = {"os", "labels", "sandbox", "prerequisites"}
+
+PREREQUISITE_KEYS = {"name", "check", "install", "env"}
+# Keys a per-OS command may use, matched against the platform a step runs on.
+# A container is always `linux`, whatever the host is.
+COMMAND_PLATFORMS = ("linux", "windows", "macos")
+# The only variables an `env` value may name. Anything else would be read from
+# whichever process applied the prerequisite, and that differs between the
+# host and a container -- the same declaration would mean two things.
+PREREQUISITE_INPUTS = ("SKILL_SOURCE_DIR", "SKILL_CACHE_DIR")
+_ENV_INPUT = re.compile(r"\$\{(?:SKILL_SOURCE_DIR|SKILL_CACHE_DIR)\}")
+# Variables the harness sets for the agent itself. A prerequisite overriding
+# one would change which model answers or where its config lives -- and
+# differently per engine, since each sets a different subset.
+_RESERVED_ENV = re.compile(r"^(?:ANTHROPIC_|CLAUDE_)|^IS_SANDBOX$", re.IGNORECASE)
+# A name a process environment can hold on every platform.
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# `machine.yml`'s `os` labels as `COMMAND_PLATFORMS`.
+_OS_PLATFORM = {"linux": "linux", "windows": "windows", "macos": "macos"}
+
+
+@dataclass(frozen=True)
+class Prerequisite:
+    """Something a skill's behavioral cases need, and how to provide it.
+
+    `check` and `install` map a platform from `COMMAND_PLATFORMS` -- or `"*"`
+    for every platform -- to an argv. `env` is what the agent needs set to
+    use the prerequisite once it is installed, with `${SKILL_SOURCE_DIR}` and
+    `${SKILL_CACHE_DIR}` still unexpanded: what they expand to depends on
+    where the prerequisite is applied.
+    """
+
+    name: str
+    check: dict[str, list[str]]
+    install: dict[str, list[str]]
+    env: dict[str, str] = field(default_factory=dict)
+
+    def command(self, step: str, platform: str) -> list[str] | None:
+        """The argv for `step` on `platform`, or None if none applies there."""
+        commands = getattr(self, step)
+        return commands.get(platform) or commands.get("*")
 
 
 def _read_machine(skill: str) -> dict:
     """The raw ``evals/machine.yml`` for `skill`, or ``{}`` when it has none.
 
-    PyYAML is imported here rather than at module scope: nothing on the run
-    path needs this, so a run stays dependency-free.
+    PyYAML is imported here rather than at module scope, so importing this
+    module stays cheap for everything that never reads a machine.yml.
     """
     path = machine_path(skill)
     if not path.is_file():
         return {}
-    import yaml  # noqa: PLC0415 -- keeps the run path stdlib-only
+    import yaml  # noqa: PLC0415 -- importing this module stays cheap
 
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        # As SystemExit, which every per-skill handler turns into that skill's
+        # failure; a parser exception would end the whole command instead.
+        raise SystemExit(f"error: {path} is not valid YAML: {exc}") from None
     if not isinstance(data, dict):
         raise SystemExit(f"error: {path} must be a YAML mapping.")
     return data
@@ -596,16 +648,17 @@ def machine_plan(skill: str) -> dict:
     which pull-request label rations the pool, which environment holds its
     credentials -- is the repo's business and comes from the workflow, not from
     here. Returns ``{os, labels}``, raising SystemExit on a malformed file so
-    CI stops at planning.
+    CI stops at planning. ``prerequisites``, the fourth key, is read by
+    `machine_prerequisites`.
     """
     path = machine_path(skill)
     data = _read_machine(skill)
 
-    unknown = sorted(set(data) - MACHINE_KEYS)
+    unknown = sorted(set(data) - MACHINE_KEYS, key=str)
     if unknown:
         raise SystemExit(
-            f"error: {path}: unknown key(s): {', '.join(unknown)}. "
-            f"A machine.yml holds only {' and '.join(sorted(MACHINE_KEYS))}."
+            f"error: {path}: unknown key(s): {', '.join(map(str, unknown))}. "
+            f"A machine.yml holds only {', '.join(sorted(MACHINE_KEYS))}."
         )
 
     platforms = (
@@ -615,3 +668,160 @@ def machine_plan(skill: str) -> dict:
     )
     labels = _string_list(path, "labels", data["labels"]) if "labels" in data else []
     return {"os": platforms, "labels": labels}
+
+
+def _argv(path: Path, where: str, value: object) -> list[str]:
+    """An argv as written. Not stripped: `sh -c` bodies keep their newlines."""
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) for item in value)
+        or not value[0].strip()
+    ):
+        raise SystemExit(
+            f"error: {path}: `{where}` must be a non-empty list of strings; "
+            f"got {value!r}."
+        )
+    return list(value)
+
+
+def _command(path: Path, where: str, value: object) -> dict[str, list[str]]:
+    """An argv, or a mapping from platform to argv, as `{platform: argv}`."""
+    if isinstance(value, list):
+        return {"*": _argv(path, where, value)}
+    if isinstance(value, dict) and value:
+        unknown = sorted(set(value) - set(COMMAND_PLATFORMS), key=str)
+        if unknown:
+            raise SystemExit(
+                f"error: {path}: `{where}` names unknown platform(s): "
+                f"{', '.join(map(str, unknown))}. Use "
+                f"{', '.join(COMMAND_PLATFORMS)}."
+            )
+        return {
+            platform: _argv(path, f"{where}.{platform}", argv)
+            for platform, argv in value.items()
+        }
+    raise SystemExit(
+        f"error: {path}: `{where}` must be a command (a list of strings) or a "
+        f"mapping from platform to command; got {value!r}."
+    )
+
+
+def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and k and isinstance(v, str) for k, v in value.items()
+    ):
+        raise SystemExit(
+            f"error: {path}: `{where}` must map variable names to strings; "
+            f"got {value!r}."
+        )
+    for name, text in value.items():
+        if not _ENV_NAME.match(name) or "\0" in text:
+            raise SystemExit(
+                f"error: {path}: `{where}` has an entry that cannot be set in a "
+                f"process environment: {name!r}. Names are letters, digits and "
+                "underscores, not starting with a digit; values hold no NUL."
+            )
+        if name in PREREQUISITE_INPUTS:
+            raise SystemExit(
+                f"error: {path}: `{where}.{name}` names an input skillscope "
+                "supplies to every step; a prerequisite may not override it."
+            )
+        if _RESERVED_ENV.search(name):
+            raise SystemExit(
+                f"error: {path}: `{where}.{name}` is set by the harness for the "
+                "agent itself, and a prerequisite may not override it."
+            )
+        if "$" in _ENV_INPUT.sub("", text):
+            raise SystemExit(
+                f"error: {path}: `{where}.{name}` uses `$` other than in "
+                f"{' or '.join('${' + n + '}' for n in PREREQUISITE_INPUTS)}. "
+                "Nothing else is expanded: any other variable would be read "
+                "from whichever process applies the prerequisite, which is not "
+                "the same one on every engine, and a value replaces the "
+                "variable rather than extending it."
+            )
+    return dict(value)
+
+
+def _prerequisite_gaps(
+    skill: str, plan: dict, declared: list[Prerequisite]
+) -> list[str]:
+    """Each platform the skill runs on that a prerequisite has no command for."""
+    gaps: list[str] = []
+    for label in plan["os"]:
+        platform = _OS_PLATFORM.get(label.lower())
+        if platform is None:
+            continue
+        for item in declared:
+            missing = [
+                step for step in ("check", "install") if item.command(step, platform) is None
+            ]
+            if missing:
+                gaps.append(
+                    f"{machine_path(skill)}: prerequisite `{item.name}` has no "
+                    f"{' or '.join(missing)} command for {label}, which this "
+                    "skill runs on. Add one, or narrow `os`."
+                )
+    return gaps
+
+
+def machine_prerequisites(skill: str) -> list[Prerequisite]:
+    """What `skill`'s behavioral cases need provided before they run.
+
+    Declared in ``evals/machine.yml`` and applied by every engine, each where
+    its agent runs -- once per skill on the host, in each case's container
+    under ``claude-code``. One declaration rather than a hook per engine, so
+    the two cannot drift apart::
+
+        prerequisites:
+          - name: trace-decoder
+            check: [python3, -c, "import rocprof_trace_decoder"]
+            install: [sh, install-decoder.sh]
+            env:
+              PYTHONPATH: "${SKILL_CACHE_DIR}/decoder/python"
+
+    Returns ``[]`` for a skill that declares none, and raises SystemExit on a
+    malformed declaration so the structural check stops it.
+    """
+    path = machine_path(skill)
+    data = _read_machine(skill)
+    if "prerequisites" not in data:
+        return []
+    declared = data["prerequisites"]
+    # Present but null -- every item commented out -- is a mistake, not "none".
+    if not isinstance(declared, list) or not declared:
+        raise SystemExit(
+            f"error: {path}: `prerequisites` must be a non-empty list; "
+            f"got {declared!r}."
+        )
+
+    found: list[Prerequisite] = []
+    for index, entry in enumerate(declared):
+        where = f"prerequisites[{index}]"
+        if not isinstance(entry, dict):
+            raise SystemExit(f"error: {path}: `{where}` must be a mapping.")
+        unknown = sorted(set(entry) - PREREQUISITE_KEYS, key=str)
+        missing = sorted({"name", "check", "install"} - set(entry))
+        if unknown or missing:
+            raise SystemExit(
+                f"error: {path}: `{where}` "
+                + (f"has unknown key(s): {', '.join(map(str, unknown))}. " if unknown else "")
+                + (f"is missing {', '.join(missing)}. " if missing else "")
+                + "A prerequisite has `name`, `check` and `install`, and "
+                "optionally `env`."
+            )
+        name = entry["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise SystemExit(f"error: {path}: `{where}.name` must be a non-empty string.")
+        if any(p.name == name.strip() for p in found):
+            raise SystemExit(f"error: {path}: prerequisite `{name}` is declared twice.")
+        found.append(
+            Prerequisite(
+                name=name.strip(),
+                check=_command(path, f"{where}.check", entry["check"]),
+                install=_command(path, f"{where}.install", entry["install"]),
+                env=_prerequisite_env(path, f"{where}.env", entry.get("env", {})),
+            )
+        )
+    return found
