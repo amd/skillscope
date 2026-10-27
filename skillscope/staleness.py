@@ -40,7 +40,7 @@ go and look into, not a build failure.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from .behavior import BehaviorOutcome
 
@@ -57,7 +57,21 @@ VERDICTS: tuple[tuple[str, str], ...] = (
 
 @dataclass
 class Comparison:
-    """One case, run both ways."""
+    """One case, run both ways.
+
+    Both sides' checks are carried rather than reduced to the verdict. A case
+    that failed both ways can still have failed them *differently* -- the first
+    run of this command had an agent that tried the task and was stopped by the
+    machine on one side, and one that never attempted it on the other, which is
+    the skill working. The verdict could not see it and neither could the JSON,
+    so the only way to find out was to open the raw inspect logs, which is not
+    a report.
+
+    No `diverged` flag is computed from them. The details are judge prose, and
+    two runs can word the same behaviour differently; a boolean over that would
+    claim a difference the harness cannot stand behind. They are shown instead,
+    for a reader to judge.
+    """
 
     id: str
     skill: str
@@ -65,6 +79,8 @@ class Comparison:
     passed_with: bool
     passed_without: bool
     error: str | None = None
+    checks_with: list[dict] = field(default_factory=list)
+    checks_without: list[dict] = field(default_factory=list)
 
 
 def classify(with_skill: BehaviorOutcome, without: BehaviorOutcome) -> str:
@@ -114,6 +130,8 @@ def pair(
                     passed_with=bool(this and this.passed),
                     passed_without=bool(that and that.passed),
                     error=f"no result from {missing}",
+                    checks_with=list(this.checks) if this else [],
+                    checks_without=list(that.checks) if that else [],
                 )
             )
             continue
@@ -125,6 +143,8 @@ def pair(
                 passed_with=this.passed,
                 passed_without=that.passed,
                 error=this.error or that.error,
+                checks_with=list(this.checks),
+                checks_without=list(that.checks),
             )
         )
     return comparisons
@@ -161,6 +181,38 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
         "per_skill": per_skill,
         "cases": [asdict(c) for c in comparisons],
     }
+
+
+def _reasons(case: dict) -> list[tuple[str, str, str]]:
+    """Each expectation that failed on either side, with both sides' details.
+
+    Matched on the expectation text, which is what both runs were graded
+    against. A check present on one side only still appears, so a run that
+    produced fewer checks than its partner cannot hide the difference.
+    """
+    with_by_text = {c["expectation"]: c for c in case["checks_with"]}
+    without_by_text = {c["expectation"]: c for c in case["checks_without"]}
+    rows: list[tuple[str, str, str]] = []
+    for text in sorted(set(with_by_text) | set(without_by_text)):
+        here, there = with_by_text.get(text), without_by_text.get(text)
+        if (here and here["passed"]) and (there and there["passed"]):
+            continue
+        rows.append(
+            (
+                text,
+                _detail(here),
+                _detail(there),
+            )
+        )
+    return rows
+
+
+def _detail(check: dict | None) -> str:
+    if check is None:
+        return "not graded this side"
+    if check["passed"]:
+        return "passed"
+    return (check["detail"] or "failed").replace("|", "\\|").replace("\n", " ")
 
 
 def render_markdown(summary: dict) -> str:
@@ -207,4 +259,29 @@ def render_markdown(summary: dict) -> str:
                 "evidence about the skill"
             )
             lines.append(f"| `{case['id']}` | {case['verdict']} | {advice} |")
+
+    # Why each unmet expectation went unmet, on both sides. A case that failed
+    # both ways is not necessarily a case that learned nothing: the two sides
+    # can fail for reasons that differ, and that difference is the skill.
+    detailed = [c for c in summary["cases"] if c["verdict"] != "earns_it" and _reasons(c)]
+    lines += ["", "### What happened on each side", ""]
+    if not detailed:
+        # Not "every case needed the skill": a `no_signal` case has nothing
+        # unmet either, and saying so was wrong on the first run that had one.
+        lines.append(
+            "Nothing to show: no case left an expectation unmet on either side."
+        )
+    for case in detailed:
+        lines += [
+            f"**`{case['id']}`** ({case['verdict']})",
+            "",
+            "| Expectation | With the skill | Without it |",
+            "| --- | --- | --- |",
+        ]
+        for text, here, there in _reasons(case):
+            lines.append(
+                f"| {text[:70].replace('|', chr(92) + '|')} "
+                f"| {here[:90]} | {there[:90]} |"
+            )
+        lines.append("")
     return "\n".join(lines) + "\n"
