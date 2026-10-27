@@ -247,6 +247,40 @@ Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
 environment gets one matrix, labels and all.
 
+## Is the skill still earning its place?
+
+A behavioral run says a skill's cases pass. It cannot say they pass *because
+of* the skill, and those are different claims: an expectation any competent
+agent meets is a measurement of the model with the skill's name on it.
+
+`skillscope staleness` runs the same cases twice, once with the skill
+installed and once with nothing installed, and reports which ones moved.
+
+```bash
+skillscope staleness --skill my-skill
+```
+
+| Verdict | Means |
+| --- | --- |
+| `earns_it` | passed with the skill, failed without it — the case discriminates |
+| `harmful` | failed with the skill, passed without it — the skill steered the agent wrong |
+| `no_signal` | passed either way — says nothing about the skill |
+| `fails_either_way` | failed both times — a broken case, or a hard one |
+| `ungraded` | a run errored on one side or both |
+
+`no_signal` is the verdict worth acting on, and it is two findings wearing one
+name: either the skill has stopped mattering, or the case was never evidence
+about it in the first place. The second is the more common, which makes this a
+check on the dataset as much as on the skill.
+
+It reports and never gates, for the reason the `claude-code` leg does not gate
+either: the agent is nondeterministic on both sides, so a single pair is a
+place to look rather than a verdict. [`tools/benchmark_engines.py`](../tools/benchmark_engines.py)
+is the shape of the honest version of this comparison — it measures agreement
+against how much one engine already disagrees with itself — and a staleness
+number deserves the same scepticism. It also costs twice what `behavioral`
+costs, which is why no workflow runs it for you.
+
 ## Which engine grades a run
 
 `--engine` chooses what actually runs the cases. The dataset, the CLI and the

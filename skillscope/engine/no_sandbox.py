@@ -417,6 +417,7 @@ def harness_solver(
     extra_flags: list[str] | None = None,
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
+    install: bool = True,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
 
@@ -453,6 +454,12 @@ def harness_solver(
     which skill fired, and everything after that is paid for and unread. Left
     `None`, this runs through `inspect_ai.util.subprocess` exactly as before.
 
+    `install` is what separates a graded run from its baseline. False stages
+    nothing, so the agent meets the prompt with no skill at all -- the failure
+    `install_skill` exists to prevent, asked for on purpose and labelled as
+    such by the caller. `skillscope staleness` runs both and compares them;
+    nothing else should pass False.
+
     A factory rather than the rule itself because the solver is built once and
     run for every sample, while a budget counts *per case*. Handed a single
     rule, its tally would carry from one case into the next and the room would
@@ -469,7 +476,8 @@ def harness_solver(
             from inspect_ai.util import subprocess as sandbox_subprocess
 
             workspace = await _workspace()
-            install_skill(skill_dir, workspace, harness.skills_dir)
+            if install:
+                install_skill(skill_dir, workspace, harness.skills_dir)
             prompt = state.input_text
 
             spec = harnesses.RunSpec(
@@ -548,6 +556,7 @@ def claude_code_no_sandbox(
     extra_flags: list[str] | None = None,
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
+    install: bool = True,
 ):
     """`harness_solver` with Claude Code, the harness every caller has used."""
     return harness_solver(
@@ -559,4 +568,5 @@ def claude_code_no_sandbox(
         extra_flags,
         stop_when_factory,
         room_names,
+        install,
     )

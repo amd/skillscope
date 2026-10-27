@@ -79,6 +79,7 @@ from . import (
     engine,
     references,
     routing,
+    staleness,
     structure,
     usage,
 )
@@ -672,16 +673,81 @@ def cmd_routing(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_behavioral(args: argparse.Namespace) -> int:
-    skills = _prepare_graded_run(args)
-    started = time.time()
+def _gradable_cases(args: argparse.Namespace, skills: list[str]) -> list:
+    """The cases a behavioral-style run grades: selected, filtered, assertive.
 
+    Shared so `behavioral` and `staleness` cannot drift apart about what
+    `--only` or `--extended` select. A staleness run comparing a different set
+    of cases than the behavioral run it is read beside would be the one bug
+    neither report could show you.
+    """
     cases = []
     for skill in skills:
         cases.extend(datasets.load_dataset(skill, extended=args.extended))
     if args.only:
         cases = datasets.filter_cases(cases, args.only)
-    gradable = [c for c in cases if c.has_behavior]
+    return [c for c in cases if c.has_behavior]
+
+
+def _run_behavioral(
+    args: argparse.Namespace,
+    skills: list[str],
+    gradable: list,
+    *,
+    install: bool = True,
+) -> list:
+    """Run the behavioral cases on the selected engine.
+
+    `install` False runs them with no skill staged, which is the baseline half
+    of `cmd_staleness`. Both halves go through here rather than through two
+    similar call sites, so the only difference between the run being measured
+    and the run it is measured against is the flag.
+    """
+    from .engine import behavioral as inspect_behavioral
+    from .engine import models as engine_models
+
+    if args.engine == "claude-code":
+        from .engine import verify as runner
+
+        return runner.run(
+            skills,
+            gradable,
+            engine_models.resolve(args.model),
+            args.effort,
+            install=install,
+        )
+    if args.engine == "claude-code-no-sandbox":
+        # The real CLI, driven on the host, inside inspect's framework.
+        # `--model` stays the CLI's own alias here: this one does not go
+        # through an inspect model provider.
+        from .engine import no_sandbox
+
+        no_sandbox.require_local()
+        return inspect_behavioral.run(
+            skills,
+            gradable,
+            engine_models.resolve(args.model),
+            args.effort,
+            solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
+                args.model, args.effort, d, install=install
+            ),
+            baseline=not install,
+        )
+    # Not a fallthrough. An engine in ENGINES with no branch here is a
+    # bug this dispatch has had once already, and a silent default is
+    # what let it survive: runs asked for one agent, got another, and
+    # the report named the one they had asked for.
+    raise SystemExit(
+        f"error: --engine {args.engine} has no behavioral leg. "
+        f"This is a bug in skillscope, not in how it was called."
+    )
+
+
+def cmd_behavioral(args: argparse.Namespace) -> int:
+    skills = _prepare_graded_run(args)
+    started = time.time()
+
+    gradable = _gradable_cases(args, skills)
 
     if not gradable:
         print(
@@ -692,40 +758,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    from .engine import behavioral as inspect_behavioral
-    from .engine import models as engine_models
-
-    if args.engine == "claude-code":
-        from .engine import verify as runner
-
-        outcomes = runner.run(
-            skills, gradable, engine_models.resolve(args.model), args.effort
-        )
-    elif args.engine == "claude-code-no-sandbox":
-        # The real CLI, driven on the host, inside inspect's framework.
-        # `--model` stays the CLI's own alias here: this one does not go
-        # through an inspect model provider.
-        from .engine import no_sandbox
-
-        no_sandbox.require_local()
-        outcomes = inspect_behavioral.run(
-            skills,
-            gradable,
-            engine_models.resolve(args.model),
-            args.effort,
-            solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
-                args.model, args.effort, d
-            ),
-        )
-    else:
-        # Not a fallthrough. An engine in ENGINES with no branch here is a
-        # bug this dispatch has had once already, and a silent default is
-        # what let it survive: runs asked for one agent, got another, and
-        # the report named the one they had asked for.
-        raise SystemExit(
-            f"error: --engine {args.engine} has no behavioral leg. "
-            f"This is a bug in skillscope, not in how it was called."
-        )
+    outcomes = _run_behavioral(args, skills, gradable)
 
     summary = behavior.summarize(
         outcomes,
@@ -747,6 +780,59 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         return code
     if summary["totals"]["passed"] != summary["totals"]["cases"]:
         return 1
+    return 0
+
+
+def cmd_staleness(args: argparse.Namespace) -> int:
+    """Run every behavioral case twice, with the skill and without it.
+
+    Both passes run under the one `--timeout`, so a deadline that expires
+    partway leaves the rest of the second pass unmeasured -- those cases are
+    reported `ungraded` rather than as a skill that made no difference. Give
+    this command roughly twice the bound a `behavioral` run of the same cases
+    would want.
+
+    Always exits 0 on a completed run. The comparison is nondeterministic on
+    both sides, so a verdict here is somewhere to look rather than a build
+    failure -- see `skillscope/staleness.py`. A deadline that expired still
+    fails, because that is a statement about the run rather than about a skill.
+    """
+    skills = _prepare_graded_run(args)
+    started = time.time()
+
+    gradable = _gradable_cases(args, skills)
+
+    if not gradable:
+        print(
+            "[staleness] no evaluation in the selected skill(s) asserts "
+            "anything beyond routing, so there is nothing to compare. A "
+            "staleness run needs cases that say what the skill should do."
+        )
+        return 0
+
+    print(f"[staleness] {len(gradable)} case(s), run twice", flush=True)
+    with_skill = _run_behavioral(args, skills, gradable)
+    without = _run_behavioral(args, skills, gradable, install=False)
+
+    comparisons = staleness.pair(with_skill, without)
+    summary = staleness.summarize(
+        comparisons,
+        {
+            "model": args.model,
+            "engine": args.engine,
+            "effort": args.effort,
+            "skills": skills,
+            "extended": args.extended,
+            "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            **usage.snapshot().as_meta(),
+            **_sandbox_meta(args),
+        },
+    )
+    _write_report(summary, staleness.render_markdown(summary), args, "staleness")
+    if (code := _fail_if_expired()) is not None:
+        return code
     return 0
 
 
@@ -1061,6 +1147,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_graded_arguments(behavioral_parser)
     behavioral_parser.set_defaults(handler=cmd_behavioral)
+
+    staleness_parser = commands.add_parser(
+        "staleness",
+        help="Whether a skill's cases still need the skill.",
+        description=(
+            "Run every behavioral case twice -- once with the skill installed, "
+            "once with nothing installed -- and report which cases moved. A "
+            "case that passes either way is not evidence about the skill. "
+            "Reports only: it never fails a run. It costs twice what "
+            "`behavioral` costs and wants roughly twice the --timeout, "
+            "since both passes run under the one bound."
+        ),
+    )
+    _add_graded_arguments(staleness_parser)
+    staleness_parser.set_defaults(handler=cmd_staleness)
 
     select_parser = commands.add_parser(
         "select",

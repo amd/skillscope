@@ -72,6 +72,7 @@ You may also choose to customize or even disable some tests if you prefer it. Se
 | `skillscope structural` | Skill folders, datasets, and markdown references. |
 | `skillscope routing` | Which skill fires, with several installed together. |
 | `skillscope behavioral` | What a skill does once it has fired. |
+| `skillscope staleness` | Whether those cases still need the skill. |
 | `skillscope select` | The CI plan for a change, as JSON. |
 | `skillscope list-skills` | The skills that have a dataset, as JSON. |
 | `skillscope template` | The dataset template a new skill starts from. |
