@@ -82,6 +82,8 @@ the repo under test — worth adding to `.gitignore`.
 
 ## Docs
 
+* [docs/checklist.md](docs/checklist.md): every requirement, as a list to tick
+  through.
 * [docs/authoring-evals.md](docs/authoring-evals.md): writing a skill's tests.
 * [docs/usage.md](docs/usage.md): every flag, every workflow input, and what
   each check actually asserts.
