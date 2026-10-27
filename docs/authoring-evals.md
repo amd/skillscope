@@ -7,7 +7,8 @@ SPDX-License-Identifier: MIT
 # Writing evals for a skill
 
 For flags, workflow inputs, and what each check asserts, see
-[usage.md](usage.md).
+[usage.md](usage.md). For every bar your dataset has to clear, as a list, see
+[checklist.md](checklist.md).
 
 One file, `<your-skill>/evals/evals.json`, holding an `evaluations` array:
 
