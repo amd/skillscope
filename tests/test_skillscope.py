@@ -34,6 +34,7 @@ import tempfile
 import time
 import types
 import unittest
+from dataclasses import asdict
 import urllib.error
 from pathlib import Path
 from unittest import mock
@@ -6059,6 +6060,75 @@ class TestTheStalenessReportLeadsWithTheCaveat(unittest.TestCase):
         )
         self.assertIn("`a`", report)
         self.assertIn("unaided", report)
+
+
+def _checked(case_id: str, passed: bool, checks: list[dict], skill: str = "s"):
+    """A behavioral outcome carrying graded checks."""
+    return behavior.BehaviorOutcome(
+        id=case_id, skill=skill, prompt="p", passed=passed, elapsed_s=0.0, checks=checks
+    )
+
+
+def _check(text: str, passed: bool, detail: str = ""):
+    return {"kind": "expected_behavior", "expectation": text, "passed": passed, "detail": detail}
+
+
+class TestBothSidesReasonsSurviveIntoTheReport(unittest.TestCase):
+    """The first real run of this command failed both ways for *different*
+    reasons -- the agent tried the task and was blocked on one side, and never
+    attempted it on the other -- and neither the verdict nor the JSON could
+    show it. Only the raw inspect logs could, which is not a report."""
+
+    def _pair(self):
+        return staleness.pair(
+            [_checked("c", False, [
+                _check("Install it", False, "tried, blocked by missing sudo"),
+                _check("Avoid the cloud", True),
+            ])],
+            [_checked("c", False, [
+                _check("Install it", False, "only surveyed, never attempted"),
+                _check("Avoid the cloud", True),
+            ])],
+        )
+
+    def test_both_sides_checks_reach_the_comparison(self) -> None:
+        comparison = self._pair()[0]
+        self.assertEqual(len(comparison.checks_with), 2)
+        self.assertEqual(len(comparison.checks_without), 2)
+
+    def test_an_expectation_both_sides_met_is_not_reported_as_a_reason(self) -> None:
+        # Only what went unmet needs explaining.
+        rows = staleness._reasons(asdict(self._pair()[0]))
+        self.assertEqual([text for text, _, _ in rows], ["Install it"])
+
+    def test_the_two_reasons_appear_side_by_side(self) -> None:
+        summary = staleness.summarize(self._pair(), {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertIn("blocked by missing sudo", report)
+        self.assertIn("only surveyed, never attempted", report)
+
+    def test_a_clean_run_is_not_described_as_every_case_needing_the_skill(self) -> None:
+        # A `no_signal` case has no unmet expectation either, so the empty
+        # state is about unmet expectations rather than about the verdict.
+        # The first run with a no_signal case reported the opposite.
+        comparisons = staleness.pair(
+            [_checked("c", True, [_check("Do the thing", True)])],
+            [_checked("c", True, [_check("Do the thing", True)])],
+        )
+        summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertEqual(summary["totals"]["no_signal"], 1)
+        self.assertNotIn("every case needed the skill", report)
+        self.assertIn("no case left an expectation unmet", report)
+
+    def test_a_check_only_one_side_graded_is_still_shown(self) -> None:
+        # Fewer checks on one side must not hide the difference.
+        comparisons = staleness.pair(
+            [_checked("c", False, [_check("Install it", False, "blocked")])],
+            [_checked("c", False, [])],
+        )
+        rows = staleness._reasons(asdict(comparisons[0]))
+        self.assertEqual(rows[0][2], "not graded this side")
 
 
 class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
