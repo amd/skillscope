@@ -50,6 +50,7 @@ from skillscope import (
     engine as engine_module,
     references,
     routing,
+    staleness,
     structure,
 )
 from skillscope import selection as select_module
@@ -2377,7 +2378,12 @@ class TestBehavioralEngineDispatch(unittest.TestCase):
         # The bug was a branch list that fell behind the choices list, so
         # the source is what to assert: every engine named, and an `else`
         # that raises rather than quietly picking one.
-        source = inspect.getsource(cli.cmd_behavioral)
+        #
+        # Read from `_run_behavioral` rather than `cmd_behavioral`: the
+        # dispatch moved there when `staleness` began running the same cases
+        # with the skill withheld, so both commands reach an engine by one
+        # route. The property being guarded is unchanged.
+        source = inspect.getsource(cli._run_behavioral)
         for engine in cli.ENGINES:
             with self.subTest(engine=engine):
                 self.assertIn(f'args.engine == "{engine}"', source)
@@ -5964,6 +5970,114 @@ class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):
     def test_a_good_table_still_binds(self) -> None:
         self._apply('{"mockllm/model": {"input": 5.0, "output": 25.0}}')
         self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
+
+
+def _outcome(case_id: str, passed: bool, *, error: str | None = None, skill: str = "s"):
+    """One behavioral outcome, as either half of a staleness pair would report it."""
+    return behavior.BehaviorOutcome(
+        id=case_id, skill=skill, prompt="p", passed=passed, elapsed_s=0.0, error=error
+    )
+
+
+class TestStalenessSeparatesTheSkillFromTheModel(unittest.TestCase):
+    """The four verdicts, and why each is not the others."""
+
+    def test_a_case_that_needs_the_skill_is_the_one_that_moved(self) -> None:
+        self.assertEqual(
+            staleness.classify(_outcome("a", True), _outcome("a", False)), "earns_it"
+        )
+
+    def test_a_case_that_passes_unaided_is_not_evidence(self) -> None:
+        # The finding the command exists for: green with the skill, green
+        # without it, so the report was measuring the model.
+        self.assertEqual(
+            staleness.classify(_outcome("a", True), _outcome("a", True)), "no_signal"
+        )
+
+    def test_a_skill_that_makes_things_worse_is_called_that(self) -> None:
+        self.assertEqual(
+            staleness.classify(_outcome("a", False), _outcome("a", True)), "harmful"
+        )
+
+    def test_a_case_failing_both_ways_says_nothing_either(self) -> None:
+        self.assertEqual(
+            staleness.classify(_outcome("a", False), _outcome("a", False)),
+            "fails_either_way",
+        )
+
+    def test_an_errored_side_is_ungraded_rather_than_no_difference(self) -> None:
+        # A dropped connection measured nothing. Reading it as "the skill made
+        # no difference" is the most flattering possible reading of an error.
+        self.assertEqual(
+            staleness.classify(
+                _outcome("a", False, error="API Error: 504"), _outcome("a", False)
+            ),
+            "ungraded",
+        )
+
+
+class TestStalenessPairsEveryCaseItWasAskedFor(unittest.TestCase):
+    def test_a_case_missing_from_one_side_is_kept_as_ungraded(self) -> None:
+        # Comparing the intersection would shrink the denominator and make
+        # every surviving number look more confident than it is.
+        comparisons = staleness.pair([_outcome("a", True), _outcome("b", True)], [_outcome("a", False)])
+        verdicts = {c.id: c.verdict for c in comparisons}
+        self.assertEqual(verdicts, {"a": "earns_it", "b": "ungraded"})
+        missing = next(c for c in comparisons if c.id == "b")
+        self.assertIn("baseline", missing.error)
+
+    def test_the_share_is_over_what_was_graded_both_ways(self) -> None:
+        comparisons = staleness.pair(
+            [_outcome("a", True), _outcome("b", True), _outcome("c", True)],
+            [_outcome("a", False), _outcome("b", True)],
+        )
+        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["cases"], 3)
+        self.assertEqual(totals["graded"], 2)
+        self.assertEqual(totals["discriminating"], 0.5)
+
+    def test_nothing_graded_leaves_the_share_unset_rather_than_zero(self) -> None:
+        # Zero would read as "the skill never mattered", which is a result.
+        # None is the absence of one.
+        comparisons = staleness.pair([_outcome("a", True)], [])
+        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
+        self.assertIsNone(totals["discriminating"])
+
+
+class TestTheStalenessReportLeadsWithTheCaveat(unittest.TestCase):
+    def test_the_reader_is_told_it_does_not_gate_before_the_numbers(self) -> None:
+        comparisons = staleness.pair([_outcome("a", True)], [_outcome("a", True)])
+        summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertIn("Reporting only", report)
+        self.assertLess(report.index("Reporting only"), report.index("| Verdict |"))
+
+    def test_a_case_that_needed_nothing_is_named_with_what_to_do(self) -> None:
+        comparisons = staleness.pair([_outcome("a", True)], [_outcome("a", True)])
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertIn("`a`", report)
+        self.assertIn("unaided", report)
+
+
+class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
+    """The flag has to reach the driver, or the two halves are not comparable."""
+
+    def test_the_host_driver_stages_nothing_when_asked_not_to(self) -> None:
+        import inspect as _inspect
+
+        signature = _inspect.signature(engine_no_sandbox.claude_code_no_sandbox)
+        self.assertIn("install", signature.parameters)
+        self.assertIs(signature.parameters["install"].default, True)
+
+    def test_the_task_name_says_which_half_it_is(self) -> None:
+        # Both halves write into one log directory; a name that did not say
+        # would leave the two indistinguishable on disk.
+        import inspect as _inspect
+
+        source = _inspect.getsource(engine_behavioral.build_task)
+        self.assertIn("-baseline", source)
 
 
 if __name__ == "__main__":

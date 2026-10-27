@@ -85,6 +85,7 @@ def build_task(
     ctx: dict | None = None,
     *,
     solver_factory,
+    baseline: bool = False,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
@@ -96,6 +97,11 @@ def build_task(
     Required, and keyword-only. It was optional while a built-in react agent
     was the default, and a caller that forgot it silently graded a different
     agent than it asked for.
+
+    `baseline` only names the task. Whether the skill is actually staged is
+    the solver's business, so the flag and the factory have to agree -- the
+    name is what makes a disagreement visible in the log directory rather
+    than invisible in the numbers.
     """
     from inspect_ai import Task
 
@@ -110,7 +116,7 @@ def build_task(
 
     bound = deadline.active()
     return Task(
-        name=f"behavioral-{skill}",
+        name=f"behavioral-{skill}" + ("-baseline" if baseline else ""),
         dataset=samples,
         setup=hooks.setup_solver(hook, skill, cases),
         solver=solver_factory(skill_dir),
@@ -292,8 +298,14 @@ def run(
     *,
     solver_factory,
     log_dir: str | None = None,
+    baseline: bool = False,
 ) -> list[BehaviorOutcome]:
-    """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
+    """Run every behavioral case, grouped by skill. Mirrors `behavior.run`.
+
+    `baseline` is passed through to the task and used in the progress lines.
+    It does not itself remove the skill: the caller's `solver_factory` does
+    that, and this says so in the output.
+    """
     from inspect_ai import eval as inspect_eval
 
     sandbox_spec.require_provider()
@@ -311,11 +323,18 @@ def run(
             outcomes.extend(_failed(skill, skill_cases, deadline.active().message()))
             continue
 
-        print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
+        label = "baseline" if baseline else "behavioral"
+        print(f"[{label}] {skill}: {len(skill_cases)} case(s)", flush=True)
         try:
             logs = run_eval(
                 inspect_eval,
-                build_task(skill, skill_cases, model, solver_factory=solver_factory),
+                build_task(
+                    skill,
+                    skill_cases,
+                    model,
+                    solver_factory=solver_factory,
+                    baseline=baseline,
+                ),
                 model=model,
                 model_args=models.model_args(model),
                 log_dir=log_dir or str(Path(".skillscope") / "logs"),
