@@ -51,8 +51,22 @@ VERDICTS: tuple[tuple[str, str], ...] = (
     ("harmful", "failed with the skill, passed without it"),
     ("no_signal", "passed either way"),
     ("fails_either_way", "failed either way"),
+    ("guards_only", "asserts nothing the skill could be credited for"),
     ("ungraded", "one side or both could not be graded"),
 )
+
+# What a case claims the skill will *do*. Only these decide a verdict.
+POSITIVE_KINDS = ("expected_behavior", "logs_contain", "files_exist")
+
+# What a case forbids. Deliberately excluded from the verdict.
+#
+# A guard rail exists to catch a future edit to the skill that starts doing the
+# forbidden thing, so a well-written one holds whether or not the skill is
+# installed -- the base model was never going to run `sudo` unprompted either.
+# Counting that as "the skill made no difference" would mark the checks most
+# worth keeping as dead weight, and push an author to delete them. They are
+# reported on their own terms instead: held, or broken.
+GUARD_KIND = "unexpected_behavior"
 
 
 @dataclass
@@ -81,10 +95,33 @@ class Comparison:
     error: str | None = None
     checks_with: list[dict] = field(default_factory=list)
     checks_without: list[dict] = field(default_factory=list)
+    # Whether the agent actually reached for the skill on the installed side.
+    # An `earns_it` with this unset is the weak kind: something differed, but
+    # not demonstrably because of the thing under test.
+    activated_with: str | None = None
+
+
+def positive(checks: list[dict]) -> list[dict]:
+    """The checks that claim the skill will do something."""
+    return [c for c in checks if c.get("kind") in POSITIVE_KINDS]
+
+
+def guards(checks: list[dict]) -> list[dict]:
+    """The checks that forbid something."""
+    return [c for c in checks if c.get("kind") == GUARD_KIND]
+
+
+def _met(outcome: BehaviorOutcome) -> bool:
+    """Whether this side met every positive claim on the case."""
+    claims = positive(outcome.checks)
+    return bool(claims) and all(c["passed"] for c in claims)
 
 
 def classify(with_skill: BehaviorOutcome, without: BehaviorOutcome) -> str:
     """Which of `VERDICTS` this pair is.
+
+    Judged on the positive claims alone -- see `GUARD_KIND` for why the
+    forbidden ones are kept out of it.
 
     An errored run on either side is `ungraded` rather than a failure: a
     provider that dropped the connection has measured nothing, and counting it
@@ -93,11 +130,17 @@ def classify(with_skill: BehaviorOutcome, without: BehaviorOutcome) -> str:
     """
     if with_skill.error or without.error:
         return "ungraded"
-    if with_skill.passed and not without.passed:
+    if not positive(with_skill.checks) and not positive(without.checks):
+        # Nothing was claimed, so nothing can be credited. Reporting this as
+        # `fails_either_way` would read as a broken case rather than as one
+        # that only ever pinned down what must not happen.
+        return "guards_only"
+    here, there = _met(with_skill), _met(without)
+    if here and not there:
         return "earns_it"
-    if without.passed and not with_skill.passed:
+    if there and not here:
         return "harmful"
-    if with_skill.passed and without.passed:
+    if here and there:
         return "no_signal"
     return "fails_either_way"
 
@@ -132,6 +175,7 @@ def pair(
                     error=f"no result from {missing}",
                     checks_with=list(this.checks) if this else [],
                     checks_without=list(that.checks) if that else [],
+                    activated_with=this.activated if this else None,
                 )
             )
             continue
@@ -145,6 +189,7 @@ def pair(
                 error=this.error or that.error,
                 checks_with=list(this.checks),
                 checks_without=list(that.checks),
+                activated_with=this.activated,
             )
         )
     return comparisons
@@ -159,6 +204,7 @@ def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
     prompt field nobody wrote would be worse than an honest blank.
     """
     from .engine import behavioral, scorers
+    from .engine import routing as routing_engine
 
     eval_meta = log.eval.metadata or {}
     skill = eval_meta.get(behavioral.SKILL_KEY) or log.eval.task
@@ -177,6 +223,9 @@ def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
                 elapsed_s=round(getattr(sample, "total_time", None) or 0.0, 2),
                 checks=checks,
                 error=error,
+                # Detected here too, or a rebuilt comparison would report every
+                # `earns_it` as never having fired and warn about all of them.
+                activated=behavioral._activated(routing_engine, sample, skill),
             )
         )
     return skill, bool(eval_meta.get(behavioral.BASELINE_KEY)), outcomes
@@ -226,7 +275,18 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
             **{key: sum(1 for c in subset if c.verdict == key) for key, _ in VERDICTS},
         }
 
-    graded = [c for c in comparisons if c.verdict != "ungraded"]
+    graded = [
+        c for c in comparisons if c.verdict not in ("ungraded", "guards_only")
+    ]
+
+    # Guard rails, counted separately. A broken one is the serious finding
+    # here: a skill that made the agent do the forbidden thing.
+    broken = [
+        c
+        for c in comparisons
+        if any(not g["passed"] for g in guards(c.checks_with))
+    ]
+    guard_checks = sum(len(guards(c.checks_with)) for c in comparisons)
     return {
         "meta": meta,
         "totals": {
@@ -239,6 +299,15 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
                 round(sum(1 for c in graded if c.verdict == "earns_it") / len(graded), 3)
                 if graded
                 else None
+            ),
+            "guard_checks": guard_checks,
+            "guards_broken_with_skill": len(broken),
+            # `earns_it` cases where the skill was installed but never fired.
+            # The outcome differed; the skill is not shown to be why.
+            "earned_without_firing": sum(
+                1
+                for c in comparisons
+                if c.verdict == "earns_it" and not c.activated_with
             ),
         },
         "per_skill": per_skill,
@@ -306,6 +375,31 @@ def render_markdown(summary: dict) -> str:
     if share is not None:
         lines += ["", f"Discriminating: {share:.0%} of the cases graded both ways."]
 
+    unfired = totals["earned_without_firing"]
+    if unfired:
+        lines += [
+            "",
+            f"> **{unfired} of the {totals['earns_it']} `earns_it` case(s) never "
+            "activated the skill.** Installing a skill does not make an agent "
+            "use it, so for those the outcome differed without the skill being "
+            "shown to be the reason. Read them as a lead rather than a result.",
+        ]
+
+    if totals["guard_checks"]:
+        broken = totals["guards_broken_with_skill"]
+        lines += [
+            "",
+            f"{totals['guard_checks']} guard rail(s) checked and kept out of "
+            "the verdict: they hold whether or not the skill is installed, "
+            "which is what they are for. "
+            + (
+                f"**{broken} case(s) broke one with the skill installed** -- "
+                "that is the skill doing the forbidden thing."
+                if broken
+                else "None was broken with the skill installed."
+            ),
+        ]
+
     notable = [c for c in summary["cases"] if c["verdict"] in ("no_signal", "harmful")]
     lines += ["", "### Cases worth a look", ""]
     if not notable:
@@ -323,16 +417,17 @@ def render_markdown(summary: dict) -> str:
             )
             lines.append(f"| `{case['id']}` | {case['verdict']} | {advice} |")
 
-    # Why each unmet expectation went unmet, on both sides. A case that failed
-    # both ways is not necessarily a case that learned nothing: the two sides
-    # can fail for reasons that differ, and that difference is the skill.
-    detailed = [c for c in summary["cases"] if c["verdict"] != "earns_it" and _reasons(c)]
-    lines += ["", "### What happened on each side", ""]
+    # Every claim that came out differently on the two sides -- whatever the
+    # verdict. This used to skip `earns_it` cases, on the reasoning that a
+    # skill which earned its keep needs no explaining, which had it exactly
+    # backwards: those are the only cases where the evidence lives, and the
+    # section printed "nothing to show" on a run whose whole point was that
+    # three cases moved.
+    detailed = [c for c in summary["cases"] if _reasons(c)]
+    lines += ["", "### What the skill changed", ""]
     if not detailed:
-        # Not "every case needed the skill": a `no_signal` case has nothing
-        # unmet either, and saying so was wrong on the first run that had one.
         lines.append(
-            "Nothing to show: no case left an expectation unmet on either side."
+            "Nothing: every claim came out the same with the skill and without it."
         )
     for case in detailed:
         lines += [

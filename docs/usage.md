@@ -268,6 +268,16 @@ skillscope staleness --skill my-skill
 | `fails_either_way` | failed both times — a broken case, or a hard one |
 | `ungraded` | a run errored on one side or both |
 
+A verdict says what changed, not why. So the graded side also records whether
+the agent *reached for* the skill, using the same detector the routing leg
+uses: installing a skill does not make an agent use it, and "installed and the
+outcome differed" is a weaker claim than "the skill fired and the outcome
+differed". An `earns_it` where the skill never fired is reported as the lead it
+is rather than as a result. Guard rails -- `unexpected_behavior` -- are kept
+out of the verdict entirely, since a good one holds whether or not the skill is
+installed; they are counted on their own, where a guard broken *with* the skill
+installed is the serious finding.
+
 `no_signal` is the verdict worth acting on, and it is two findings wearing one
 name: either the skill has stopped mattering, or the case was never evidence
 about it in the first place. The second is the more common, which makes this a
