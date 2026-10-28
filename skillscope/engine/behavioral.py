@@ -117,6 +117,8 @@ def build_task(
     bound = deadline.active()
     return Task(
         name=f"behavioral-{skill}" + ("-baseline" if baseline else ""),
+        metadata={BASELINE_KEY: baseline, SKILL_KEY: skill},
+        tags=["skillscope", "baseline" if baseline else "graded"],
         dataset=samples,
         setup=hooks.setup_solver(hook, skill, cases),
         solver=solver_factory(skill_dir),
@@ -212,6 +214,14 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
 # Eval-level metadata naming the `run_eval` call that started an eval, so a
 # stopped run reads back its own log and nobody else's.
 CALL_TOKEN = "skillscope_call"
+
+# Which half of a staleness comparison a log is, and whose skill it is about.
+# The task name says the same thing, but a name is a string somebody has to
+# parse; inspect filters on metadata and tags, and so can anything reading a
+# log directory afterwards. Written by both engines, so a reader does not have
+# to know which one produced the log it is holding.
+BASELINE_KEY = "skillscope_baseline"
+SKILL_KEY = "skillscope_skill"
 
 
 def stop_requested() -> bool:

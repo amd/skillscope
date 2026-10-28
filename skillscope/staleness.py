@@ -150,6 +150,69 @@ def pair(
     return comparisons
 
 
+def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
+    """`(skill, was_baseline, outcomes)` for one inspect log.
+
+    Rebuilt from the samples rather than from a dataset, because an offline
+    reader has no `Case` list: the log is all there is. Prompts are left empty
+    for the same reason -- the comparison is about verdicts, and inventing a
+    prompt field nobody wrote would be worse than an honest blank.
+    """
+    from .engine import behavioral, scorers
+
+    eval_meta = log.eval.metadata or {}
+    skill = eval_meta.get(behavioral.SKILL_KEY) or log.eval.task
+    outcomes: list[BehaviorOutcome] = []
+    for sample in log.samples or []:
+        checks: list[dict] = []
+        for score in (sample.scores or {}).values():
+            checks.extend((score.metadata or {}).get(scorers.CHECKS, []))
+        error = sample.error.message if sample.error is not None else None
+        outcomes.append(
+            BehaviorOutcome(
+                id=str(sample.id),
+                skill=skill,
+                prompt="",
+                passed=error is None and bool(checks) and all(c["passed"] for c in checks),
+                elapsed_s=round(getattr(sample, "total_time", None) or 0.0, 2),
+                checks=checks,
+                error=error,
+            )
+        )
+    return skill, bool(eval_meta.get(behavioral.BASELINE_KEY)), outcomes
+
+
+def from_logs(log_dir: str) -> list[Comparison]:
+    """Rebuild the comparison from logs already on disk.
+
+    Two runs become a pair because they carry the same skill and opposite
+    `BASELINE_KEY`, which is why those are written as metadata rather than
+    inferred from a task name. A directory holding only one side of a skill is
+    reported as a comparison against nothing, the same way a case missing from
+    one side is: silently dropping it would read as a smaller, cleaner run.
+
+    Logs that are not skillscope's own are passed over. A shared log directory
+    is normal, and failing on a neighbour's file would make this unusable in
+    exactly the directories it is meant for.
+    """
+    from inspect_ai.log import list_eval_logs, read_eval_log
+
+    from .engine import behavioral
+
+    sides: dict[str, dict[bool, list[BehaviorOutcome]]] = {}
+    for info in list_eval_logs(log_dir):
+        log = read_eval_log(info.name)
+        if behavioral.BASELINE_KEY not in (log.eval.metadata or {}):
+            continue
+        skill, baseline, outcomes = outcomes_from_log(log)
+        sides.setdefault(skill, {}).setdefault(baseline, []).extend(outcomes)
+
+    comparisons: list[Comparison] = []
+    for skill in sorted(sides):
+        comparisons.extend(pair(sides[skill].get(False, []), sides[skill].get(True, [])))
+    return comparisons
+
+
 def summarize(comparisons: list[Comparison], meta: dict) -> dict:
     counts = {key: 0 for key, _ in VERDICTS}
     for comparison in comparisons:

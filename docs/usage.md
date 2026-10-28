@@ -273,6 +273,16 @@ name: either the skill has stopped mattering, or the case was never evidence
 about it in the first place. The second is the more common, which makes this a
 check on the dataset as much as on the skill.
 
+Both halves write which side they were, and whose skill they were about, into
+their inspect log metadata (`skillscope_baseline`, `skillscope_skill`). So a
+finished run can be looked at again without paying for it twice:
+
+```bash
+skillscope staleness --from-logs .skillscope/logs
+```
+
+That reaches no model and runs no preflight, having nothing to spend.
+
 It reports and never gates, for the reason the `claude-code` leg does not gate
 either: the agent is nondeterministic on both sides, so a single pair is a
 place to look rather than a verdict. [`tools/benchmark_engines.py`](../tools/benchmark_engines.py)
