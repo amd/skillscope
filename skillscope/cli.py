@@ -783,6 +783,13 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
     return 0
 
 
+def engine_behavioral_keys() -> tuple[str, str]:
+    """The metadata keys both engines stamp on a staleness log."""
+    from .engine import behavioral
+
+    return behavioral.BASELINE_KEY, behavioral.SKILL_KEY
+
+
 def cmd_staleness(args: argparse.Namespace) -> int:
     """Run every behavioral case twice, with the skill and without it.
 
@@ -797,9 +804,40 @@ def cmd_staleness(args: argparse.Namespace) -> int:
     failure -- see `skillscope/staleness.py`. A deadline that expired still
     fails, because that is a statement about the run rather than about a skill.
     """
-    skills = _prepare_graded_run(args)
     started = time.time()
 
+    if args.from_logs:
+        # Nothing is run, so nothing is prepared: no structural gate, no model
+        # pin, no reachability probe. Those guard a spend that is not about to
+        # happen, and demanding them would make a free command fail for
+        # reasons that cannot affect its answer.
+        comparisons = staleness.from_logs(args.from_logs)
+        if not comparisons:
+            baseline_key, _ = engine_behavioral_keys()
+            raise SystemExit(
+                f"error: no skillscope staleness logs in {args.from_logs}. "
+                f"Both halves of a comparison carry `{baseline_key}` in their "
+                "eval metadata; logs written before that, or by another tool, "
+                "cannot be paired."
+            )
+        summary = staleness.summarize(
+            comparisons,
+            {
+                "model": args.model,
+                "engine": args.engine,
+                "effort": args.effort,
+                "skills": sorted({c.skill for c in comparisons}),
+                "extended": args.extended,
+                "from_logs": args.from_logs,
+                "wall_time_s": round(time.time() - started, 1),
+                "timeout": args.timeout,
+                "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            },
+        )
+        _write_report(summary, staleness.render_markdown(summary), args, "staleness")
+        return 0
+
+    skills = _prepare_graded_run(args)
     gradable = _gradable_cases(args, skills)
 
     if not gradable:
@@ -1161,6 +1199,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_graded_arguments(staleness_parser)
+    staleness_parser.add_argument(
+        "--from-logs",
+        metavar="DIR",
+        help=(
+            "Rebuild the comparison from logs already on disk instead of "
+            "running anything. Both halves carry the skill and which side "
+            "they were in their eval metadata, so a log directory is enough "
+            "to pair them. Costs nothing and reaches no model."
+        ),
+    )
     staleness_parser.set_defaults(handler=cmd_staleness)
 
     select_parser = commands.add_parser(

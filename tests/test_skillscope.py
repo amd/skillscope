@@ -6131,6 +6131,67 @@ class TestBothSidesReasonsSurviveIntoTheReport(unittest.TestCase):
         self.assertEqual(rows[0][2], "not graded this side")
 
 
+class _StubSample:
+    def __init__(self, sample_id, checks, error=None):
+        self.id = sample_id
+        self.scores = {"expectations": types.SimpleNamespace(metadata={"checks": checks})}
+        self.error = error
+        self.total_time = 1.0
+
+
+class _StubLog:
+    def __init__(self, skill, baseline, samples):
+        self.eval = types.SimpleNamespace(
+            task=f"behavioral-{skill}",
+            metadata={
+                engine_behavioral.SKILL_KEY: skill,
+                engine_behavioral.BASELINE_KEY: baseline,
+            },
+        )
+        self.samples = samples
+
+
+class TestAComparisonCanBeRebuiltFromLogs(unittest.TestCase):
+    """The pairing is written into the logs, so a directory is enough.
+
+    Without this the two runs are related only in the memory of the process
+    that launched them, and a finished run cannot be looked at again without
+    paying for it twice over.
+    """
+
+    def test_a_log_reports_which_side_it_was(self) -> None:
+        log = _StubLog("alpha", True, [_StubSample("c", [_check("do it", False)])])
+        skill, baseline, outcomes = staleness.outcomes_from_log(log)
+        self.assertEqual(skill, "alpha")
+        self.assertTrue(baseline)
+        self.assertEqual(len(outcomes), 1)
+        self.assertFalse(outcomes[0].passed)
+
+    def test_a_sample_passes_only_when_every_check_did(self) -> None:
+        log = _StubLog("alpha", False, [
+            _StubSample("c", [_check("a", True), _check("b", True)]),
+            _StubSample("d", [_check("a", True), _check("b", False)]),
+        ])
+        _, _, outcomes = staleness.outcomes_from_log(log)
+        self.assertEqual([o.passed for o in outcomes], [True, False])
+
+    def test_a_sample_with_no_checks_has_not_passed(self) -> None:
+        # An ungraded sample is not a green one.
+        log = _StubLog("alpha", False, [_StubSample("c", [])])
+        _, _, outcomes = staleness.outcomes_from_log(log)
+        self.assertFalse(outcomes[0].passed)
+
+    def test_the_two_sides_pair_on_the_skill_they_name(self) -> None:
+        graded = _StubLog("alpha", False, [_StubSample("c", [_check("do it", True)])])
+        baseline = _StubLog("alpha", True, [_StubSample("c", [_check("do it", False)])])
+        sides = {}
+        for log in (graded, baseline):
+            skill, is_baseline, outcomes = staleness.outcomes_from_log(log)
+            sides.setdefault(skill, {}).setdefault(is_baseline, []).extend(outcomes)
+        comparisons = staleness.pair(sides["alpha"][False], sides["alpha"][True])
+        self.assertEqual([c.verdict for c in comparisons], ["earns_it"])
+
+
 class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
     """The flag has to reach the driver, or the two halves are not comparable."""
 

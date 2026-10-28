@@ -249,6 +249,12 @@ def build_task(
     bound = deadline.active()
     return Task(
         name=f"claude-code-{skill}" + ("" if install else "-baseline"),
+        # See `behavioral.build_task`: the same two keys whichever engine ran.
+        metadata={
+            behavioral.BASELINE_KEY: not install,
+            behavioral.SKILL_KEY: skill,
+        },
+        tags=["skillscope", "graded" if install else "baseline"],
         setup=hooks.setup_solver(hook, skill, cases),
         cleanup=hooks.cleanup_fn(hook, skill, cases),
         dataset=samples,
