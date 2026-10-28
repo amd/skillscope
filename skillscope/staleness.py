@@ -363,6 +363,23 @@ def render_markdown(summary: dict) -> str:
         f"{headline} on `{meta['model']}` (effort `{meta['effort']}`). Every case "
         "ran twice: once with the skill installed, once with nothing installed.",
         "",
+    ]
+
+    # Nothing discriminated. The row `earns_it | 0` is true and says nothing,
+    # and this is the one result the command exists to surface, so it is said
+    # rather than left to be noticed in a table.
+    if totals["graded"] and not totals["earns_it"]:
+        lines += [
+            "> **No case in this suite shows the skill doing anything.** Every "
+            "graded case came out the same with the skill and without it. "
+            "Either the skill has stopped earning its place, or its cases "
+            "never tested what it knows -- read the skill and ask whether any "
+            "case here would need it. Those are different problems with "
+            "different fixes.",
+            "",
+        ]
+
+    lines += [
         "Reporting only. Agents disagree with themselves between runs, so treat "
         "a surprising verdict as somewhere to look rather than as a result.",
         "",

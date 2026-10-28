@@ -6217,6 +6217,48 @@ class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):
         self.assertIn("rocm --version", report)
 
 
+class TestASkillThatChangedNothingIsToldPlainly(unittest.TestCase):
+    """`earns_it | 0` is a true row that says nothing, and this is the one
+    result the command exists to surface."""
+
+    def _all_no_signal(self):
+        both = [_checked("a", True, [_check("x", True)])]
+        return staleness.pair(both, both)
+
+    def test_the_result_is_stated_rather_than_left_in_the_table(self) -> None:
+        report = staleness.render_markdown(
+            staleness.summarize(self._all_no_signal(), {"model": "m", "effort": "e"})
+        )
+        self.assertIn("No case in this suite shows the skill doing anything", report)
+
+    def test_it_names_both_explanations(self) -> None:
+        # Retire the skill and fix the cases are different actions, and the
+        # report cannot tell which applies.
+        report = staleness.render_markdown(
+            staleness.summarize(self._all_no_signal(), {"model": "m", "effort": "e"})
+        )
+        self.assertIn("stopped earning its place", report)
+        self.assertIn("never tested what it knows", report)
+
+    def test_a_run_with_a_discriminating_case_says_nothing_of_the_sort(self) -> None:
+        comparisons = staleness.pair(
+            [_checked("a", True, [_check("x", True)])],
+            [_checked("a", False, [_check("x", False)])],
+        )
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertNotIn("shows the skill doing anything", report)
+
+    def test_a_run_that_graded_nothing_does_not_claim_the_skill_is_idle(self) -> None:
+        # Nothing graded is not the same as nothing changed.
+        comparisons = staleness.pair([_checked("a", True, [_check("x", True)])], [])
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertNotIn("shows the skill doing anything", report)
+
+
 class TestEarningItMeansTheSkillActuallyFired(unittest.TestCase):
     """Installing a skill does not make an agent use it.
 
