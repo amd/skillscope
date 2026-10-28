@@ -5974,9 +5974,18 @@ class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):
 
 
 def _outcome(case_id: str, passed: bool, *, error: str | None = None, skill: str = "s"):
-    """One behavioral outcome, as either half of a staleness pair would report it."""
+    """One behavioral outcome, as either half of a staleness pair would report it.
+
+    Carries a positive claim matching `passed`, because that is what a verdict
+    is computed from -- an outcome asserting nothing is `guards_only`, which
+    has its own tests.
+    """
     return behavior.BehaviorOutcome(
-        id=case_id, skill=skill, prompt="p", passed=passed, elapsed_s=0.0, error=error
+        id=case_id, skill=skill, prompt="p", passed=passed, elapsed_s=0.0, error=error,
+        checks=[{
+            "kind": "expected_behavior", "expectation": "do the thing",
+            "passed": passed, "detail": "",
+        }],
     )
 
 
@@ -6119,7 +6128,7 @@ class TestBothSidesReasonsSurviveIntoTheReport(unittest.TestCase):
         report = staleness.render_markdown(summary)
         self.assertEqual(summary["totals"]["no_signal"], 1)
         self.assertNotIn("every case needed the skill", report)
-        self.assertIn("no case left an expectation unmet", report)
+        self.assertIn("every claim came out the same", report)
 
     def test_a_check_only_one_side_graded_is_still_shown(self) -> None:
         # Fewer checks on one side must not hide the difference.
@@ -6149,6 +6158,104 @@ class _StubLog:
             },
         )
         self.samples = samples
+
+
+class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):
+    """A guard rail holds with or without the skill -- that is its job.
+
+    Folding that into the verdict marks the checks most worth keeping as dead
+    weight, which would push an author to delete exactly the wrong ones.
+    """
+
+    def _guard(self, passed: bool):
+        return {"kind": "unexpected_behavior", "expectation": "no sudo",
+                "passed": passed, "detail": ""}
+
+    def test_a_guard_holding_on_both_sides_does_not_make_a_case_no_signal(self) -> None:
+        # The claim moved; the guard did not. The verdict follows the claim.
+        with_skill = _checked("c", True, [_check("run the CLI", True), self._guard(True)])
+        without = _checked("c", False, [_check("run the CLI", False), self._guard(True)])
+        self.assertEqual(staleness.classify(with_skill, without), "earns_it")
+
+    def test_a_case_with_only_guards_is_called_that(self) -> None:
+        # Nothing was claimed, so nothing can be credited -- but the case is
+        # not broken, which `fails_either_way` would imply.
+        both = _checked("c", True, [self._guard(True)])
+        self.assertEqual(staleness.classify(both, both), "guards_only")
+
+    def test_guards_only_cases_stay_out_of_the_discriminating_share(self) -> None:
+        comparisons = staleness.pair(
+            [_checked("a", True, [_check("x", True)]), _checked("b", True, [self._guard(True)])],
+            [_checked("a", False, [_check("x", False)]), _checked("b", True, [self._guard(True)])],
+        )
+        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["guards_only"], 1)
+        self.assertEqual(totals["graded"], 1)
+        self.assertEqual(totals["discriminating"], 1.0)
+
+    def test_a_guard_broken_with_the_skill_is_surfaced(self) -> None:
+        # The serious finding: the skill made the agent do the forbidden thing.
+        comparisons = staleness.pair(
+            [_checked("c", False, [_check("x", True), self._guard(False)])],
+            [_checked("c", True, [_check("x", True), self._guard(True)])],
+        )
+        summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        self.assertEqual(summary["totals"]["guards_broken_with_skill"], 1)
+        self.assertIn("forbidden thing", staleness.render_markdown(summary))
+
+    def test_the_evidence_shows_even_when_the_skill_earned_it(self) -> None:
+        # The old report skipped `earns_it` cases, so a run whose whole point
+        # was that three cases moved printed "nothing to show".
+        comparisons = staleness.pair(
+            [_checked("c", True, [_check("ran `rocm --version`", True)])],
+            [_checked("c", False, [_check("ran `rocm --version`", False)])],
+        )
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertIn("What the skill changed", report)
+        self.assertIn("rocm --version", report)
+
+
+class TestEarningItMeansTheSkillActuallyFired(unittest.TestCase):
+    """Installing a skill does not make an agent use it.
+
+    Until activation was recorded, an `earns_it` meant only that the outcome
+    differed on the side where the skill happened to be installed.
+    """
+
+    def _pair(self, activated):
+        with_skill = _checked("c", True, [_check("ran the CLI", True)])
+        with_skill.activated = activated
+        return staleness.pair([with_skill], [_checked("c", False, [_check("ran the CLI", False)])])
+
+    def test_the_firing_is_carried_onto_the_comparison(self) -> None:
+        self.assertEqual(self._pair("rocm-doctor")[0].activated_with, "rocm-doctor")
+
+    def test_an_earns_it_that_never_fired_is_counted(self) -> None:
+        totals = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["earns_it"], 1)
+        self.assertEqual(totals["earned_without_firing"], 1)
+
+    def test_an_earns_it_that_fired_is_not_counted(self) -> None:
+        totals = staleness.summarize(
+            self._pair("rocm-doctor"), {"model": "m", "effort": "e"}
+        )["totals"]
+        self.assertEqual(totals["earned_without_firing"], 0)
+
+    def test_the_reader_is_warned_before_believing_the_number(self) -> None:
+        summary = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertIn("never activated the skill", report)
+        self.assertLess(report.index("never activated"), report.index("### Cases worth a look"))
+
+    def test_a_clean_run_says_nothing_about_firing(self) -> None:
+        # No warning when every earns_it fired: an unconditional note would be
+        # noise, and noise is what gets skipped on the run that matters.
+        report = staleness.render_markdown(
+            staleness.summarize(self._pair("rocm-doctor"), {"model": "m", "effort": "e"})
+        )
+        self.assertNotIn("never activated the skill", report)
 
 
 class TestAComparisonCanBeRebuiltFromLogs(unittest.TestCase):

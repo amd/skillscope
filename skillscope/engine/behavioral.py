@@ -146,6 +146,33 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
     ]
 
 
+def _activated(routing_engine, sample, skill: str) -> str | None:
+    """The skill the agent reached for in this sample, if any.
+
+    Graded by `routing.detect_activation`, the same rule and the same tool-name
+    matching the routing leg uses, so "fired" means one thing across the two
+    commands. A baseline sample has no skill installed and so returns None,
+    which is the point: it is what makes "the skill fired and the outcome
+    differed" sayable at all.
+
+    Best effort. A log shape this cannot walk leaves the field None rather
+    than failing a case that was otherwise graded fine -- an unknown activation
+    is a weaker report, not a broken run.
+    """
+    try:
+        for call in routing_engine._tool_calls(sample):
+            hit = routing_core.detect_activation(
+                routing_engine._activation_event(call),
+                [skill],
+                allow_body_path=routing_engine.ALLOW_BODY_PATH,
+            )
+            if hit:
+                return hit
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return None
+    return None
+
+
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     """Map one inspect `EvalLog` back onto skillscope's outcome objects.
 
@@ -161,6 +188,10 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     for the same reason; the two now agree. Cases with no sample are still
     errored below, so nothing goes quietly missing.
     """
+    # Imported here rather than at module scope: `engine/routing.py` imports
+    # this module, so a top-level import would close the cycle.
+    from . import routing as routing_engine  # noqa: PLC0415
+
     prompts = {c.id: c.prompt for c in cases}
     outcomes: list[BehaviorOutcome] = []
 
@@ -191,6 +222,7 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
                 checks=checks,
                 error=error,
                 degraded=routing_core.is_provider_error(error),
+                activated=_activated(routing_engine, sample, skill),
             )
         )
 
