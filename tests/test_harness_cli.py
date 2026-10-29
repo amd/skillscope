@@ -112,8 +112,11 @@ class _Copilot(unittest.TestCase):
         args = self.parse(
             "--output", str(self.report), "--min-accuracy", "0", *only, *argv
         )
-        with contextlib.redirect_stdout(io.StringIO()):
-            return cli.cmd_routing(args)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.cmd_routing(args)
+        self.output = out.getvalue()
+        return code
 
     def starts(self) -> list[dict]:
         """How each CLI process was started, in the order they started."""
@@ -185,6 +188,21 @@ class TestARoutingRunOnCopilot(_Copilot):
         argv = self.starts()[0]["argv"]
         self.assertEqual(argv[argv.index("--model") + 1], "claude-sonnet-5.5")
         self.assertEqual(self.meta()["model"], "claude-sonnet-5.5")
+
+    def test_the_console_names_the_harness_that_ran(self) -> None:
+        # A run on Copilot must not print the name of an engine that means Claude
+        # Code, in the summary line or in the line that starts the cases.
+        self.run_routing("--harness", "copilot", "--skip-preflight")
+        self.assertIn("harness=copilot, engine=host", self.output)
+        self.assertIn("[copilot] routing:", self.output)
+        # The progress lines, not the whole output: the closing note about the room
+        # check still names the engine that can perform it.
+        progress = [line for line in self.output.splitlines() if line.startswith("[")]
+        self.assertTrue(progress)
+        self.assertFalse(
+            [line for line in progress if "claude-code" in line],
+            "a progress line names an engine that means Claude Code",
+        )
 
     def test_the_harness_can_come_from_the_environment(self) -> None:
         with mock.patch.dict(os.environ, {"SKILLSCOPE_HARNESS": "copilot"}):

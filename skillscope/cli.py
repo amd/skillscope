@@ -165,6 +165,18 @@ def resolve_leg(
     return leg, subject
 
 
+def _engine_label(engine: str, subject: harnesses.Harness) -> str:
+    """The engine as a report and the console spell it for this harness.
+
+    Claude Code keeps the older name, so reports from before there was a choice
+    stay comparable. Any other harness gets the neutral name: the old ones name
+    an agent that did not run.
+    """
+    if subject.name == harnesses.DEFAULT:
+        return engine
+    return {v: k for k, v in NEUTRAL_ENGINES.items()}.get(engine, engine)
+
+
 def _leg_meta(args: argparse.Namespace) -> dict:
     """Which agent graded, where it ran, and which build of it, for a report.
 
@@ -173,11 +185,8 @@ def _leg_meta(args: argparse.Namespace) -> dict:
     neutral names, because the old ones would name an agent that did not run.
     """
     subject = harnesses.get(getattr(args, "harness", None))
-    engine = args.engine
-    if subject.name != harnesses.DEFAULT:
-        engine = {v: k for k, v in NEUTRAL_ENGINES.items()}.get(engine, engine)
     return {
-        "engine": engine,
+        "engine": _engine_label(args.engine, subject),
         "harness": subject.name,
         "harness_version": subject.version(),
     }
@@ -654,7 +663,10 @@ def cmd_routing(args: argparse.Namespace) -> int:
     # run does not honour described a parallelism nobody chose. `--jobs` still
     # means what it always did for `structural --external`, which is the one
     # command that reads it.
-    print(f"[routing] {len(cases)} cases, model={args.model}, engine={args.engine}")
+    where = f"engine={_engine_label(args.engine, subject)}"
+    if subject.name != harnesses.DEFAULT:
+        where = f"harness={subject.name}, {where}"
+    print(f"[routing] {len(cases)} cases, model={args.model}, {where}")
 
     from .engine import models as engine_models
     from .engine import routing as inspect_routing

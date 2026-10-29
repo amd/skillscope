@@ -1157,8 +1157,11 @@ def run(
     sandbox_spec.require_provider()
 
     skills = list(routing_set)
+    # Claude Code's lines keep the engine's name; another harness names itself,
+    # since the engine's name would say an agent ran that did not.
+    label = engine if subject.name == harnesses.DEFAULT else subject.name
     print(
-        f"[{engine}] routing: {len(cases)} case(s), "
+        f"[{label}] routing: {len(cases)} case(s), "
         f"{len(skills)} skill(s) installed together",
         flush=True,
     )
