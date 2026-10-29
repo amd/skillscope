@@ -364,9 +364,13 @@ def from_logs(log_dir: str, *, unlabelled: bool = False) -> list[Comparison]:
 # comparison it was never part of. That is the splicing bug this module's run
 # id exists to prevent, arriving through the back door.
 #
-# Refusing them outright was wrong too: it made the only staleness logs that
-# existed anywhere unreadable, the run this branch was developed against
-# included, which is the one artifact a rebuild could be checked against.
+# Refusing them outright was wrong too, and the reason outlives the migration
+# that prompted it. A log directory is a record somebody already paid an agent
+# run for; a reader that cannot open one because of a metadata key added after
+# it was written has made that run worthless to settle a question it holds the
+# answer to. The population is small and does not grow -- every run since the
+# key arrived labels itself -- but "small" is the argument for a flag rather
+# than for a refusal.
 #
 # So the caller asserts it. Even then a group needs a baseline side, which
 # nothing but `cmd_staleness` ever writes, so a directory of ordinary
