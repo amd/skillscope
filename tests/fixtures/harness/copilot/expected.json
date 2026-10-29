@@ -1,0 +1,16 @@
+{
+  "note": "Recorded with GitHub Copilot CLI 1.0.105 on Windows. Streaming deltas, the MCP server listing, encrypted reasoning blobs and per-request ids were removed and the local username replaced; every other event is as printed. 'trigger' ran on claude-sonnet-5.5 and 'no_trigger' on claude-opus-5.5, shell and file writes denied.",
+  "skills": [
+    "rocm-doctor"
+  ],
+  "trigger": {
+    "activation": "rocm-doctor",
+    "completed": true,
+    "final": "I couldn't confirm the cause on your machine. The `rocm` CLI the diagnosis depends on was blocked by a permission rule in this environment, so I ran nothing and changed nothing.\n\n**Most likely cause:** `hipErrorNoBinaryForGpu` matches the catalog entry `fix-1-arch`. Your GPU's `gfx` target isn't in the build list of your PyTorch wheel or ROCm build, so no compiled kernels exist for it. That also explains `torch.cuda.is_available()` returning `False`. I haven't verified this against your hardware.\n\n**Next steps:**\n1. Run `rocm diagnose --symptom \"hipErrorNoBinaryForGpu\" --json` yourself. Check that `has_match` is true and look at the `fix` section.\n2. If `rocm` isn't installed, get it from https://github.com/ROCm/rocm-cli.\n3. For `fix-1-arch`, `rocm fix fix-1-arch` only prints a plan, and you apply it yourself. It won't change anything for you.\n4. Don't set `HSA_OVERRIDE_GFX_VERSION` by hand. It can cause page faults.\n\nIf you'd rather I run the commands, allow shell access and tell me your OS and GPU model."
+  },
+  "no_trigger": {
+    "activation": null,
+    "completed": true,
+    "final": "I couldn't diagnose your machine because shell access and file access outside this workspace were both denied, so nothing has been changed yet. The ROCm troubleshooting skill doesn't apply here because it only covers AMD GPUs.\n\nRun these in the Python environment you use:\n\n1. **Check the driver:** `nvidia-smi`. If it fails, reinstall the latest NVIDIA Game Ready or Studio driver and reboot.\n2. **Check your PyTorch build:** `python -c \"import torch; print(torch.__version__, torch.version.cuda)\"`. If it shows `+cpu` or `None`, you have the CPU-only build. This is the most common cause.\n3. **Fix a CPU-only build:**\n   `pip uninstall -y torch torchvision torchaudio`\n   `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124`\n4. **Check the environment:** make sure `CUDA_VISIBLE_DEVICES` isn't set to `-1` or left empty.\n\nYou don't need to install the CUDA Toolkit separately, because the PyTorch wheels include it. Send me the output of steps 1 and 2, or allow shell access, and I'll fix it."
+  }
+}

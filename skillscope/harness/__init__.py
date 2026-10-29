@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from .base import Harness, RunSpec
 from .claude_code import ClaudeCode
+from .copilot import Copilot
 
 DEFAULT = "claude-code"
 
@@ -42,5 +43,6 @@ def get(name: str | None = None) -> Harness:
 
 
 register(ClaudeCode())
+register(Copilot())
 
 __all__ = ["DEFAULT", "Harness", "RunSpec", "get", "names", "register"]
