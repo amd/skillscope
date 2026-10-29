@@ -23,8 +23,7 @@ free to drift apart.
 
 Two harnesses are registered, `claude-code` and `copilot`, and the contract exists
 so that another is an adapter and a set of tests rather than a change to the
-engines. Neither can be chosen from the command line yet; see
-[What is not yet behind the contract](#what-is-not-yet-behind-the-contract).
+engines. `--harness` chooses one; see [usage.md](usage.md#which-engine-grades-a-run).
 
 ## The harnesses
 
@@ -130,19 +129,20 @@ from one is not comparable with a score from another.
 
 ## What is not yet behind the contract
 
-The contract covers staging, the command, the environment and the events. These
-still assume Claude Code, and a second harness will need to move them behind it:
+The contract covers staging, the command, the environment, the events, the model,
+the credential check, the spend controls and the preflight. These still assume
+Claude Code, and a harness other than it cannot yet use them:
 
-* choosing a harness from the command line (there is no `--harness` flag yet);
-* the reachability preflight and the credential check that decides whether the
-  runner's own config can be kept out of a routing run (`ANTHROPIC_*`);
-* the spend-limit flags, which are probed from `claude --help`;
-* the CI model pin, which forces `opus`;
-* the judge, which uses an Anthropic model through `inspect_ai`;
+* **the judge** that grades `behavioral` expectations goes through an Anthropic
+  model whatever agent produced the run, so `behavioral` is refused on any other
+  harness;
+* **the room check**: Claude Code reports at session start which skills it
+  loaded, and the engine compares that with what was staged. A harness with no
+  such event leaves the check not run;
 * **the sandbox leg**: `--engine claude-code` still runs Claude Code through
   `inspect_swe`, with its own command line, environment, skill staging and event
   handling. It should start the harness's `command(spec)` in the container, so that
   each agent is defined once. Until it does, a harness other than Claude Code has no
   sandboxed leg;
-* `.claude/skills` as the path routing treats as a skills inspection, rather than
-  a harness's own `skills_dir`.
+* **`.claude/skills`** as the path routing treats as a skills inspection, rather
+  than a harness's own `skills_dir`.
