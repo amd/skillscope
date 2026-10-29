@@ -259,7 +259,8 @@ changes.
 | `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
 
 Both drive the agent a skill is written for, so what differs between them
-is **where the agent runs**, not what it is. That is the axis worth choosing
+is **where the agent runs**, not what it is. What it is -- the harness -- is a
+separate question, answered in [harnesses.md](harnesses.md). That is the axis worth choosing
 along: the host measures the machine as it is, with whatever else is installed
 on it, and the sandbox measures the skill alone. When the two disagree, the
 disagreement is usually a fact about one of those environments rather than

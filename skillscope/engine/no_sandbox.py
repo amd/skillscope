@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import agent as legacy_agent
+from .. import harness as harnesses
 from .. import usage
 from .. import routing as routing_core
 
@@ -64,7 +65,7 @@ EXTRA_SKILLS_KEY = "skillscope_extra_skills"
 EVAL_FIXTURE_DIRNAME = "evals"
 
 
-def require_local() -> None:
+def require_local(harness: harnesses.Harness | None = None) -> None:
     """This driver runs on the host, so settle the sandbox on the host.
 
     Two cases, and they are not the same question.
@@ -96,8 +97,7 @@ def require_local() -> None:
             "Unset it to run on the host, or use --engine claude-code for a "
             "sandboxed run of the real harness on Linux."
         )
-    if not shutil.which("claude"):
-        raise SystemExit("error: 'claude' CLI not found on PATH")
+    (harness or harnesses.get()).require()
 
 
 async def _workspace() -> str:
@@ -251,8 +251,14 @@ async def _stream_until(
     workspace: str,
     env: dict,
     stop_when: Callable[[dict], str | None],
+    normalize: Callable[[dict], list[dict]] | None = None,
 ) -> tuple[list[dict], str | None, int | None, str]:
     """Run the CLI, reading its stream, and stop the moment `stop_when` says to.
+
+    `normalize` turns each event the CLI prints into the canonical events the
+    rest of the engine reads (see `harness.Harness.normalize`). The stop rule
+    sees the canonical events, never the raw ones, so one rule serves every
+    harness. Left `None`, events pass through as they came.
 
     The reason this exists rather than `inspect_ai.util.subprocess`: that call
     returns once the process has exited, so nothing it gives back can arrive in
@@ -323,8 +329,11 @@ async def _stream_until(
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            events.append(event)
-            stop_reason = stop_when(event)
+            for canonical in normalize(event) if normalize else [event]:
+                events.append(canonical)
+                stop_reason = stop_when(canonical)
+                if stop_reason is not None:
+                    break
             if stop_reason is not None:
                 break
     finally:
@@ -338,15 +347,18 @@ async def _stream_until(
     return events, stop_reason, proc.returncode, "".join(errors)
 
 
-def install_skill(skill_dir: Path, workspace: str) -> None:
+def install_skill(
+    skill_dir: Path, workspace: str, skills_dir: str | None = None
+) -> None:
     """Put the skill where the real harness looks for it.
 
+    `<skills_dir>/<name>` inside the workspace, which for Claude Code is
     `.claude/skills/<name>` inside a directory the CLI is given with
-    `--add-dir`, which is what `inspect_swe` does via its own `skills=`
-    argument. Staging is the driver's job, and this driver is the one that has
-    to do it by hand: skip it and the agent runs with no skill at all,
-    answering from the prompt and scoring like it -- which looks like a bad
-    skill rather than a missing one.
+    `--add-dir`, and what `inspect_swe` does via its own `skills=` argument.
+    Another harness names its own directory. Staging is the driver's job, and
+    this driver is the one that has to do it by hand: skip it and the agent
+    runs with no skill at all, answering from the prompt and scoring like it --
+    which looks like a bad skill rather than a missing one.
 
     Everything except the skill's own test suite. This used to copy the
     directory wholesale, which put `evals/evals.json` inside the room the agent
@@ -364,7 +376,7 @@ def install_skill(skill_dir: Path, workspace: str) -> None:
     are read from the skill directory on disk and seeded into the *workspace*,
     which is a different path.
     """
-    dest = Path(workspace) / ".claude" / "skills" / skill_dir.name
+    dest = Path(workspace) / (skills_dir or harnesses.get().skills_dir) / skill_dir.name
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(
         skill_dir,
@@ -396,7 +408,8 @@ def _record_room(state, event: dict, room_names: list[str] | None) -> None:
     state.store.set(EXTRA_SKILLS_KEY, routing_core.init_extra_skills(event, room_names))
 
 
-def claude_code_no_sandbox(
+def harness_solver(
+    harness: harnesses.Harness,
     model: str | None,
     effort: str | None,
     skill_dir: Path,
@@ -406,6 +419,13 @@ def claude_code_no_sandbox(
     room_names: list[str] | None = None,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
+
+    `harness` is the agent that runs the case. It decides where the skill is
+    staged, the command line and environment of the process, and how its output
+    is translated into the canonical events everything below reads; this driver
+    owns the rest, and owns it once for every harness. `claude_code_no_sandbox`
+    is this with Claude Code, which is what every caller used before there was
+    a choice.
 
     `extra_flags` are the CLI's own controls -- `--max-budget-usd` and
     `--no-session-persistence` -- built by `routing.host_cost_flags`, which
@@ -444,34 +464,32 @@ def claude_code_no_sandbox(
     from inspect_ai.solver import solver
 
     @solver
-    def _claude_code_no_sandbox():
+    def _harness_solver():
         async def solve(state, generate):
             from inspect_ai.util import subprocess as sandbox_subprocess
 
             workspace = await _workspace()
-            install_skill(skill_dir, workspace)
+            install_skill(skill_dir, workspace, harness.skills_dir)
             prompt = state.input_text
 
-            cmd = [
-                shutil.which("claude"), "-p",
-                "--output-format", "stream-json", "--verbose",
-                "--dangerously-skip-permissions",
-                "--add-dir", workspace,
-            ]
-            if model:
-                cmd += ["--model", model]
-            if effort:
-                cmd += ["--effort", effort]
-            cmd += list(extra_flags or [])
-
-            env = legacy_agent.claude_env()
-            if config_dir is not None:
-                env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            spec = harnesses.RunSpec(
+                workspace=workspace,
+                prompt=prompt,
+                model=model,
+                effort=effort,
+                config_dir=config_dir,
+                extra_flags=tuple(extra_flags or ()),
+            )
+            cmd = harness.command(spec)
+            env = harness.env(spec)
+            # Closed either way: a CLI that is not given its prompt on stdin
+            # can still sit waiting on it.
+            stdin_text = prompt if harness.prompt_on_stdin else ""
 
             events: list[dict] = []
             if stop_when_factory is None:
                 result = await sandbox_subprocess(
-                    cmd, input=prompt, cwd=workspace, env=env,
+                    cmd, input=stdin_text, cwd=workspace, env=env,
                 )
                 returncode, stderr = result.returncode, result.stderr or ""
                 for line in (result.stdout or "").splitlines():
@@ -479,13 +497,14 @@ def claude_code_no_sandbox(
                     if not line:
                         continue
                     try:
-                        events.append(json.loads(line))
+                        events.extend(harness.normalize(json.loads(line)))
                     except json.JSONDecodeError:
                         continue
             else:
                 async with _subprocess_concurrency():
                     events, stop_reason, returncode, stderr = await _stream_until(
-                        cmd, prompt, workspace, env, stop_when_factory()
+                        cmd, stdin_text, workspace, env, stop_when_factory(),
+                        harness.normalize,
                     )
                 # Recorded whatever it was, including `None` for a stream that
                 # ended on its own. A stop this driver performed leaves no
@@ -495,7 +514,7 @@ def claude_code_no_sandbox(
 
             if not events:
                 raise RuntimeError(
-                    "claude produced no parseable stream-json output "
+                    f"{harness.binary} produced no parseable stream-json output "
                     f"(exit {returncode}). stderr: {stderr[:300]}"
                 )
 
@@ -506,10 +525,33 @@ def claude_code_no_sandbox(
             messages, final = events_to_messages(events, prompt)
             state.messages.extend(messages)
             state.output = ModelOutput.from_content(
-                model=model or "claude", content=final or "(no final message)"
+                model=model or harness.binary,
+                content=final or "(no final message)",
             )
             return state
 
         return solve
 
-    return _claude_code_no_sandbox()
+    return _harness_solver()
+
+
+def claude_code_no_sandbox(
+    model: str | None,
+    effort: str | None,
+    skill_dir: Path,
+    config_dir: Path | None = None,
+    extra_flags: list[str] | None = None,
+    stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
+    room_names: list[str] | None = None,
+):
+    """`harness_solver` with Claude Code, the harness every caller has used."""
+    return harness_solver(
+        harnesses.get("claude-code"),
+        model,
+        effort,
+        skill_dir,
+        config_dir,
+        extra_flags,
+        stop_when_factory,
+        room_names,
+    )

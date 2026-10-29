@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","skills":["alpha","a-stray-skill"]}
+{"type":"assistant","message":{"usage":{"input_tokens":11,"output_tokens":7},"content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"alpha"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Launching skill: alpha"}]}}
+{"type":"result","subtype":"success","result":"done"}
