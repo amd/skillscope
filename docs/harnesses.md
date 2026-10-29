@@ -31,7 +31,8 @@ A harness is a subclass of `skillscope.harness.Harness`, registered in
 | `require()` | Refuse to start when the harness is not installed. The default checks `binary` is on `PATH`. |
 | `command(spec)` | The argv that runs one case, headless, streaming JSON events. |
 | `env(spec)` | The environment of that process, including whatever points it at `spec.config_dir` so the runner's own settings and skills stay out of the session. |
-| `normalize(event)` | Turns one event the harness printed into canonical events (below). |
+| `normalize(event)` | Turns one event the harness printed into canonical events (below). Stateless. |
+| `normalizer()` | A translator for one run's events, which may keep state. The engine asks for a fresh one per case. Override it when an event cannot be translated on its own, for instance when the closing event does not repeat the answer and it has to be remembered from an earlier one. The default returns `normalize`. |
 
 `spec` is a `RunSpec`: the workspace, the prompt, the model and effort, an
 optional throwaway config directory, and any spend or session flags the caller
@@ -51,7 +52,9 @@ Claude Code's stream-json, reduced to what is read:
 
 A harness whose stream already has this shape keeps the default `normalize`,
 which passes events through. Any other maps its events onto these and returns an
-empty list for events that carry nothing the engines read. Every stop rule,
+empty list for events that carry nothing the engines read. What a harness remembers about a stream belongs in the
+translator `normalizer()` returns, never on the harness itself: one harness
+instance serves every case in a run, and cases run concurrently. Every stop rule,
 budget, score and judge sees canonical events only, never the raw ones, so each
 is written once for every harness.
 
@@ -68,8 +71,9 @@ is written once for every harness.
 3. Run `python -m unittest tests.test_harness`. The contract test runs once per
    registered harness and fails if there are no fixtures. It checks activation,
    completion, the closing answer, that the command carries the model and effort
-   and no credential, that the config directory is isolated, and that a skill
-   is staged where the harness looks and without its `evals/` directory.
+   and no credential, that the config directory is isolated, that two runs translated at the same time
+   do not share memory, and that a skill is staged where the harness looks and
+   without its `evals/` directory.
 4. Say in the pull request how the harness differs from the others in ways a
    reader of a report should know: how it activates skills, what it cannot
    report, and what it needs to authenticate.

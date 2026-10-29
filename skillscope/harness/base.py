@@ -25,6 +25,7 @@ import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -88,5 +89,22 @@ class Harness(ABC):
         final `result` event. A harness whose stream already has that shape
         keeps this default; any other maps its events onto it, and returns an
         empty list for the ones that carry nothing the engines read.
+
+        Stateless, which is enough when each event can be translated on its
+        own. A harness that cannot -- one whose closing event does not repeat
+        the answer, so it has to be remembered from an earlier one -- overrides
+        `normalizer` instead.
         """
         return [event]
+
+    def normalizer(self) -> Callable[[dict], list[dict]]:
+        """A translator for the events of one run, free to keep state.
+
+        The engine asks for a fresh one per case, so nothing a harness
+        remembers can leak from one case into the next. A harness instance is
+        shared by every case in a run, and cases run concurrently; the state
+        therefore lives in the returned callable, never on `self`.
+
+        The default is the stateless `normalize`.
+        """
+        return self.normalize

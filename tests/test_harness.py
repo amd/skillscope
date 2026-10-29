@@ -141,9 +141,10 @@ class TestEveryRegisteredHarnessMeetsTheContract(unittest.TestCase):
 
     def canonical(self, subject: harness.Harness, lines: list[str]) -> list[dict]:
         events: list[dict] = []
+        normalize = subject.normalizer()
         for line in lines:
             if line.strip():
-                events.extend(subject.normalize(json.loads(line)))
+                events.extend(normalize(json.loads(line)))
         return events
 
     def test_what_the_engine_reads_out_of_a_recorded_run(self) -> None:
@@ -188,6 +189,27 @@ class TestEveryRegisteredHarnessMeetsTheContract(unittest.TestCase):
                 # it did not read.
                 for visible in seen:
                     self.assertEqual(visible, expected["skills"])
+
+    def test_two_runs_translated_at_once_do_not_share_memory(self) -> None:
+        # The engine runs cases concurrently against one harness instance, so
+        # whatever a harness remembers about a stream must live in the
+        # translator it hands out per run, not on the harness.
+        import itertools
+
+        for name in harness.names():
+            with self.subTest(harness=name):
+                subject = harness.get(name)
+                _, runs = self.fixtures(name)
+                alone = {kind: self.canonical(subject, lines) for kind, lines in runs.items()}
+
+                first, second = subject.normalizer(), subject.normalizer()
+                mixed: dict[str, list[dict]] = {"trigger": [], "no_trigger": []}
+                for a, b in itertools.zip_longest(runs["trigger"], runs["no_trigger"]):
+                    if a and a.strip():
+                        mixed["trigger"].extend(first(json.loads(a)))
+                    if b and b.strip():
+                        mixed["no_trigger"].extend(second(json.loads(b)))
+                self.assertEqual(mixed, alone)
 
     def test_the_command_carries_the_model_the_effort_and_no_secret(self) -> None:
         for name in harness.names():
@@ -256,12 +278,14 @@ staged = os.path.isfile(os.path.join(".foreign", "skills", "alpha", "SKILL.md"))
 # closed without ever being written to.
 stdin_seen = sys.stdin.read()
 emit(evt="started")
+if "silent" not in sys.argv[1]:
+    emit(evt="said", text="all done")
 emit(evt="skill", name="alpha")
 emit(
     evt="command",
     command="echo foreign-marker staged=%s stdin=%r arg=%r" % (staged, stdin_seen, sys.argv[1]),
 )
-emit(evt="finished", text="all done")
+emit(evt="finished")
 """
 
 
@@ -290,15 +314,25 @@ class ForeignHarness(harness.Harness):
     def env(self, spec: harness.RunSpec) -> dict[str, str]:
         return dict(os.environ)
 
-    def normalize(self, event: dict) -> list[dict]:
-        kind = event.get("evt")
-        if kind == "skill":
-            return [_tool_use("Skill", {"skill": event["name"]})]
-        if kind == "command":
-            return [_tool_use("Bash", {"command": event["command"]})]
-        if kind == "finished":
-            return [{"type": "result", "subtype": "success", "result": event["text"]}]
-        return []
+    def normalizer(self):
+        # Its closing event does not repeat the answer, so it is remembered from
+        # the one that said it -- which is why the translator is per run.
+        said = {"text": ""}
+
+        def normalize(event: dict) -> list[dict]:
+            kind = event.get("evt")
+            if kind == "said":
+                said["text"] = event["text"]
+                return []
+            if kind == "skill":
+                return [_tool_use("Skill", {"skill": event["name"]})]
+            if kind == "command":
+                return [_tool_use("Bash", {"command": event["command"]})]
+            if kind == "finished":
+                return [{"type": "result", "subtype": "success", "result": said["text"]}]
+            return []
+
+        return normalize
 
 
 def _tool_use(name: str, arguments: dict) -> dict:
@@ -320,7 +354,7 @@ class TestTheSeamTranslatesAnotherHarnessesEvents(unittest.IsolatedAsyncioTestCa
         spec = harness.RunSpec(workspace=self.tmp, prompt="go")
         events, reason, _, _ = await no_sandbox._stream_until(
             self.foreign.command(spec), "", self.tmp, self.foreign.env(spec),
-            stop_when, self.foreign.normalize,
+            stop_when, self.foreign.normalizer(),
         )
         return events, reason
 
@@ -335,6 +369,14 @@ class TestTheSeamTranslatesAnotherHarnessesEvents(unittest.IsolatedAsyncioTestCa
         self.assertIn("foreign-marker", calls[1][1])
         completed, final = no_sandbox.run_completed(events)
         self.assertEqual((completed, final), (True, "all done"))
+
+    def test_each_translator_has_its_own_memory(self) -> None:
+        first, second = self.foreign.normalizer(), self.foreign.normalizer()
+        first({"evt": "said", "text": "first run"})
+        [unspoken] = second({"evt": "finished"})
+        self.assertEqual(unspoken["result"], "")
+        [spoken] = first({"evt": "finished"})
+        self.assertEqual(spoken["result"], "first run")
 
     async def test_the_stop_rule_sees_canonical_events(self) -> None:
         seen: list[dict] = []
@@ -351,7 +393,8 @@ class TestTheSeamTranslatesAnotherHarnessesEvents(unittest.IsolatedAsyncioTestCa
     async def test_an_unreadable_line_is_skipped_not_fatal(self) -> None:
         self.script.write_text(
             "import json\nprint('not json', flush=True)\n"
-            "print(json.dumps({'evt': 'finished', 'text': 'ok'}), flush=True)\n",
+            "print(json.dumps({'evt': 'said', 'text': 'ok'}), flush=True)\n"
+            "print(json.dumps({'evt': 'finished'}), flush=True)\n",
             encoding="utf-8",
         )
         events, _ = await self.stream(lambda event: None)
@@ -418,6 +461,35 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
         functions = [function for function, _ in self.calls(sample)]
         self.assertEqual(functions, ["Skill", "Bash"])
         self.assertIn("all done", sample.output.completion)
+
+    def test_one_cases_answer_does_not_leak_into_the_next(self) -> None:
+        import contextlib
+        import io
+
+        from inspect_ai import Task
+        from inspect_ai import eval as inspect_eval
+        from inspect_ai.dataset import Sample
+
+        task = Task(
+            dataset=[
+                Sample(id="talks", input="do the alpha thing"),
+                Sample(id="silent", input="be silent about the alpha thing"),
+            ],
+            solver=no_sandbox.harness_solver(
+                ForeignHarness(self.script), "mockllm/model", None, self.skill,
+            ),
+            sandbox="local",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            [log] = inspect_eval(
+                task, model="mockllm/model", log_dir=str(Path(self.tmp) / "logs"),
+                display="plain",
+                # One at a time, so the second case really does follow the first.
+                max_samples=1,
+            )
+        answers = {sample.id: sample.output.completion for sample in log.samples}
+        self.assertEqual(answers["talks"], "all done")
+        self.assertEqual(answers["silent"], "(no final message)")
 
     def test_the_skill_is_staged_where_that_harness_looks(self) -> None:
         # The agent script checks for the file itself, in the workspace it was

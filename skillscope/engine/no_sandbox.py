@@ -485,6 +485,9 @@ def harness_solver(
             # Closed either way: a CLI that is not given its prompt on stdin
             # can still sit waiting on it.
             stdin_text = prompt if harness.prompt_on_stdin else ""
+            # One per case, not one per run: it may remember what it has read,
+            # and the next case must not inherit that.
+            normalize = harness.normalizer()
 
             events: list[dict] = []
             if stop_when_factory is None:
@@ -497,14 +500,14 @@ def harness_solver(
                     if not line:
                         continue
                     try:
-                        events.extend(harness.normalize(json.loads(line)))
+                        events.extend(normalize(json.loads(line)))
                     except json.JSONDecodeError:
                         continue
             else:
                 async with _subprocess_concurrency():
                     events, stop_reason, returncode, stderr = await _stream_until(
                         cmd, stdin_text, workspace, env, stop_when_factory(),
-                        harness.normalize,
+                        normalize,
                     )
                 # Recorded whatever it was, including `None` for a stream that
                 # ended on its own. A stop this driver performed leaves no
