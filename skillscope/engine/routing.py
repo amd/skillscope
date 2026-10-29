@@ -74,7 +74,12 @@ from pathlib import Path
 
 from .. import deadline, routing as routing_core
 from ..datasets import Case
+from .. import harness as harnesses
 from . import behavioral, convert, models, no_sandbox, sandbox as sandbox_spec, stats
+
+# The inspect model for a run whose agent is a subprocess and whose provider is
+# nobody's but the harness's: it reaches no service and needs no credential.
+NO_PROVIDER_MODEL = "mockllm/model"
 
 CLAUDE_CODE = "claude-code"
 NO_SANDBOX = "claude-code-no-sandbox"
@@ -111,7 +116,9 @@ ALLOW_BODY_PATH = False
 ROUTING_MESSAGE_LIMIT = 30
 
 
-def require_isolated_room(engine: str) -> None:
+def require_isolated_room(
+    engine: str, harness: harnesses.Harness | None = None
+) -> None:
     """Refuse a host-leg routing run that cannot keep the runner's room clean.
 
     The legacy engine warns here and carries on, because it can afford to: it
@@ -132,23 +139,37 @@ def require_isolated_room(engine: str) -> None:
     """
     if engine != NO_SANDBOX:
         return
-    if routing_core.can_isolate_config():
+    subject = harness or harnesses.get()
+    if subject.can_isolate_room():
         return
-    named = " or ".join(routing_core.ENV_CREDENTIALS)
+    named = " or ".join(subject.credentials)
+    who = (
+        "--engine claude-code-no-sandbox"
+        if subject.name == harnesses.DEFAULT
+        else f"--harness {subject.name}"
+    )
+    # A harness with a container leg has an alternative to offer; one without
+    # has only the credential.
+    alternative = (
+        ", or use --engine claude-code, whose guest has no user-level skills at all."
+        if subject.supports_sandbox
+        else "."
+    )
     raise SystemExit(
-        "error: --engine claude-code-no-sandbox cannot run a routing leg "
+        f"error: {who} cannot run a routing leg "
         f"without {named}. Routing needs the room to hold exactly "
         "the skills that were asked for, and redirecting the CLI away from "
         "the runner's own config dir only works when auth comes from the "
         "environment. Without it every user-level skill on this machine joins "
         "the room for every case -- and this leg cannot see that happen or "
         "say so in the report.\n"
-        f"    Set {named}, or use --engine claude-code, whose guest "
-        "has no user-level skills at all."
+        f"    Set {named}{alternative}"
     )
 
 
-def install_room(skills: dict[str, Path], workspace: str) -> None:
+def install_room(
+    skills: dict[str, Path], workspace: str, skills_dir: str | None = None
+) -> None:
     """Install every skill in the room into one workspace.
 
     `no_sandbox.install_skill` installs one, which is all a behavioral case
@@ -162,10 +183,10 @@ def install_room(skills: dict[str, Path], workspace: str) -> None:
     changing it.
     """
     for skill_dir in skills.values():
-        no_sandbox.install_skill(skill_dir, workspace)
+        no_sandbox.install_skill(skill_dir, workspace, skills_dir)
 
 
-def _install_room_solver(skills: dict[str, Path]):
+def _install_room_solver(skills: dict[str, Path], skills_dir: str | None = None):
     """Solver that stages the whole room before the CLI is started.
 
     Chained *ahead* of `no_sandbox.claude_code_no_sandbox`, which stages one
@@ -181,7 +202,7 @@ def _install_room_solver(skills: dict[str, Path]):
     @solver
     def _install():
         async def solve(state, generate):
-            install_room(skills, await no_sandbox._workspace())
+            install_room(skills, await no_sandbox._workspace(), skills_dir)
             return state
 
         return solve
@@ -610,6 +631,7 @@ def _solver(
     max_budget_usd: float | None = None,
     max_tool_calls: int | None = None,
     max_inspection_calls: int | None = None,
+    harness: harnesses.Harness | None = None,
 ):
     """The agent that drives one routing case, for the leg that was asked for.
 
@@ -652,12 +674,14 @@ def _solver(
 
     # The host leg stages the room itself, because the CLI reads it off the
     # filesystem it is handed. `model` is the skillscope alias rather than the
-    # resolved inspect name: this leg is the `claude` CLI's own `--model` flag,
-    # not a provider lookup.
+    # resolved inspect name: this leg is the harness's own `--model` flag, not
+    # a provider lookup.
+    subject = harness or harnesses.get()
     return chain(
-        _install_room_solver(routing_set),
-        no_sandbox.claude_code_no_sandbox(
-            model, effort, room[0], config_dir, host_cost_flags(max_budget_usd),
+        _install_room_solver(routing_set, subject.skills_dir),
+        no_sandbox.harness_solver(
+            subject, model, effort, room[0], config_dir,
+            subject.cost_flags(max_budget_usd),
             # Names, not the paths `room` holds: the rule matches what a tool
             # call named against the room's membership, which is how the
             # approver is given it too.
@@ -965,6 +989,7 @@ def build_task(
     max_tool_calls: int | None = None,
     max_inspection_calls: int | None = None,
     max_budget_usd: float | None = None,
+    harness: harnesses.Harness | None = None,
 ):
     """One inspect `Task` for the *room*, with the cases as its samples.
 
@@ -991,6 +1016,7 @@ def build_task(
             engine, routing_set, model, effort, config_dir, max_budget_usd,
             budget_for(engine, max_tool_calls),
             budget_for(engine, max_inspection_calls),
+            harness,
         ),
         # Only the sandboxed leg, because only its tool calls cross inspect's
         # bridge for an approver to see. The host leg enforces the same rule
@@ -1076,6 +1102,7 @@ def run(
     max_budget_usd: float | None = None,
     jobs: int | None = None,
     log_dir: str | None = None,
+    harness: harnesses.Harness | None = None,
 ) -> list[routing_core.Outcome]:
     """Run every routing case against the room. Mirrors `routing.run_case`'s output.
 
@@ -1109,17 +1136,23 @@ def run(
             "there is nothing to route between."
         )
 
+    subject = harness or harnesses.get()
     if engine == CLAUDE_CODE:
+        if not subject.supports_sandbox:
+            raise SystemExit(
+                f"error: the {subject.name} harness has no sandboxed routing leg. "
+                "This is a bug in skillscope, not in how it was called."
+            )
         from . import verify
 
         verify.require()
     else:
-        no_sandbox.require_local()
+        no_sandbox.require_local(subject)
 
     # Before the provider check and before a single token: an unisolated room
     # is not a worse run, it is a different question answered under this one's
     # name.
-    require_isolated_room(engine)
+    require_isolated_room(engine, subject)
 
     sandbox_spec.require_provider()
 
@@ -1131,6 +1164,11 @@ def run(
     )
 
     resolved = models.resolve(model)
+    if subject.name != harnesses.DEFAULT:
+        # Inspect's own model is only the judge's, and routing has no judge: the
+        # agent is the harness's CLI, run as a subprocess. Handing inspect a
+        # provider here would demand a credential for a model nothing calls.
+        resolved = NO_PROVIDER_MODEL
     # A directory per run, not per case: the CLI writes session state here and
     # the room is the same for every case, so sharing it costs nothing and
     # saves re-registering the room once per prompt. Removed on the way out --
@@ -1152,6 +1190,7 @@ def run(
             max_budget_usd,
             jobs,
             log_dir,
+            subject,
         )
 
     outcomes: list[routing_core.Outcome] = []
@@ -1178,14 +1217,14 @@ def run(
 def _evaluate(
     inspect_eval, cases, routing_set, model, effort, engine, resolved, config_dir,
     case_timeout=None, max_tool_calls=None, max_inspection_calls=None,
-    max_budget_usd=None, jobs=None, log_dir=None,
+    max_budget_usd=None, jobs=None, log_dir=None, harness=None,
 ):
     """Run the task. Split out so `run` reads as a sequence of decisions."""
     return behavioral.run_eval(
         inspect_eval,
         build_task(
             cases, routing_set, model, effort, engine, config_dir, case_timeout,
-            max_tool_calls, max_inspection_calls, max_budget_usd,
+            max_tool_calls, max_inspection_calls, max_budget_usd, harness,
         ),
         model=resolved,
         model_args=models.model_args(resolved),
