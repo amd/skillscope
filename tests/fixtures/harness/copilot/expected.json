@@ -12,5 +12,11 @@
     "activation": null,
     "completed": true,
     "final": "I couldn't diagnose your machine because shell access and file access outside this workspace were both denied, so nothing has been changed yet. The ROCm troubleshooting skill doesn't apply here because it only covers AMD GPUs.\n\nRun these in the Python environment you use:\n\n1. **Check the driver:** `nvidia-smi`. If it fails, reinstall the latest NVIDIA Game Ready or Studio driver and reboot.\n2. **Check your PyTorch build:** `python -c \"import torch; print(torch.__version__, torch.version.cuda)\"`. If it shows `+cpu` or `None`, you have the CPU-only build. This is the most common cause.\n3. **Fix a CPU-only build:**\n   `pip uninstall -y torch torchvision torchaudio`\n   `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124`\n4. **Check the environment:** make sure `CUDA_VISIBLE_DEVICES` isn't set to `-1` or left empty.\n\nYou don't need to install the CUDA Toolkit separately, because the PyTorch wheels include it. Send me the output of steps 1 and 2, or allow shell access, and I'll fix it."
+  },
+  "skill_list": {
+    "note": "Output of `copilot skill list --json` (CLI 1.0.105, Windows) in a directory with one staged skill, `rocm-doctor`, under .claude/skills, with the local username and paths replaced. It costs no model call. The staged skill is listed with source `project` and the CLI's own skills with source `builtin`.",
+    "staged": [
+      "rocm-doctor"
+    ]
   }
 }

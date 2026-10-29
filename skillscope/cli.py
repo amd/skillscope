@@ -458,15 +458,6 @@ def _prepare_graded_run(
         getattr(args, "engine", None), getattr(args, "harness", None)
     )
     args.harness = subject.name
-    if subject.name != harnesses.DEFAULT and getattr(args, "command", "") == "behavioral":
-        # Behavioral cases are graded by an LLM judge, and that judge still goes
-        # through an Anthropic model whatever agent produced the run. Saying so
-        # beats running the agent and then failing every judged expectation.
-        raise SystemExit(
-            f"error: --harness {subject.name} cannot run behavioral yet: the "
-            "judge that grades its expectations is not available through this "
-            "harness. Routing runs on it."
-        )
     # The model is the harness's to name and to pin: Claude Code keeps `opus`
     # and the CI pin it always had.
     args.model = subject.pin_model(subject.resolve_model(args.model))
@@ -491,8 +482,9 @@ def _prepare_graded_run(
 
         args.pricing_note = engine_pricing.apply()
         if not args.skip_preflight and subject.name != harnesses.DEFAULT:
-            # The harness's own CLI is all a routing run reaches: its agent is a
-            # subprocess and there is no judge, so no provider is probed.
+            # The harness's own CLI is all either graded command reaches: its
+            # agent is a subprocess, and a behavioral judge is asked through the
+            # same CLI, so no provider is probed.
             ok, detail = subject.preflight(args.model)
             if not ok:
                 raise SystemExit(f"error: {subject.binary} not reachable -- {detail}")
@@ -821,14 +813,32 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         from .engine import no_sandbox
 
         no_sandbox.require_local(subject)
+        inspect_model = engine_models.resolve(args.model)
+        complete = None
+        message_limit = None
+        if subject.name != harnesses.DEFAULT:
+            # Its agent is a subprocess and so is its judge: both are the
+            # harness's CLI, and inspect is handed a model that reaches nothing.
+            from .engine import judge as engine_judge
+            from .engine.routing import NO_PROVIDER_MODEL
+
+            inspect_model = NO_PROVIDER_MODEL
+            complete = engine_judge.harness_completer(subject, args.model)
+            # The placeholder model's own limit is a test value; hold the run to
+            # the limit a real one gets.
+            message_limit = inspect_behavioral.message_limit_for(
+                engine_models.resolve(args.model)
+            )
         outcomes = inspect_behavioral.run(
             skills,
             gradable,
-            engine_models.resolve(args.model),
+            inspect_model,
             args.effort,
             solver_factory=lambda d: no_sandbox.harness_solver(
                 subject, args.model, args.effort, d
             ),
+            complete=complete,
+            message_limit=message_limit,
         )
     else:
         # Not a fallthrough. An engine in ENGINES with no branch here is a

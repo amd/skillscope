@@ -36,16 +36,33 @@ Other facts worth knowing before changing this:
 
 from __future__ import annotations
 
+import json
 import os
-from typing import Callable
+import shutil
+import subprocess
+from typing import Callable, Mapping
 
-from .. import agent
-from .base import Harness, RunSpec
+from .. import agent, deadline
+from .base import Harness, RunSpec, _run_bounded
 
 # The model a CI run is held to. One premium request per prompt where the largest
 # model costs fifteen, which matters for a run that makes dozens of them; and one
 # fixed model, so scores stay comparable from one run to the next.
 CI_MODEL = "claude-sonnet-5.5"
+
+# How long `skill list` may take. It makes no model call, so a minute is a hang.
+ROOM_TIMEOUT_S = 60.0
+
+# For a run that is only asking a question, the one tool name it may use, and no
+# tool is called that. `--available-tools` is an allowlist: the model is offered
+# only what it names, so naming nothing real leaves it nothing. That is what it
+# replaced the denylist for. `--excluded-tools` has to spell the CLI's own tool
+# names, and a list written from memory had `shell` where the CLI's tool is
+# `powershell` (it also runs `read_powershell`, `view`, `create`, `edit`, ...), so
+# the shell tool stayed on offer. Checked with CLI 1.0.105: with this flag the
+# model reports no tool it can see and none is called; an empty value is ignored.
+# Nothing is pre-approved either, so a tool that did get through would be denied.
+JUDGE_TOOLS = "skillscope-no-tools"
 
 # The generic aliases, in this CLI's names.
 ALIASES = {
@@ -133,17 +150,24 @@ class Copilot(Harness):
         # host engine's Claude Code, it runs unsandboxed. The built-in MCP
         # servers are off so a case is graded on the skill, not on a tool the
         # skill's author never had in mind.
-        cmd = [
-            self.binary,
-            "--output-format", "json",
-            "--allow-all",
-            "--no-ask-user",
-            "--disable-builtin-mcps",
-        ]
+        cmd = [self.binary, "--output-format", "json"]
+        if not spec.tool_free:
+            cmd.append("--allow-all")
+        cmd += ["--no-ask-user", "--disable-builtin-mcps"]
+        if spec.tool_free:
+            cmd.append(f"--available-tools={JUDGE_TOOLS}")
         if spec.model:
             cmd += ["--model", spec.model]
         if spec.effort:
             cmd += ["--reasoning-effort", spec.effort]
+        if spec.tool_free and spec.extra_flags:
+            # Appended last, a flag here could grant back what the allowlist took
+            # away. Refused like Claude Code's tool-free command: a question that
+            # needs another flag is one this harness does not answer.
+            raise NotImplementedError(
+                "a tool-free copilot command takes no extra flags: they could "
+                "re-grant what the allowlist removed"
+            )
         cmd += list(spec.extra_flags)
         return cmd
 
@@ -156,6 +180,46 @@ class Copilot(Harness):
         if spec.config_dir is not None:
             env["COPILOT_HOME"] = spec.config_dir
         return env
+
+    def room(self, workspace: str, env: Mapping[str, str]) -> list[str] | None:
+        # `skill list --json` reports what a session started here would load,
+        # without a model call. Built-in skills ship with the CLI and are in
+        # every session, so they are not part of what was staged.
+        timeout = ROOM_TIMEOUT_S
+        bound = deadline.active()
+        if bound is not None:
+            # Spent like the preflight and the judge: a check that cannot finish
+            # inside the command's budget is not made, and the room is reported
+            # as unverified.
+            if bound.remaining() <= 0:
+                return None
+            timeout = min(timeout, bound.remaining())
+        executable = shutil.which(self.binary)
+        if executable is None:
+            return None
+        try:
+            # Bounded like the preflight and the judge: the CLI is a shim when it
+            # was installed with npm, and a plain `subprocess.run` timeout kills
+            # the shim and leaves the program running with the pipe open.
+            proc = _run_bounded(
+                [executable, "skill", "list", "--json"],
+                stdin="", cwd=workspace, env=dict(env), timeout=timeout,
+            )
+            listed = json.loads(proc.stdout or "")
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            return None
+        if proc.returncode != 0 or not isinstance(listed, list):
+            return None
+        return [
+            str(entry["name"])
+            for entry in listed
+            if isinstance(entry, dict)
+            and isinstance(entry.get("name"), str)
+            and entry["name"]
+            and entry.get("source") != "builtin"
+            # A skill the CLI reports as switched off is not in the room.
+            and entry.get("enabled") is not False
+        ]
 
     def normalizer(self) -> Callable[[dict], list[dict]]:
         # What the closing event needs and does not carry, remembered from the

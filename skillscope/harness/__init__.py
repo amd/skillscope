@@ -10,7 +10,7 @@ the contract and `docs/harnesses.md` for how to add one.
 
 from __future__ import annotations
 
-from .base import Harness, RunSpec
+from .base import CompletionError, Harness, RunSpec
 from .claude_code import ClaudeCode
 from .copilot import Copilot
 
@@ -45,4 +45,6 @@ def get(name: str | None = None) -> Harness:
 register(ClaudeCode())
 register(Copilot())
 
-__all__ = ["DEFAULT", "Harness", "RunSpec", "get", "names", "register"]
+__all__ = [
+    "DEFAULT", "CompletionError", "Harness", "RunSpec", "get", "names", "register",
+]

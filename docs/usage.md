@@ -273,15 +273,23 @@ combining one with a different `--harness` is refused.
 `$SKILLSCOPE_ENGINE`. Each harness names models its own way and has its own
 default; `--model opus`, `sonnet` and `haiku` mean the right thing for every
 harness, and CI holds each harness to one model. A report from one harness is its
-own result and is not comparable with another's. How a harness works, and how to
+own result and is not comparable with another's, and for a harness judged through its
+own CLI that includes how strictly its expectations were judged: the verdict comes from
+the same model family that produced the run, not from an independent one. How a harness works, and how to
 add one, is in [harnesses.md](harnesses.md).
 
-**`copilot` today runs routing only.** It authenticates from
-`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`, needs no model credential,
-and in Actions needs `permissions: copilot-requests: write` in the calling
-workflow. `behavioral` is refused on it until the judge that grades its
-expectations is available through the harness. Its preflight sends one real
-prompt, which is billed like any other.
+**`copilot` needs no model credential.** It authenticates from
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`, and in Actions needs
+`permissions: copilot-requests: write` in the calling workflow. Both `routing` and
+`behavioral` run on it. The LLM judge that grades `expected_behavior` and
+`unexpected_behavior` is the same CLI, credential and model as the agent, asked one
+question with no tool offered and nothing pre-approved; it sees text only, so an
+image artifact is named to it and not shown. Its preflight, and each judged
+expectation, send one real prompt, billed like any other. Copilot reports its skills
+through `copilot skill list --json` rather than at session start, so a `routing` run
+asks it once per case and names any skill nobody staged; `behavioral` does not run
+the room check. The CLI's own built-in skills are present in every room and are not
+counted as extras, though they can still win a prompt.
 
 Where the agent runs is the axis worth choosing along: the host measures the machine as it is, with whatever else is installed
 on it, and the sandbox measures the skill alone. When the two disagree, the
@@ -298,14 +306,18 @@ case's grade -- it is offered for every prompt, so it changes every decision at
 once while the run still reports a clean accuracy. `claude-code` is the only
 leg immune by construction: its guest has no `~/.claude` to contribute.
 
-The host leg cannot read the CLI's session-init event, so it has no way to
-notice such contamination or report it -- and therefore refuses to run a
-routing leg at all unless one of the harness's credential variables is set
-(see [harnesses.md](harnesses.md): `ANTHROPIC_API_KEY` or
-`ANTHROPIC_AUTH_TOKEN` for Claude Code, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or
-`GITHUB_TOKEN` for Copilot CLI), which is what lets it redirect the CLI's
-config dir away from the runner's own. Refusing beats being
-quietly wrong about every case.
+On Claude Code the host leg reads the CLI's session-init event, so a stray skill
+is named in the report as an extra; the sandboxed leg never sees that event
+(`inspect_swe` does not surface it). Copilot CLI does not announce its skills at
+all, so skillscope asks it what a session would load (`copilot skill list`, no
+model call), and a stray skill is named in the report the same way. Even so, the
+host leg refuses to run a routing leg at all unless one of the harness's
+credential variables is set (see [harnesses.md](harnesses.md):
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` for Claude Code,
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` for Copilot CLI), which is
+what lets it redirect the CLI's config dir away from the runner's own. A room
+that was checked and found contaminated is still not the room that was asked
+for, and refusing beats being quietly wrong about every case.
 
 Both legs stop at the decision, by different routes. `claude-code`'s calls
 cross inspect's bridge, so the one that reveals the decision is declined
