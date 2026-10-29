@@ -7095,6 +7095,34 @@ class TestTheSecondPassGetsABudgetOfItsOwn(unittest.TestCase):
     def test_an_explicit_timeout_still_wins(self) -> None:
         self.assertEqual(self._timeout(["staleness", "--timeout", "60"]), 60.0)
 
+    def test_the_help_text_names_the_default_actually_in_force(self) -> None:
+        # The help was a static string built in the shared helper, so the
+        # `set_defaults` override changed the value and left `--help` saying
+        # 900 -- three lines under a description announcing that staleness
+        # defaults to twice the usual. One screen contradicting itself.
+        import contextlib
+        import io
+
+        def help_for(command):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(SystemExit):
+                    cli.build_parser().parse_args([command, "--help"])
+            return " ".join(buffer.getvalue().split())
+
+        self.assertIn("Default: 1800 (30 minutes)", help_for("staleness"))
+        self.assertIn("Default: 900 (15 minutes)", help_for("behavioral"))
+
+    def test_the_help_text_lists_staleness_as_a_command_sharing_the_bound(self) -> None:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(["staleness", "--help"])
+        self.assertIn("behavioral and staleness", " ".join(buffer.getvalue().split()))
+
 
 
 if __name__ == "__main__":

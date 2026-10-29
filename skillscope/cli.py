@@ -1002,8 +1002,14 @@ def _add_routing_room_argument(
     )
 
 
-def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
-    """Flags shared by the routing and behavioral commands."""
+def _add_graded_arguments(
+    parser: argparse.ArgumentParser, *, timeout: float = deadline.DEFAULT_TIMEOUT_S
+) -> None:
+    """Flags shared by the graded commands: routing, behavioral and staleness.
+
+    `timeout` is threaded through rather than overridden afterwards so the
+    `--help` text matches the default in force. See `_add_timeout_argument`.
+    """
     _add_skills_argument(parser)
     parser.add_argument(
         "--skill",
@@ -1060,18 +1066,28 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
             "commands. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
         ),
     )
-    _add_timeout_argument(parser)
+    _add_timeout_argument(parser, timeout)
 
 
-def _add_timeout_argument(parser: argparse.ArgumentParser) -> None:
+def _add_timeout_argument(
+    parser: argparse.ArgumentParser, default: float = deadline.DEFAULT_TIMEOUT_S
+) -> None:
+    """The whole-command deadline, with a help string that knows its default.
+
+    `default` is a parameter rather than a `set_defaults` call afterwards
+    because the help text is built here and argparse does not revisit it.
+    `staleness` overrode the value and left the help saying 900, three lines
+    under a description announcing that it defaults to twice the usual -- a
+    screen of `--help` contradicting itself.
+    """
     parser.add_argument(
         "--timeout",
         type=float,
-        default=deadline.DEFAULT_TIMEOUT_S,
+        default=default,
         help=(
             "Seconds before the whole command is abandoned. Shared by "
-            "structural, routing, and behavioral. Default: 900 (15 minutes). "
-            "0 disables."
+            "structural, routing, behavioral and staleness. "
+            f"Default: {default:g} ({default / 60:g} minutes). 0 disables."
         ),
     )
 
@@ -1272,15 +1288,15 @@ def build_parser() -> argparse.ArgumentParser:
             "of going straight to the work."
         ),
     )
-    _add_graded_arguments(staleness_parser)
     # Twice the shared bound, because the command is two passes under one.
-    # `_add_timeout_argument` is shared with the commands that run a single
-    # pass, so the default is overridden here rather than parameterised there;
-    # argparse's `set_defaults` wins over an `add_argument` default. The
-    # measurement behind the number is in `cmd_staleness`: a two-case skill
-    # finished the graded pass in 2m23s and had not finished the baseline
-    # after 30 minutes, so the default 900s gave the slower half ~637s.
-    staleness_parser.set_defaults(timeout=2 * deadline.DEFAULT_TIMEOUT_S)
+    # Passed into `_add_graded_arguments` rather than set afterwards, so the
+    # `--help` text is built from the number actually in force: a
+    # `set_defaults` override changes the value and leaves the help saying
+    # whatever it was built with. The measurement behind the number is in
+    # `cmd_staleness`: a two-case skill finished the graded pass in 2m23s and
+    # had not finished the baseline after 30 minutes, so the shared 900s gave
+    # the slower half ~637s of a measured 1800s+ need.
+    _add_graded_arguments(staleness_parser, timeout=2 * deadline.DEFAULT_TIMEOUT_S)
     staleness_parser.add_argument(
         "--from-logs",
         metavar="DIR",
