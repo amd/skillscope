@@ -6217,6 +6217,69 @@ class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):
         self.assertIn("rocm --version", report)
 
 
+class TestADirtyBaselineCannotShowWhatAnAgentDoesUnaided(unittest.TestCase):
+    """The first real runs had 40 user-level skills in the baseline room.
+
+    One case invoked an unrelated personal skill and another read the skill
+    under test straight off the repo; both were reported `no_signal`, which
+    claims the agent managed unaided. It had not.
+    """
+
+    def _pair(self, reason):
+        without = _checked("c", True, [_check("x", True)])
+        without.contaminated = reason
+        return staleness.pair([_checked("c", True, [_check("x", True)])], [without])
+
+    def test_a_contaminated_baseline_is_ungraded_not_no_signal(self) -> None:
+        self.assertEqual(self._pair("another skill fired: oss-contribution")[0].verdict, "ungraded")
+
+    def test_an_earns_it_survives_its_own_contamination(self) -> None:
+        # The baseline failed while holding more than it should have. It
+        # fails all the harder without it, so voiding the verdict would throw
+        # away a conclusion the run is entitled to -- which cost a real run a
+        # real verdict before this was split out.
+        without = _checked("c", False, [_check("x", False)])
+        without.contaminated = "read the skill's own files (rocm-doctor)"
+        comparisons = staleness.pair([_checked("c", True, [_check("x", True)])], [without])
+        self.assertEqual(comparisons[0].verdict, "earns_it")
+
+    def test_the_report_separates_the_voided_from_the_standing(self) -> None:
+        clean_fail = _checked("a", False, [_check("x", False)])
+        clean_fail.contaminated = "read the skill's own files (s)"
+        passed_both = _checked("b", True, [_check("y", True)])
+        passed_both.contaminated = "another skill fired: helper"
+        comparisons = staleness.pair(
+            [_checked("a", True, [_check("x", True)]), _checked("b", True, [_check("y", True)])],
+            [clean_fail, passed_both],
+        )
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertIn("1 of them are reported `ungraded`", report)
+        self.assertIn("1 still stand", report)
+        self.assertIn("`a` (earns_it)", report)
+
+    def test_a_clean_baseline_still_reports_no_signal(self) -> None:
+        self.assertEqual(self._pair(None)[0].verdict, "no_signal")
+
+    def test_the_reason_reaches_the_report(self) -> None:
+        summary = staleness.summarize(
+            self._pair("read the skill's own files (quark-torch-llm-ptq)"),
+            {"model": "m", "effort": "e"},
+        )
+        report = staleness.render_markdown(summary)
+        self.assertEqual(summary["totals"]["baseline_contaminated"], 1)
+        self.assertIn("baseline that was not empty", report)
+        self.assertIn("read the skill's own files", report)
+
+    def test_the_command_refuses_an_unisolatable_host_run(self) -> None:
+        # Routing has always refused this; staleness needs it more, because
+        # the baseline being empty is the measurement rather than an input.
+        source = inspect.getsource(cli.cmd_staleness)
+        self.assertIn("can_isolate_config", source)
+        self.assertIn("claude-code-no-sandbox", source)
+
+
 class TestASkillThatChangedNothingIsToldPlainly(unittest.TestCase):
     """`earns_it | 0` is a true row that says nothing, and this is the one
     result the command exists to surface."""
@@ -6329,6 +6392,16 @@ class TestAComparisonCanBeRebuiltFromLogs(unittest.TestCase):
         log = _StubLog("alpha", False, [_StubSample("c", [])])
         _, _, outcomes = staleness.outcomes_from_log(log)
         self.assertFalse(outcomes[0].passed)
+
+    def test_a_rebuild_is_no_more_permissive_than_the_run_it_rebuilds(self) -> None:
+        # The rebuild read activation but not contamination, so a verdict the
+        # live run voided came back `no_signal` on re-score. A report that
+        # disagrees with the run it was built from is worse than no report.
+        import inspect as _inspect
+
+        source = _inspect.getsource(staleness.outcomes_from_log)
+        self.assertIn("_inspect_room", source)
+        self.assertIn("contaminated", source)
 
     def test_the_two_sides_pair_on_the_skill_they_name(self) -> None:
         graded = _StubLog("alpha", False, [_StubSample("c", [_check("do it", True)])])

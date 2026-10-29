@@ -99,6 +99,10 @@ class Comparison:
     # An `earns_it` with this unset is the weak kind: something differed, but
     # not demonstrably because of the thing under test.
     activated_with: str | None = None
+    # Why the baseline was not the empty room it claims to be, if it was not.
+    # A contaminated baseline cannot support `no_signal`: "the agent did this
+    # unaided" is precisely the claim the contamination refutes.
+    baseline_contaminated: str | None = None
 
 
 def positive(checks: list[dict]) -> list[dict]:
@@ -137,12 +141,34 @@ def classify(with_skill: BehaviorOutcome, without: BehaviorOutcome) -> str:
         return "guards_only"
     here, there = _met(with_skill), _met(without)
     if here and not there:
-        return "earns_it"
+        return _voided_if_dirty("earns_it", without)
     if there and not here:
-        return "harmful"
-    if here and there:
-        return "no_signal"
-    return "fails_either_way"
+        return _voided_if_dirty("harmful", without)
+    verdict = (
+        "no_signal" if (here and there)
+        else "fails_either_way"
+    )
+    return _voided_if_dirty(verdict, without)
+
+
+# Verdicts a contaminated baseline cannot support, and why it cannot.
+#
+# Contamination is not symmetric. `no_signal` and `harmful` both rest on the
+# baseline having *managed* something, and a baseline that reached another
+# skill or read this skill's own files did not manage it unaided -- which is
+# the whole of what those verdicts claim.
+#
+# `earns_it` and `fails_either_way` rest on the baseline having *failed*. A
+# baseline that failed while holding more than it should have fails all the
+# harder without it, so the finding survives its own contamination and voiding
+# it would throw away a conclusion the run is entitled to.
+VOIDED_BY_CONTAMINATION = ("no_signal", "harmful")
+
+
+def _voided_if_dirty(verdict: str, without: BehaviorOutcome) -> str:
+    if without.contaminated and verdict in VOIDED_BY_CONTAMINATION:
+        return "ungraded"
+    return verdict
 
 
 def pair(
@@ -176,6 +202,7 @@ def pair(
                     checks_with=list(this.checks) if this else [],
                     checks_without=list(that.checks) if that else [],
                     activated_with=this.activated if this else None,
+                    baseline_contaminated=that.contaminated if that else None,
                 )
             )
             continue
@@ -190,6 +217,7 @@ def pair(
                 checks_with=list(this.checks),
                 checks_without=list(that.checks),
                 activated_with=this.activated,
+                baseline_contaminated=that.contaminated,
             )
         )
     return comparisons
@@ -223,9 +251,16 @@ def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
                 elapsed_s=round(getattr(sample, "total_time", None) or 0.0, 2),
                 checks=checks,
                 error=error,
-                # Detected here too, or a rebuilt comparison would report every
-                # `earns_it` as never having fired and warn about all of them.
-                activated=behavioral._activated(routing_engine, sample, skill),
+                # Both detected here too. Without the first, a rebuilt
+                # comparison reports every `earns_it` as never having fired;
+                # without the second it is *more permissive than the run it
+                # rebuilds*, quietly restoring verdicts the live run voided.
+                **dict(
+                    zip(
+                        ("activated", "contaminated"),
+                        behavioral._inspect_room(routing_engine, sample, skill),
+                    )
+                ),
             )
         )
     return skill, bool(eval_meta.get(behavioral.BASELINE_KEY)), outcomes
@@ -304,6 +339,9 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
             "guards_broken_with_skill": len(broken),
             # `earns_it` cases where the skill was installed but never fired.
             # The outcome differed; the skill is not shown to be why.
+            "baseline_contaminated": sum(
+                1 for c in comparisons if c.baseline_contaminated
+            ),
             "earned_without_firing": sum(
                 1
                 for c in comparisons
@@ -391,6 +429,32 @@ def render_markdown(summary: dict) -> str:
 
     if share is not None:
         lines += ["", f"Discriminating: {share:.0%} of the cases graded both ways."]
+
+    dirty = [c for c in summary["cases"] if c["baseline_contaminated"]]
+    if dirty:
+        voided = [c for c in dirty if c["verdict"] == "ungraded"]
+        stood = [c for c in dirty if c["verdict"] != "ungraded"]
+        reasons = sorted({c["baseline_contaminated"] for c in dirty})
+        note = [
+            "",
+            f"> **{len(dirty)} case(s) had a baseline that was not empty**: "
+            + "; ".join(reasons)
+            + ".",
+        ]
+        if voided:
+            note.append(
+                f"> {len(voided)} of them are reported `ungraded`: a baseline "
+                "that reached another skill, or read this skill's own files, "
+                "cannot show what an agent manages unaided.",
+            )
+        if stood:
+            note.append(
+                f"> {len(stood)} still stand -- "
+                + ", ".join(f"`{c['id']}` ({c['verdict']})" for c in stood)
+                + " -- because they rest on the baseline *failing*, and it "
+                "failed while holding more than it should have.",
+            )
+        lines += note
 
     unfired = totals["earned_without_firing"]
     if unfired:

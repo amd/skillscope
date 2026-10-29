@@ -16,6 +16,7 @@ report path downstream is untouched.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -146,6 +147,47 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
     ]
 
 
+def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str | None]:
+    """`(the skill that fired, why the room was not what it claimed)`.
+
+    One walk over the tool calls, answering both questions, because the second
+    is only meaningful beside the first. `detect_activation` reports a skill
+    nobody staged as `other:<name>`, which is exactly the contamination this
+    looks for -- the runner's own `~/.claude/skills` are registered next to
+    the staged ones, and a behavioral run passes no `config_dir` to keep them
+    out.
+
+    Reading the skill's own source is the second route, and the one isolation
+    cannot close: the command runs from the repo root, so a directory the
+    staging step skipped is still on disk for an agent to find. A baseline
+    that read it was not a baseline.
+
+    Best effort, by the same argument as `_activated`: a shape this cannot
+    walk is an unknown room, not a failed case.
+    """
+    fired: str | None = None
+    why: str | None = None
+    marks = (f"skills/{skill}", f"/{skill}/", "_bundled_skills")
+    try:
+        for call in routing_engine._tool_calls(sample):
+            hit = routing_core.detect_activation(
+                routing_engine._activation_event(call),
+                [skill],
+                allow_body_path=routing_engine.ALLOW_BODY_PATH,
+            )
+            if hit and hit.startswith("other:") and why is None:
+                why = f"another skill fired: {hit.removeprefix('other:')}"
+            elif hit and fired is None:
+                fired = hit
+            if why is None:
+                text = json.dumps(getattr(call, "arguments", None) or {}, ensure_ascii=False)
+                if any(mark in text for mark in marks):
+                    why = f"read the skill's own files ({skill})"
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return fired, why
+    return fired, why
+
+
 def _activated(routing_engine, sample, skill: str) -> str | None:
     """The skill the agent reached for in this sample, if any.
 
@@ -212,6 +254,8 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
         elif not checks:
             error = "case has no behavioral assertions to grade"
 
+        activated, contaminated = _inspect_room(routing_engine, sample, skill)
+
         outcomes.append(
             BehaviorOutcome(
                 id=case_id,
@@ -222,7 +266,8 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
                 checks=checks,
                 error=error,
                 degraded=routing_core.is_provider_error(error),
-                activated=_activated(routing_engine, sample, skill),
+                activated=activated,
+                contaminated=contaminated,
             )
         )
 
