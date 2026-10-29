@@ -37,6 +37,7 @@ skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs
 skillscope behavioral --skill my-skill       # needs an authenticated `claude` CLI
 skillscope routing --routing-room my-skill,its-neighbour  # also needs a key in the environment
+skillscope staleness --skill my-skill        # the same key: its baseline has to be an empty room
 ```
 
 `routing` needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, and refuses
@@ -46,6 +47,12 @@ runner's own `~/.claude/skills` join the room for every case and the scores
 describe a room nobody asked for. `behavioral` installs one skill and grades
 what the agent produced, so a stray skill is at worst noise there, and a plain
 `claude login` is fine.
+
+`staleness` is in `routing`'s camp, not `behavioral`'s, and refuses on the
+same terms. Its baseline half has to be a room with **no** skills in it, so
+the runner's own are not noise there — they are the measurement. Either set
+one of those variables, or use `--engine claude-code`, whose guest has no
+user-level skills at all.
 
 ## Run it from your CI
 

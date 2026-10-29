@@ -87,6 +87,7 @@ def build_task(
     *,
     solver_factory,
     baseline: bool = False,
+    run_key: str | None = None,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
@@ -118,7 +119,11 @@ def build_task(
     bound = deadline.active()
     return Task(
         name=f"behavioral-{skill}" + ("-baseline" if baseline else ""),
-        metadata={BASELINE_KEY: baseline, SKILL_KEY: skill},
+        metadata={
+            BASELINE_KEY: baseline,
+            SKILL_KEY: skill,
+            **({STALENESS_RUN_KEY: run_key} if run_key else {}),
+        },
         tags=["skillscope", "baseline" if baseline else "graded"],
         dataset=samples,
         setup=hooks.setup_solver(hook, skill, cases),
@@ -147,6 +152,105 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
     ]
 
 
+def _normalise(text: str) -> str:
+    """Lowercased with separators flattened, so one comparison covers both OSes."""
+    return text.replace("\\", "/").lower()
+
+
+def _skill_marks(skill: str) -> tuple[tuple[str, ...], str]:
+    """`(absolute roots, staged suffix)` -- what reading makes a room dirty.
+
+    The root is the skill's own directory, which is where an agent that went
+    looking for it would find it. It is resolved and matched as a prefix,
+    because a relative mention proves nothing: an agent's own `skills/pdf`
+    scratch directory is not ours, and only the absolute path tells them apart.
+
+    The staged copy is the second route. `no_sandbox.install_skill` writes it to
+    `<workspace>/.claude/skills/<name>`, and the workspace is the agent's and
+    changes per sample, so the leading part is unknowable here. What is left
+    is a suffix specific enough to stand on its own: a path containing
+    `/.claude/skills/<name>` is the staging area whoever created it.
+    """
+    roots = []
+    try:
+        roots.append(_normalise(str(Path(config.active().skill_path(skill)).resolve())))
+    except (Exception, SystemExit):  # noqa: BLE001 -- see below
+        # A skill with no directory on this machine leaves the staged suffix
+        # to carry the check on its own, which is the honest answer rather
+        # than a degraded one: nothing can be read out of a directory that is
+        # not there. `skill_path` raises `SystemExit` rather than returning,
+        # so catching `Exception` alone let a rebuild of someone else's logs
+        # take the whole command down.
+        pass
+    return tuple(roots), _normalise(f"/.claude/skills/{skill}")
+
+
+def _under(path: str, marks: tuple[tuple[str, ...], str]) -> bool:
+    """Whether this already-normalised path is the skill's directory or inside it."""
+    roots, staged = marks
+    if any(path == root or path.startswith(root + "/") for root in roots):
+        return True
+    return path.endswith(staged) or staged + "/" in path
+
+
+# Tool arguments that name a file rather than describe one. `detect_activation`
+# has the same list for its own purposes; this one is about reading a path out
+# of a structured call, so it stays here rather than being shared and bent.
+PATH_FIELDS = ("file_path", "path", "notebook_path", "filename", "target_file")
+
+# Arguments that carry a shell command rather than a path. These are the only
+# ones substring-matched, because there is no field to resolve: the path is
+# somewhere inside a string the agent composed.
+COMMAND_FIELDS = ("command", "cmd", "script")
+
+
+def _read_the_skill(call, marks: tuple[tuple[str, ...], str], skill: str) -> str | None:
+    """Whether this call reached into the skill's own directory.
+
+    Structured path arguments are resolved and tested for containment, rather
+    than substring-matched on the skill's name. A bare name is a legal skill
+    name -- `structure.py` allows a single word and Anthropic ship `pdf`,
+    `docx`, `pptx` -- so matching `/{skill}/` against a serialised argument
+    blob reported `/run/user/1000` as contamination for a skill named `run`,
+    and the cost of that false positive is the highest there is here:
+    `_voided_if_dirty` converts the two verdicts this command exists to
+    surface into `ungraded`, and the report states the contamination as fact.
+
+    Shell commands keep substring matching, because there is no field to
+    resolve -- but against the resolved absolute path, not the bare name.
+    """
+    arguments = getattr(call, "arguments", None) or {}
+    if not isinstance(arguments, dict):
+        return None
+
+    for field in PATH_FIELDS:
+        value = arguments.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            resolved = _normalise(str(Path(value).resolve()))
+        except Exception:  # noqa: BLE001 -- an unparseable path named nothing
+            continue
+        if _under(resolved, marks):
+            return f"read the skill's own files ({skill})"
+
+    roots, staged = marks
+    for field in COMMAND_FIELDS:
+        value = arguments.get(field)
+        if not isinstance(value, str):
+            continue
+        text = _normalise(value)
+        if staged in text or any(root in text for root in roots):
+            return f"read the skill's own files ({skill})"
+
+    # The one mark that is not a path. `_bundled_skills` is the harness's own
+    # staging directory, so its name in any argument is the agent having found
+    # the staging area rather than a file of its own.
+    if "_bundled_skills" in _normalise(json.dumps(arguments, ensure_ascii=False)):
+        return f"read the skill's own files ({skill})"
+    return None
+
+
 def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str | None]:
     """`(the skill that fired, why the room was not what it claimed)`.
 
@@ -157,17 +261,26 @@ def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str |
     the staged ones, and a behavioral run passes no `config_dir` to keep them
     out.
 
-    Reading the skill's own source is the second route, and the one isolation
-    cannot close: the command runs from the repo root, so a directory the
-    staging step skipped is still on disk for an agent to find. A baseline
-    that read it was not a baseline.
+    `fired` is `None` or exactly `skill`, never an `other:` marker. The two
+    questions are answered by separate branches for that reason: when they
+    shared one `if/elif`, a second `other:` hit arriving after `why` was
+    already set fell through to the `elif` and was recorded as the skill
+    having fired -- which reads downstream as "the skill activated" on exactly
+    the contaminated cases that most need the opposite.
 
-    Best effort, by the same argument as `_activated`: a shape this cannot
-    walk is an unknown room, not a failed case.
+    Reading the skill's own source is the second route, and the one isolation
+    only partly closes: `no_sandbox` runs the agent with `cwd=workspace`, but
+    nothing stops it naming an absolute path, so a directory the staging step
+    skipped is still on disk for it to find. The sandboxed `claude-code` leg
+    does close it, by isolating the filesystem. A baseline that read it was
+    not a baseline.
+
+    Best effort: a shape this cannot walk is an unknown room, not a failed
+    case.
     """
     fired: str | None = None
     why: str | None = None
-    marks = (f"skills/{skill}", f"/{skill}/", "_bundled_skills")
+    marks = _skill_marks(skill)
     try:
         for call in routing_engine._tool_calls(sample):
             hit = routing_core.detect_activation(
@@ -175,44 +288,16 @@ def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str |
                 [skill],
                 allow_body_path=routing_engine.ALLOW_BODY_PATH,
             )
-            if hit and hit.startswith("other:") and why is None:
-                why = f"another skill fired: {hit.removeprefix('other:')}"
+            if hit and hit.startswith("other:"):
+                if why is None:
+                    why = f"another skill fired: {hit.removeprefix('other:')}"
             elif hit and fired is None:
                 fired = hit
             if why is None:
-                text = json.dumps(getattr(call, "arguments", None) or {}, ensure_ascii=False)
-                if any(mark in text for mark in marks):
-                    why = f"read the skill's own files ({skill})"
+                why = _read_the_skill(call, marks, skill)
     except Exception:  # noqa: BLE001 -- see the docstring
         return fired, why
     return fired, why
-
-
-def _activated(routing_engine, sample, skill: str) -> str | None:
-    """The skill the agent reached for in this sample, if any.
-
-    Graded by `routing.detect_activation`, the same rule and the same tool-name
-    matching the routing leg uses, so "fired" means one thing across the two
-    commands. A baseline sample has no skill installed and so returns None,
-    which is the point: it is what makes "the skill fired and the outcome
-    differed" sayable at all.
-
-    Best effort. A log shape this cannot walk leaves the field None rather
-    than failing a case that was otherwise graded fine -- an unknown activation
-    is a weaker report, not a broken run.
-    """
-    try:
-        for call in routing_engine._tool_calls(sample):
-            hit = routing_core.detect_activation(
-                routing_engine._activation_event(call),
-                [skill],
-                allow_body_path=routing_engine.ALLOW_BODY_PATH,
-            )
-            if hit:
-                return hit
-    except Exception:  # noqa: BLE001 -- see the docstring
-        return None
-    return None
 
 
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
@@ -300,6 +385,19 @@ CALL_TOKEN = "skillscope_call"
 BASELINE_KEY = "skillscope_baseline"
 SKILL_KEY = "skillscope_skill"
 
+# Which staleness invocation wrote this log. Only `cmd_staleness` sets it, and
+# it mints one value per invocation, so two logs carrying the same value are
+# the two halves of one comparison and nothing else is.
+#
+# `--from-logs` needs this and cannot be built without it. The log directory is
+# shared by `behavioral`, `verify` and `routing`, is gitignored wholesale and
+# is never pruned, and every ordinary `behavioral` run stamps
+# `BASELINE_KEY: False` -- so grouping on `(skill, baseline)` alone splices an
+# unrelated month-old run in as the "with skill" half, under a table that reads
+# as confidently as a real one. `run_eval` reached the same conclusion for the
+# same directory and solved it the same way, with `CALL_TOKEN`.
+STALENESS_RUN_KEY = "skillscope_staleness_run"
+
 
 def stop_requested() -> bool:
     """Whether the deadline's graceful stage has asked the command to stop."""
@@ -386,12 +484,17 @@ def run(
     solver_factory,
     log_dir: str | None = None,
     baseline: bool = False,
+    run_key: str | None = None,
 ) -> list[BehaviorOutcome]:
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`.
 
     `baseline` is passed through to the task and used in the progress lines.
     It does not itself remove the skill: the caller's `solver_factory` does
     that, and this says so in the output.
+
+    `run_key` is passed through to the task's metadata. See
+    `STALENESS_RUN_KEY`: only a staleness run sets one, and it is what lets
+    `--from-logs` pair two halves without pairing two unrelated runs.
     """
     from inspect_ai import eval as inspect_eval
 
@@ -421,6 +524,7 @@ def run(
                     model,
                     solver_factory=solver_factory,
                     baseline=baseline,
+                    run_key=run_key,
                 ),
                 model=model,
                 model_args=models.model_args(model),

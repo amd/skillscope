@@ -219,6 +219,7 @@ def build_task(
     ctx: dict | None = None,
     effort: str | None = None,
     install: bool = True,
+    run_key: str | None = None,
 ):
     """One task per skill, solved by real Claude Code rather than our agent.
 
@@ -253,6 +254,11 @@ def build_task(
         metadata={
             behavioral.BASELINE_KEY: not install,
             behavioral.SKILL_KEY: skill,
+            # See `behavioral.STALENESS_RUN_KEY`: set only by a staleness run,
+            # and only there because only there are two logs meant to pair.
+            **(
+                {behavioral.STALENESS_RUN_KEY: run_key} if run_key else {}
+            ),
         },
         tags=["skillscope", "graded" if install else "baseline"],
         setup=hooks.setup_solver(hook, skill, cases),
@@ -291,8 +297,13 @@ def run(
     effort: str,
     *,
     install: bool = True,
+    run_key: str | None = None,
 ) -> list[BehaviorOutcome]:
-    """Mirrors `behavior.run`, so the CLI and the benchmark treat it the same."""
+    """Mirrors `behavior.run`, so the CLI and the benchmark treat it the same.
+
+    `run_key` is stamped on the task, same as the other engine's. See
+    `behavioral.STALENESS_RUN_KEY`.
+    """
     from inspect_ai import eval as inspect_eval
 
     require()
@@ -316,7 +327,10 @@ def run(
         print(f"[{label}] {skill}: {len(skill_cases)} case(s)", flush=True)
         logs = behavioral.run_eval(
             inspect_eval,
-            build_task(skill, skill_cases, model, effort=effort, install=install),
+            build_task(
+                skill, skill_cases, model, effort=effort,
+                install=install, run_key=run_key,
+            ),
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
