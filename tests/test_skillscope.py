@@ -6584,6 +6584,86 @@ class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
         self.assertTrue(baseline.metadata[engine_behavioral.BASELINE_KEY])
 
 
+class TestTheRoomIsJudgedWhereTheRunWasNotWhereTheReaderIs(unittest.TestCase):
+    """A rebuilt contamination verdict must not depend on who is reading.
+
+    `_skill_marks` recognises a tool call that reached the skill by comparing
+    against the skill's absolute path. Worked out at read time it is the
+    *reader's* answer: rebuilt from another directory, or on a machine without
+    the skill checked out, the mark went missing and a baseline the run had
+    voided as `ungraded` came back `no_signal` -- stated in the report as
+    fact. So the run records where the skill was and the reader uses that.
+
+    This is the same hazard `test_a_rebuild_is_no_more_permissive_than_the_run_
+    it_rebuilds` guards for the no-checks branch, in the one place it was
+    still open.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("run", dataset=tier0_dataset("run"))
+        self.repo.activate()
+        self.cases = [c for c in datasets.load_all_cases() if c.skill == "run"][:1]
+
+    def _why(self, arguments, skill_dir=None):
+        from skillscope.engine import routing as routing_engine
+
+        call = _FakeCall("toolu_1", function="Read")
+        call.arguments = arguments
+        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, "run", skill_dir
+        )[1]
+
+    def test_the_run_records_where_the_skill_was(self) -> None:
+        # Without this the reader has only its own cwd to go on, and the
+        # rebuild silently returns to deriving the weaker answer -- which on
+        # the machine that wrote the logs looks exactly right.
+        own = str(config.active().skill_path("run").resolve())
+        for baseline in (False, True):
+            task = engine_behavioral.build_task(
+                "run", self.cases, "mockllm/model",
+                solver_factory=lambda d: None, baseline=baseline,
+            )
+            self.assertIn(
+                engine_behavioral.SKILL_DIR_KEY, task.metadata,
+                "the log does not say where the skill was",
+            )
+            self.assertEqual(task.metadata[engine_behavioral.SKILL_DIR_KEY], own)
+
+    def test_the_other_engine_records_it_too(self) -> None:
+        # `verify.build_task` needs `inspect_swe`, which the unit job does not
+        # install, so this is read rather than called -- the same compromise
+        # `test_the_behavioral_leg_completes_its_skill_too` makes for it. A
+        # log is paired without knowing which engine wrote it, so a key only
+        # one of them writes is a key the reader cannot rely on.
+        self.assertIn(
+            "SKILL_DIR_KEY", inspect.getsource(engine_verify.build_task)
+        )
+
+    def test_the_verdict_is_the_same_from_any_directory(self) -> None:
+        # The property, asserted as a property. A relative path resolves
+        # against whoever is running, so resolving one here made the answer a
+        # fact about the reader's cwd. Standing in the repo root used to say
+        # contaminated and standing anywhere else said clean, for the same
+        # recorded call.
+        own = str(config.active().skill_path("run").resolve())
+        argument = {"file_path": "run/SKILL.md"}
+
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+
+        os.chdir(self.repo.root)
+        from_the_repo_root = self._why(argument, skill_dir=own)
+        os.chdir(here)
+        from_anywhere_else = self._why(argument, skill_dir=own)
+
+        self.assertEqual(
+            from_the_repo_root, from_anywhere_else,
+            "the contamination verdict moved with the reader's cwd",
+        )
+
+
 class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
     """`_inspect_room` answers two questions, and they must not cross.
 
