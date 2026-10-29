@@ -23,9 +23,71 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
+
+from .. import deadline
+
+# What the preflight asks, and how long a CLI gets to answer. A reply of any
+# kind proves the credential, the model name and the network; the words are
+# only there so the reply is short.
+PREFLIGHT_PROMPT = "Reply with the single word: ok"
+PREFLIGHT_TIMEOUT_S = 60.0
+
+# `--version` output by executable, so a report names the build once however
+# many cases ask.
+_VERSIONS: dict[str, str | None] = {}
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and everything it started.
+
+    `subprocess.run(timeout=)` kills only the process it launched. A CLI
+    installed with npm is a shim that starts the real program, so killing the
+    shim leaves the program running with the output pipe open, and the wait that
+    follows the kill lasts until the program ends on its own.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            import signal
+
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _run_bounded(
+    cmd: list[str], *, stdin: str, cwd: str, env: dict[str, str], timeout: float
+) -> subprocess.CompletedProcess:
+    """`subprocess.run` that really stops at `timeout`, children included."""
+    spawn: dict = {}
+    if os.name == "nt":
+        spawn["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        spawn["start_new_session"] = True
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=cwd, env=env, text=True, encoding="utf-8", **spawn,
+    )
+    try:
+        out, err = proc.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 @dataclass(frozen=True)
@@ -67,6 +129,100 @@ class Harness(ABC):
     # it as an argument builds that into `command` and sets this `False`; its
     # stdin is closed either way, because some CLIs wait on it.
     prompt_on_stdin: bool = True
+    # The model used when the caller names none. Not a shared default because
+    # models are named differently, and cost very differently, per harness.
+    default_model: str
+    # The environment variables a credential can come from. A routing run can
+    # only keep the runner's own configuration out of the session when the
+    # harness authenticates from one of them; a login held in its own config
+    # directory would be hidden along with everything else.
+    credentials: tuple[str, ...] = ()
+    # Whether a container leg exists for this harness (`--engine sandbox`).
+    supports_sandbox: bool = False
+
+    def resolve_model(self, model: str | None) -> str:
+        """The model name this harness's CLI takes, for what the caller asked.
+
+        `None` means the caller named none. A harness with its own names maps
+        the generic aliases (`opus`, `sonnet`, `haiku`) onto them here.
+        """
+        return model or self.default_model
+
+    def pin_model(self, model: str) -> str:
+        """The model a CI run is held to.
+
+        Automated runs are pinned so results stay comparable from one run to the
+        next. A harness that pins says so here; the default does not.
+        """
+        return model
+
+    def can_isolate_room(self, environ: Mapping[str, str] | None = None) -> bool:
+        """Whether the runner's own config can be kept out of a routing session."""
+        environ = os.environ if environ is None else environ
+        return any(environ.get(name, "").strip() for name in self.credentials)
+
+    def cost_flags(self, max_budget_usd: float | None) -> list[str]:
+        """The CLI's own spend controls for a case, or none when it has none."""
+        return []
+
+    def version(self) -> str | None:
+        """What `<binary> --version` prints, for the report. `None` if it cannot."""
+        executable = shutil.which(self.binary)
+        if executable is None:
+            return None
+        if executable not in _VERSIONS:
+            try:
+                proc = subprocess.run(
+                    [executable, "--version"], capture_output=True, text=True,
+                    encoding="utf-8", timeout=30,
+                )
+                lines = [line.strip() for line in (proc.stdout or "").splitlines()]
+                _VERSIONS[executable] = next((line for line in lines if line), None)
+            except (OSError, subprocess.SubprocessError):
+                _VERSIONS[executable] = None
+        return _VERSIONS[executable]
+
+    def preflight(
+        self, model: str | None, timeout: float = PREFLIGHT_TIMEOUT_S
+    ) -> tuple[bool, str]:
+        """Prove, before any case runs, that the CLI can reach its model.
+
+        One trivial prompt through the harness's own command, so what is checked
+        is what a case will use: the executable, the credential, the model name
+        and the network. Returns `(ok, detail)`, with a short reason on failure.
+        """
+        executable = shutil.which(self.binary)
+        if executable is None:
+            return False, f"'{self.binary}' CLI not found on PATH"
+
+        bound = deadline.active()
+        if bound is not None:
+            leftover = bound.remaining()
+            if leftover <= 0:
+                return False, bound.message()
+            timeout = min(timeout, leftover)
+
+        with tempfile.TemporaryDirectory(prefix="skillscope-preflight-") as workspace, \
+                tempfile.TemporaryDirectory(prefix="skillscope-preflight-home-") as home:
+            spec = RunSpec(
+                workspace=workspace, prompt=PREFLIGHT_PROMPT, model=model,
+                config_dir=home,
+            )
+            try:
+                proc = _run_bounded(
+                    self.host_command(spec),
+                    stdin=PREFLIGHT_PROMPT if self.prompt_on_stdin else "",
+                    cwd=workspace, env=self.host_env(spec), timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return False, (
+                    f"{self.binary} preflight timed out after {timeout:g}s "
+                    "(is the network reachable?)"
+                )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+            return False, detail[:500]
+        return True, "ok"
 
     def require(self) -> None:
         """Refuse to start on the host when the harness is not installed there.

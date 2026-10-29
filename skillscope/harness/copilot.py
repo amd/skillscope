@@ -39,7 +39,20 @@ from __future__ import annotations
 import os
 from typing import Callable
 
+from .. import agent
 from .base import Harness, RunSpec
+
+# The model a CI run is held to. One premium request per prompt where the largest
+# model costs fifteen, which matters for a run that makes dozens of them; and one
+# fixed model, so scores stay comparable from one run to the next.
+CI_MODEL = "claude-sonnet-5.5"
+
+# The generic aliases, in this CLI's names.
+ALIASES = {
+    "opus": "claude-opus-5.5",
+    "sonnet": "claude-sonnet-5.5",
+    "haiku": "claude-haiku-5.5",
+}
 
 
 def _tool_use(call_id: str, name: str, arguments: dict) -> dict:
@@ -80,6 +93,23 @@ class Copilot(Harness):
     name = "copilot"
     binary = "copilot"
     skills_dir = ".claude/skills"
+    default_model = CI_MODEL
+    credentials = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+
+    def resolve_model(self, model: str | None) -> str:
+        wanted = model or self.default_model
+        return ALIASES.get(wanted.lower(), wanted)
+
+    def pin_model(self, model: str) -> str:
+        if not agent.is_automated_env() or model == CI_MODEL:
+            return model
+        if model.lower().startswith(agent.NO_PROVIDER_PREFIXES):
+            return model
+        agent._safe_print(
+            f"[skillscope] automated run: coercing model '{model}' -> "
+            f"'{CI_MODEL}' to pin the CI model."
+        )
+        return CI_MODEL
 
     def command(self, spec: RunSpec) -> list[str]:
         # The prompt goes in on stdin, which this CLI reads when no `-p` is
