@@ -250,10 +250,13 @@ def build_task(
     bound = deadline.active()
     return Task(
         name=f"claude-code-{skill}" + ("" if install else "-baseline"),
-        # See `behavioral.build_task`: the same two keys whichever engine ran.
+        # See `behavioral.build_task`: the same keys whichever engine ran.
         metadata={
             behavioral.BASELINE_KEY: not install,
             behavioral.SKILL_KEY: skill,
+            # See `behavioral.SKILL_DIR_KEY`: resolved on the machine that ran
+            # the agent, because a reader cannot work it out afterwards.
+            behavioral.SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
             # See `behavioral.STALENESS_RUN_KEY`: set only by a staleness run,
             # and only there because only there are two logs meant to pair.
             **(

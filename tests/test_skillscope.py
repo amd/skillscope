@@ -6611,7 +6611,12 @@ class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
     def _inspect(self, sample, skill="alpha"):
         from skillscope.engine import routing as routing_engine
 
-        return engine_behavioral._inspect_room(routing_engine, sample, skill)
+        # A directory for the skill, so the room is knowable and `why` reports
+        # what this class is about rather than `UNKNOWN_ROOM`. No case here
+        # names a path, so nothing can match it.
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, skill, f"/nonexistent/skills/{skill}"
+        )
 
     def test_a_contamination_marker_is_never_reported_as_the_skill(self) -> None:
         # Two `other:` hits. The first sets `why`; the second used to find it
@@ -6673,13 +6678,15 @@ class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
         self.repo.skill("run", dataset=tier0_dataset("run"))
         self.repo.activate()
 
-    def _why(self, arguments, skill="run"):
+    def _why(self, arguments, skill="run", skill_dir=None):
         from skillscope.engine import routing as routing_engine
 
         call = _FakeCall("toolu_1", function="Read")
         call.arguments = arguments
         sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
-        return engine_behavioral._inspect_room(routing_engine, sample, skill)[1]
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, skill, skill_dir
+        )[1]
 
     def test_an_unrelated_path_sharing_the_skills_name_is_not_contamination(self) -> None:
         self.assertIsNone(self._why({"file_path": "/run/user/1000/bus"}))
@@ -6761,7 +6768,29 @@ class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
         # `config.skill_path` raises `SystemExit`, which `except Exception`
         # does not catch -- so rebuilding somebody else's logs killed the
         # process rather than reporting what it could.
-        self.assertIsNone(self._why({"file_path": "/tmp/x"}, skill="not-a-skill"))
+        why = self._why({"file_path": "/tmp/x"}, skill="not-a-skill")
+        self.assertIsNotNone(why)
+
+    def test_a_skill_with_no_directory_is_an_unknown_room_not_a_clean_one(self) -> None:
+        # It used to answer `None` here, which reads as "the baseline was
+        # clean" -- a verdict reached by not looking. The mark it dropped is
+        # the only one an absolute path can hit, so every tool call that
+        # reached the skill by its real path came back clean on any machine
+        # without the skill checked out.
+        why = self._why({"file_path": "/tmp/x"}, skill="not-a-skill")
+        self.assertEqual(why, engine_behavioral.UNKNOWN_ROOM)
+
+    def test_a_recorded_directory_answers_it_without_the_skill_on_this_machine(
+        self,
+    ) -> None:
+        # The point of recording it: the same log, read where the skill is not.
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files",
+            self._why(
+                {"file_path": f"{own}/SKILL.md"}, skill="not-a-skill", skill_dir=own
+            ),
+        )
 
 
 class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
