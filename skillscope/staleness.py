@@ -425,6 +425,8 @@ def _no_duplicates(
 
 
 def summarize(comparisons: list[Comparison], meta: dict) -> dict:
+    from .engine.behavioral import UNKNOWN_ROOM
+
     counts = {key: 0 for key, _ in VERDICTS}
     for comparison in comparisons:
         counts[comparison.verdict] += 1
@@ -464,11 +466,24 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
             ),
             "guard_checks": guard_checks,
             "guards_broken_with_skill": len(broken),
+            # Counted apart, because they are different findings. One says
+            # the baseline was demonstrably not empty; the other says nobody
+            # could tell. Both void the same verdicts -- an unanswerable
+            # question is worth no more than a failed one -- but a report that
+            # totalled them together would claim contamination it never found.
+            "baseline_contaminated": sum(
+                1
+                for c in comparisons
+                if c.baseline_contaminated
+                and c.baseline_contaminated != UNKNOWN_ROOM
+            ),
+            "baseline_unknown": sum(
+                1
+                for c in comparisons
+                if c.baseline_contaminated == UNKNOWN_ROOM
+            ),
             # `earns_it` cases where the skill was installed but never fired.
             # The outcome differed; the skill is not shown to be why.
-            "baseline_contaminated": sum(
-                1 for c in comparisons if c.baseline_contaminated
-            ),
             "earned_without_firing": sum(
                 1
                 for c in comparisons
@@ -574,7 +589,29 @@ def render_markdown(summary: dict) -> str:
     if share is not None:
         lines += ["", f"Discriminating: {share:.0%} of the cases graded both ways."]
 
-    dirty = [c for c in summary["cases"] if c["baseline_contaminated"]]
+    from .engine.behavioral import UNKNOWN_ROOM
+
+    unknown = [
+        c
+        for c in summary["cases"]
+        if c["baseline_contaminated"] == UNKNOWN_ROOM
+    ]
+    if unknown:
+        lines += [
+            "",
+            f"> **{len(unknown)} case(s) could not be checked for a clean "
+            "baseline.** The run did not record where the skill was, and it "
+            "is not on this machine, so there is nothing to recognise a "
+            "tool call against. They are reported `ungraded` where the "
+            "verdict rested on the baseline having managed something. "
+            "Re-running them records it.",
+        ]
+
+    dirty = [
+        c
+        for c in summary["cases"]
+        if c["baseline_contaminated"] and c["baseline_contaminated"] != UNKNOWN_ROOM
+    ]
     if dirty:
         voided = [c for c in dirty if c["verdict"] == "ungraded"]
         stood = [c for c in dirty if c["verdict"] != "ungraded"]
