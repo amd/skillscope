@@ -121,6 +121,8 @@ def build_task(
         metadata={
             BASELINE_KEY: baseline,
             SKILL_KEY: skill,
+            # Resolved here, where it is known to be right. See `SKILL_DIR_KEY`.
+            SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
             **({STALENESS_RUN_KEY: run_key} if run_key else {}),
         },
         tags=["skillscope", "baseline" if baseline else "graded"],
@@ -156,13 +158,33 @@ def _normalise(text: str) -> str:
     return text.replace("\\", "/").lower()
 
 
-def _skill_marks(skill: str) -> tuple[str, ...]:
+# Said instead of a contamination reason when there is no way to look for one.
+# Phrased as what is missing rather than as a finding: it is not a claim that
+# the baseline was dirty, it is a refusal to claim it was clean.
+UNKNOWN_ROOM = (
+    "could not tell whether the baseline read the skill: the run did not "
+    "record where the skill was, and it is not on this machine"
+)
+
+
+def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | None:
     """The paths that reading makes a room dirty, lowercased and separator-flat.
 
-    Two of them. The skill's own directory, resolved, which is where an agent
+    Two of them. The skill's own directory, absolute, which is where an agent
     that went looking would find it. And `.claude/skills/<name>`, the staged
     copy `no_sandbox.install_skill` writes under a workspace that changes per
     sample, so only its tail is knowable here.
+
+    `recorded` is `SKILL_DIR_KEY` off the log: where the skill was on the
+    machine that ran the agent. Preferred over resolving it here, because
+    resolving it here resolves it against *this* process. A reader standing
+    somewhere else is not evidence about where the agent stood.
+
+    `None` when neither source can say where the skill was, which is an
+    unknown room rather than a clean one. Returning the staged mark alone
+    looked like an answer and was not: it is the subset of the check that
+    cannot fail, so every tool call that reached the skill by its real path
+    came back clean and the case was credited. See `SKILL_DIR_KEY`.
 
     The staged mark carries no leading separator on purpose. `no_sandbox` runs
     the agent with `cwd=workspace`, which makes `cat .claude/skills/foo/...`
@@ -170,19 +192,16 @@ def _skill_marks(skill: str) -> tuple[str, ...]:
     exactly that. `_mentions` supplies the boundary instead, which is what
     keeps the mark from matching the middle of a longer name.
     """
-    marks = []
-    try:
-        marks.append(_normalise(str(Path(config.active().skill_path(skill)).resolve())))
-    except (Exception, SystemExit):  # noqa: BLE001 -- see below
-        # A skill with no directory on this machine leaves the staged mark to
-        # carry the check on its own, which is the honest answer rather than a
-        # degraded one: nothing can be read out of a directory that is not
-        # there. `skill_path` raises `SystemExit` rather than returning, so
-        # catching `Exception` alone let a rebuild of someone else's logs take
-        # the whole command down.
-        pass
-    marks.append(_normalise(f".claude/skills/{skill}"))
-    return tuple(marks)
+    home = recorded
+    if home is None:
+        try:
+            home = str(Path(config.active().skill_path(skill)).resolve())
+        except (Exception, SystemExit):  # noqa: BLE001 -- see below
+            # `skill_path` raises `SystemExit` rather than returning, so
+            # catching `Exception` alone let a rebuild of someone else's logs
+            # take the whole command down.
+            return None
+    return (_normalise(home), _normalise(f".claude/skills/{skill}"))
 
 
 # Characters that continue a path component. A mark followed or preceded by
@@ -242,9 +261,10 @@ def _strings(value) -> list[str]:
 def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
     """Whether this call reached into the skill's own directory.
 
-    Every string argument is tested, as written and as the path it resolves to.
-    Resolution is skipped for anything with whitespace in it: that is a command
-    line rather than a path, and it is matched as written.
+    Every string argument is tested as written, and a `~`-relative one is
+    tested expanded as well. Expansion is skipped for anything with whitespace
+    in it: that is a command line rather than a path, and it is matched as
+    written.
 
     The graded side reads its own installed skill by design, so a hit there is
     expected. It is the baseline where this means the room was not empty.
@@ -258,14 +278,22 @@ def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
         text = _normalise(value)
         if any(_mentions(text, mark) for mark in marks):
             return reason
-        # `../x`, `~/x` and `./x` name the same file by another spelling, and
-        # a structured path field is where those arrive.
-        if value and not any(c.isspace() for c in value):
+        # `~/x` names the same file by another spelling, and expanding it is
+        # context-free: `$HOME` is the agent's own, recorded in the
+        # environment rather than inferred from where this is running.
+        #
+        # `./x` and `../x` are deliberately *not* resolved. Resolving them
+        # needs the agent's cwd, which is `no_sandbox`'s per-sample workspace
+        # and appears nowhere in the tool-call record -- so `resolve()` here
+        # resolved them against skillscope's own cwd instead, and made the
+        # verdict depend on which directory the report was run from. It never
+        # could serve the case it was written for.
+        if value.startswith("~") and not any(c.isspace() for c in value):
             try:
-                resolved = _normalise(str(Path(value).expanduser().resolve()))
+                expanded = _normalise(str(Path(value).expanduser()))
             except (Exception, SystemExit):  # noqa: BLE001 -- not a path, then
                 continue
-            if any(_mentions(resolved, mark) for mark in marks):
+            if any(_mentions(expanded, mark) for mark in marks):
                 return reason
 
     # The one mark that is not a path. `_bundled_skills` is the harness's own
@@ -276,8 +304,14 @@ def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
     return None
 
 
-def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str | None]:
+def _inspect_room(
+    routing_engine, sample, skill: str, skill_dir: str | None = None
+) -> tuple[str | None, str | None]:
     """`(the skill that fired, why the room was not what it claimed)`.
+
+    `skill_dir` is `SKILL_DIR_KEY` off the log, passed by a reader rebuilding
+    someone else's run. A live run leaves it `None` and resolves the skill
+    where it already knows it is.
 
     One walk over the tool calls, answering both questions, because the second
     is only meaningful beside the first. `detect_activation` reports a skill
@@ -305,7 +339,13 @@ def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str |
     """
     fired: str | None = None
     why: str | None = None
-    marks = _skill_marks(skill)
+    marks = _skill_marks(skill, skill_dir)
+    # Nowhere to check against, so the read half of the check cannot run. Said
+    # out loud rather than passed over: this lands the case `ungraded`, which
+    # is what an unanswerable question is worth. Applied after the walk, not
+    # before it, so a reason the walk *could* establish -- another skill
+    # firing, which needs no path at all -- is reported in preference to it.
+    unknown, marks = marks is None, marks or ()
     try:
         for call in routing_engine._tool_calls(sample):
             hit = routing_core.detect_activation(
@@ -321,8 +361,8 @@ def _inspect_room(routing_engine, sample, skill: str) -> tuple[str | None, str |
             if why is None:
                 why = _read_the_skill(call, marks, skill)
     except Exception:  # noqa: BLE001 -- see the docstring
-        return fired, why
-    return fired, why
+        return fired, why or (UNKNOWN_ROOM if unknown else None)
+    return fired, why or (UNKNOWN_ROOM if unknown else None)
 
 
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
@@ -422,6 +462,21 @@ SKILL_KEY = "skillscope_skill"
 # as confidently as a real one. `run_eval` reached the same conclusion for the
 # same directory and solved it the same way, with `CALL_TOKEN`.
 STALENESS_RUN_KEY = "skillscope_staleness_run"
+
+# Where the skill was on the machine that ran the agent.
+#
+# `_skill_marks` needs an absolute directory to recognise a tool call that
+# reached into the skill. Deriving it at read time derives it from whoever is
+# *reading*: a rebuild in another directory, or on a machine where the skill
+# is not checked out, built a quietly weaker mark set and reported a baseline
+# the live run had voided as `ungraded` back as `no_signal`. That is the
+# "a rebuild is more permissive than the run it rebuilds" failure this module
+# closes everywhere else; contamination was the one place it was still open.
+#
+# So the run records where the skill actually was, and the reader uses that
+# rather than its own cwd. Written by both engines for the same reason
+# `SKILL_KEY` is: a reader should not have to know which one produced the log.
+SKILL_DIR_KEY = "skillscope_skill_dir"
 
 
 def stop_requested() -> bool:

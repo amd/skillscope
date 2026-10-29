@@ -236,6 +236,11 @@ def outcomes_from_log(log) -> tuple[str, bool, str | None, list[BehaviorOutcome]
 
     eval_meta = log.eval.metadata or {}
     skill = eval_meta.get(behavioral.SKILL_KEY) or log.eval.task
+    # Where the skill was when the agent ran, not where it is now. Absent from
+    # logs written before the key existed, which makes the room unknown rather
+    # than clean unless this machine happens to have the skill. See
+    # `behavioral.SKILL_DIR_KEY`.
+    skill_dir = eval_meta.get(behavioral.SKILL_DIR_KEY)
     outcomes: list[BehaviorOutcome] = []
     for sample in log.samples or []:
         checks: list[dict] = []
@@ -264,10 +269,17 @@ def outcomes_from_log(log) -> tuple[str, bool, str | None, list[BehaviorOutcome]
                 # comparison reports every `earns_it` as never having fired;
                 # without the second it is *more permissive than the run it
                 # rebuilds*, quietly restoring verdicts the live run voided.
+                #
+                # `skill_dir` is what keeps the second true off this machine:
+                # the detector needs an absolute path to recognise, and left
+                # to work one out it works out this reader's rather than the
+                # run's. See `behavioral.SKILL_DIR_KEY`.
                 **dict(
                     zip(
                         ("activated", "contaminated"),
-                        behavioral._inspect_room(routing_engine, sample, skill),
+                        behavioral._inspect_room(
+                            routing_engine, sample, skill, skill_dir
+                        ),
                     )
                 ),
             )

@@ -278,7 +278,7 @@ at all.
 | `no_signal` | passed either way — says nothing about the skill |
 | `fails_either_way` | failed both times — a broken case, or a hard one |
 | `guards_only` | asserts nothing the skill could be credited for — see the guard rails below |
-| `ungraded` | a run errored on one side or both, or its baseline was not empty |
+| `ungraded` | nothing could be concluded: a run errored on one side or both, a case was missing from a side, its baseline was not empty, or whether the baseline was empty could not be established |
 
 A verdict says what changed, not why. So the graded side also records whether
 the agent *reached for* the skill, using the same detector the routing leg
@@ -295,10 +295,11 @@ name: either the skill has stopped mattering, or the case was never evidence
 about it in the first place. The second is the more common, which makes this a
 check on the dataset as much as on the skill.
 
-Both halves write which side they were, whose skill they were about, and which
-invocation wrote them into their inspect log metadata (`skillscope_baseline`,
-`skillscope_skill`, `skillscope_staleness_run`). So a finished run can be
-looked at again without paying for it twice:
+Both halves write which side they were, whose skill they were about, where that
+skill was on disk, and which invocation wrote them into their inspect log
+metadata (`skillscope_baseline`, `skillscope_skill`, `skillscope_skill_dir`,
+`skillscope_staleness_run`). So a finished run can be looked at again without
+paying for it twice:
 
 ```bash
 skillscope staleness --from-logs .skillscope/logs
@@ -306,8 +307,14 @@ skillscope staleness --from-logs .skillscope/logs
 
 That reaches no model and runs no preflight, having nothing to spend.
 
-All three keys are load-bearing, and the run id is the one that makes this
-safe to point at `.skillscope/logs`. That directory is shared with `behavioral`
+Every key is load-bearing. `skillscope_skill_dir` is what lets a rebuild judge
+whether the baseline was really empty: the check recognises a tool call that
+reached the skill by comparing against the skill's absolute path, so a reader
+that worked that path out for itself would be working out its own rather than
+the run's, and would report a baseline the run had voided as a clean one. A log
+written without the key is read as an unknown room rather than an empty one.
+
+The run id is the key that makes this safe to point at `.skillscope/logs`. That directory is shared with `behavioral`
 and `routing`, is gitignored wholesale, and nothing prunes it — and every
 ordinary `behavioral` run writes the same `skillscope_baseline: false` a graded
 half does, with no run id. A plain `behavioral` log is therefore shaped exactly
