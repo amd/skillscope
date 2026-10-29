@@ -310,13 +310,29 @@ All three keys are load-bearing, and the run id is the one that makes this
 safe to point at `.skillscope/logs`. That directory is shared with `behavioral`
 and `routing`, is gitignored wholesale, and nothing prunes it — and every
 ordinary `behavioral` run writes the same `skillscope_baseline: false` a graded
-half does. Pairing on the skill alone would therefore splice an unrelated run
-from last month in as this comparison's "with skill" side, under a table that
-reads exactly as confidently as a real one. Logs with no run id are not a half
-of anything and are passed over, so a directory of plain `behavioral` logs
-rebuilds as nothing rather than as a comparison. The model and effort are not
-reported for a rebuild: nothing reads them off the logs, and the logs need not
-agree on them.
+half does, with no run id. A plain `behavioral` log is therefore shaped exactly
+like a graded half, and always will be, since only `staleness` mints an id.
+Pairing on the skill alone would splice an unrelated run from last month in as
+this comparison's "with skill" side, under a table that reads exactly as
+confidently as a real one.
+
+So logs carrying no run id are passed over, and a directory of plain
+`behavioral` logs rebuilds as nothing rather than as a comparison. Logs written
+before the id existed are passed over for the same reason; `--unlabelled-logs`
+reads them:
+
+```bash
+skillscope staleness --from-logs .skillscope/logs --unlabelled-logs
+```
+
+That asserts the directory holds nothing else for the skills in it. Even then,
+a group of unlabelled logs needs a baseline half, which nothing but `staleness`
+ever writes, so ordinary `behavioral` logs stay out whatever flags you pass.
+Where one side holds several unlabelled logs there is a choice to make and
+nothing to make it with, so every case in that group is reported `ungraded`.
+
+The model and effort are not reported for a rebuild: nothing reads them off
+the logs, and the logs need not agree on them.
 
 Budget more wall clock than a `behavioral` run of the same cases, and more
 than double it. `--timeout` defaults to twice what the single-pass commands

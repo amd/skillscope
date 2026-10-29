@@ -6709,6 +6709,54 @@ class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
             self._why({"file_path": "/opt/_bundled_skills/run/SKILL.md"}),
         )
 
+    def test_a_sibling_skill_whose_name_extends_this_one_is_not_this_one(self) -> None:
+        # The false positive that survived the first fix in the shell branch,
+        # because the staged mark carried no trailing boundary there while
+        # the structured branch used `_under`. `run-extra` is its own skill.
+        self.assertIsNone(
+            self._why({"command": "cat /home/u/.claude/skills/run-extra/SKILL.md"})
+        )
+        self.assertIsNone(
+            self._why({"file_path": "/home/u/.claude/skills/run-extra/SKILL.md"})
+        )
+
+    def test_a_name_the_skills_own_name_is_a_prefix_of_is_not_a_hit(self) -> None:
+        own = str(config.active().skill_path("run"))
+        self.assertIsNone(self._why({"file_path": f"{own}.bak/SKILL.md"}))
+
+    def test_the_staged_copy_is_found_by_the_relative_name(self) -> None:
+        # `no_sandbox` runs the agent with `cwd=workspace`, so this is the
+        # natural shell form. A mark anchored with a leading separator missed
+        # it, and a missed contamination is the worse direction: the baseline
+        # is then reported clean, as fact.
+        self.assertIn(
+            "read the skill's own files",
+            self._why({"command": "cat .claude/skills/run/SKILL.md"}),
+        )
+
+    def test_an_argument_the_field_list_never_named_is_still_read(self) -> None:
+        # `pattern` is Glob's primary argument and is often its only one, so
+        # the old fixed field list made the call invisible. The tool surface
+        # is open, so the list was always going to drift behind it.
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files", self._why({"pattern": f"{own}/**/*.md"})
+        )
+
+    def test_a_tool_naming_its_arguments_anything_is_still_read(self) -> None:
+        # An MCP tool names its arguments whatever it likes.
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files", self._why({"some_mcp_arg": f"{own}/x.md"})
+        )
+
+    def test_a_path_nested_inside_a_structured_argument_is_still_read(self) -> None:
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files",
+            self._why({"edits": [{"file": f"{own}/SKILL.md"}]}),
+        )
+
     def test_a_skill_with_no_directory_does_not_take_the_command_down(self) -> None:
         # `config.skill_path` raises `SystemExit`, which `except Exception`
         # does not catch -- so rebuilding somebody else's logs killed the
@@ -6773,12 +6821,12 @@ class TestARebuildPairsOneRunAndNotItsNeighbours(unittest.TestCase):
     pointing `--from-logs` at that very directory.
     """
 
-    def _rebuild(self, logs):
+    def _rebuild(self, logs, unlabelled=True):
         info = [types.SimpleNamespace(name=f"log-{i}") for i in range(len(logs))]
         by_name = {i.name: log for i, log in zip(info, logs)}
         with mock.patch("inspect_ai.log.list_eval_logs", lambda d: info), \
                 mock.patch("inspect_ai.log.read_eval_log", lambda n: by_name[n]):
-            return staleness.from_logs("anywhere")
+            return staleness.from_logs("anywhere", unlabelled=unlabelled)
 
     def _log(self, baseline, passed, run_key="run-1", case="c"):
         return _StubLog(
@@ -6803,22 +6851,52 @@ class TestARebuildPairsOneRunAndNotItsNeighbours(unittest.TestCase):
         verdicts = sorted(c.verdict for c in comparisons)
         self.assertEqual(verdicts, ["fails_either_way", "ungraded"])
 
-    def test_a_lone_unlabelled_log_is_still_reported(self) -> None:
-        # Logs written before the run id existed are unlabelled, not suspect.
-        # Refusing them outright made the only staleness logs in existence
-        # unreadable, this branch's own included.
-        comparisons = self._rebuild([self._log(False, True, run_key=None)])
-        self.assertEqual([c.verdict for c in comparisons], ["ungraded"])
-        self.assertIn("no result from the baseline run", comparisons[0].error)
+    def test_unlabelled_logs_are_not_read_unless_asked_for(self) -> None:
+        # The default. A plain `behavioral` log carries `BASELINE_KEY: False`
+        # and no run id, which is the same shape a pre-id graded half has, so
+        # reading unlabelled logs unasked pools whatever is in the directory.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),
+            self._log(True, False, run_key=None),
+        ], unlabelled=False)
+        self.assertEqual(comparisons, [])
 
-    def test_an_unlabelled_pair_with_one_log_a_side_is_forced_and_kept(self) -> None:
-        # Nothing to choose between, so labelling would not change which logs
-        # pair. This is the shape every pre-fix run on disk has.
+    def test_an_unlabelled_pair_is_read_when_asked_for(self) -> None:
+        # What `--unlabelled-logs` is for: one log a side, nothing to choose
+        # between, and a baseline half that only a staleness run ever writes.
         comparisons = self._rebuild([
             self._log(False, True, run_key=None),
             self._log(True, False, run_key=None),
         ])
         self.assertEqual([c.verdict for c in comparisons], ["earns_it"])
+
+    def test_graded_only_unlabelled_logs_are_never_read(self) -> None:
+        # The common hole. `behavioral` and `verify` runs never carry a run
+        # id by design, so these keep arriving forever -- and pooled they
+        # inflated `cases` and `ungraded` with every skill the user had ever
+        # run `behavioral` against, plus a `per_skill` row for it.
+        #
+        # Asking for unlabelled logs does not buy this: a baseline half is
+        # the one thing nothing but `cmd_staleness` writes, so requiring one
+        # keeps ordinary behavioral logs out whatever flags are passed.
+        for asked in (True, False):
+            with self.subTest(unlabelled=asked):
+                comparisons = self._rebuild(
+                    [self._log(False, True, run_key=None)], unlabelled=asked
+                )
+                self.assertEqual(comparisons, [])
+
+    def test_a_behavioral_log_cannot_supply_a_half_to_a_stale_baseline(self) -> None:
+        # The rarer hole, and the original splicing bug through the back door:
+        # a plain `behavioral` log for a skill, plus a leftover pre-id
+        # baseline for the same skill, is one log a side and was paired.
+        # `summarize` counts what comes back, so this has to stay empty.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),   # indistinguishable from
+                                                    # a plain behavioral run
+            self._log(True, False, run_key=None),
+        ], unlabelled=False)
+        self.assertEqual(staleness.summarize(comparisons, {})["totals"]["cases"], 0)
 
     def test_unlabelled_logs_with_a_choice_to_make_are_not_guessed_at(self) -> None:
         # Two candidates for the graded side and no way to tell which run
@@ -6835,12 +6913,14 @@ class TestARebuildPairsOneRunAndNotItsNeighbours(unittest.TestCase):
 
     def test_a_labelled_run_never_falls_back_to_the_unlabelled_bucket(self) -> None:
         # A labelled half and an unlabelled one are not two halves of
-        # anything, however tempting the arithmetic.
+        # anything, however tempting the arithmetic. Both are reported as the
+        # lone halves they are, rather than paired into an `earns_it`.
         comparisons = self._rebuild([
             self._log(False, True, run_key="new"),
             self._log(True, False, run_key=None),
         ])
         self.assertEqual([c.verdict for c in comparisons], ["ungraded", "ungraded"])
+        self.assertTrue(all("no result from" in c.error for c in comparisons))
 
     def test_two_logs_reporting_one_case_are_reported_rather_than_resolved(self) -> None:
         # `pair` builds a dict keyed by case id, so a duplicate collapses
@@ -6937,7 +7017,7 @@ class TestAnOfflineRebuildDoesNotClaimAModelItNeverRan(unittest.TestCase):
             ["staleness", "--from-logs", "/logs", "--model", "opus"]
         )
         with mock.patch.object(staleness, "summarize", record), \
-                mock.patch.object(staleness, "from_logs", lambda d: staleness.pair(
+                mock.patch.object(staleness, "from_logs", lambda d, **k: staleness.pair(
                     [_checked("c", True, [_check("x", True)])],
                     [_checked("c", False, [_check("x", False)])],
                 )), \
@@ -6946,6 +7026,45 @@ class TestAnOfflineRebuildDoesNotClaimAModelItNeverRan(unittest.TestCase):
         self.assertNotIn("model", captured)
         self.assertNotIn("effort", captured)
         self.assertEqual(captured["from_logs"], "/logs")
+
+
+class TestUnlabelledLogsAreOptedIntoRatherThanAssumed(unittest.TestCase):
+    """The flag has to reach `from_logs`, and mean nothing without a rebuild."""
+
+    def _run(self, argv):
+        captured: dict = {}
+
+        def record(log_dir, *, unlabelled=False):
+            captured["unlabelled"] = unlabelled
+            return staleness.pair(
+                [_checked("c", True, [_check("x", True)])],
+                [_checked("c", False, [_check("x", False)])],
+            )
+
+        args = cli.build_parser().parse_args(argv)
+        with mock.patch.object(staleness, "from_logs", record), \
+                mock.patch.object(cli, "_write_report", lambda *a, **k: None):
+            cli.cmd_staleness(args)
+        return captured
+
+    def test_a_rebuild_does_not_read_unlabelled_logs_by_default(self) -> None:
+        self.assertIs(self._run(["staleness", "--from-logs", "/l"])["unlabelled"], False)
+
+    def test_the_flag_reaches_the_rebuild(self) -> None:
+        self.assertIs(
+            self._run(
+                ["staleness", "--from-logs", "/l", "--unlabelled-logs"]
+            )["unlabelled"],
+            True,
+        )
+
+    def test_the_flag_is_refused_without_a_rebuild(self) -> None:
+        # A live run stamps a run id on both halves, so there is nothing
+        # unlabelled for this to reach. Refused rather than ignored.
+        args = cli.build_parser().parse_args(["staleness", "--unlabelled-logs"])
+        with self.assertRaises(SystemExit) as caught:
+            cli.cmd_staleness(args)
+        self.assertIn("--from-logs", str(caught.exception))
 
 
 class TestTheSecondPassGetsABudgetOfItsOwn(unittest.TestCase):

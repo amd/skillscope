@@ -16,7 +16,6 @@ report path downstream is untouched.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -157,97 +156,123 @@ def _normalise(text: str) -> str:
     return text.replace("\\", "/").lower()
 
 
-def _skill_marks(skill: str) -> tuple[tuple[str, ...], str]:
-    """`(absolute roots, staged suffix)` -- what reading makes a room dirty.
+def _skill_marks(skill: str) -> tuple[str, ...]:
+    """The paths that reading makes a room dirty, lowercased and separator-flat.
 
-    The root is the skill's own directory, which is where an agent that went
-    looking for it would find it. It is resolved and matched as a prefix,
-    because a relative mention proves nothing: an agent's own `skills/pdf`
-    scratch directory is not ours, and only the absolute path tells them apart.
+    Two of them. The skill's own directory, resolved, which is where an agent
+    that went looking would find it. And `.claude/skills/<name>`, the staged
+    copy `no_sandbox.install_skill` writes under a workspace that changes per
+    sample, so only its tail is knowable here.
 
-    The staged copy is the second route. `no_sandbox.install_skill` writes it to
-    `<workspace>/.claude/skills/<name>`, and the workspace is the agent's and
-    changes per sample, so the leading part is unknowable here. What is left
-    is a suffix specific enough to stand on its own: a path containing
-    `/.claude/skills/<name>` is the staging area whoever created it.
+    The staged mark carries no leading separator on purpose. `no_sandbox` runs
+    the agent with `cwd=workspace`, which makes `cat .claude/skills/foo/...`
+    the natural shell form, and a mark anchored with a leading `/` missed
+    exactly that. `_mentions` supplies the boundary instead, which is what
+    keeps the mark from matching the middle of a longer name.
     """
-    roots = []
+    marks = []
     try:
-        roots.append(_normalise(str(Path(config.active().skill_path(skill)).resolve())))
+        marks.append(_normalise(str(Path(config.active().skill_path(skill)).resolve())))
     except (Exception, SystemExit):  # noqa: BLE001 -- see below
-        # A skill with no directory on this machine leaves the staged suffix
-        # to carry the check on its own, which is the honest answer rather
-        # than a degraded one: nothing can be read out of a directory that is
-        # not there. `skill_path` raises `SystemExit` rather than returning,
-        # so catching `Exception` alone let a rebuild of someone else's logs
-        # take the whole command down.
+        # A skill with no directory on this machine leaves the staged mark to
+        # carry the check on its own, which is the honest answer rather than a
+        # degraded one: nothing can be read out of a directory that is not
+        # there. `skill_path` raises `SystemExit` rather than returning, so
+        # catching `Exception` alone let a rebuild of someone else's logs take
+        # the whole command down.
         pass
-    return tuple(roots), _normalise(f"/.claude/skills/{skill}")
+    marks.append(_normalise(f".claude/skills/{skill}"))
+    return tuple(marks)
 
 
-def _under(path: str, marks: tuple[tuple[str, ...], str]) -> bool:
-    """Whether this already-normalised path is the skill's directory or inside it."""
-    roots, staged = marks
-    if any(path == root or path.startswith(root + "/") for root in roots):
+# Characters that continue a path component. A mark followed or preceded by
+# one of these is part of a longer name, not the name itself.
+_NAME_CHARS = "-_."
+
+
+def _mentions(text: str, mark: str) -> bool:
+    """Whether `text` names `mark` as a whole path component.
+
+    Plain `in` was the bug twice over. It is what made `/{skill}/` match
+    `/run/user/1000`, and it survived in the shell branch after the structured
+    branch was fixed, where it read `.claude/skills/foo-extra` as skill `foo`'s
+    own files. A sibling skill whose name extends this one's is not this one.
+
+    So a hit has to end at a boundary -- end of string, or a character that
+    cannot continue a component -- and start at one. `foo` matches in
+    `/x/.claude/skills/foo/SKILL.md` and in `cat .claude/skills/foo/S`, and
+    does not match in `foo-extra`, `foo.bak` or `myfoo`.
+    """
+    width = len(mark)
+    start = 0
+    while (at := text.find(mark, start)) >= 0:
+        start = at + 1
+        after = text[at + width : at + width + 1]
+        if after and (after.isalnum() or after in _NAME_CHARS):
+            continue
+        before = text[at - 1 : at] if at else ""
+        if before and (before.isalnum() or before in _NAME_CHARS):
+            continue
         return True
-    return path.endswith(staged) or staged + "/" in path
+    return False
 
 
-# Tool arguments that name a file rather than describe one. `detect_activation`
-# has the same list for its own purposes; this one is about reading a path out
-# of a structured call, so it stays here rather than being shared and bent.
-PATH_FIELDS = ("file_path", "path", "notebook_path", "filename", "target_file")
+def _strings(value) -> list[str]:
+    """Every string anywhere in a tool call's arguments.
 
-# Arguments that carry a shell command rather than a path. These are the only
-# ones substring-matched, because there is no field to resolve: the path is
-# somewhere inside a string the agent composed.
-COMMAND_FIELDS = ("command", "cmd", "script")
+    Flat rather than by field name. The first version of this checked a fixed
+    list of path-ish argument names, which is a closed set against an open tool
+    surface: it had no entry for Glob's `pattern`, which is often the only
+    argument a Glob call carries, so that call was invisible. MCP tools name
+    their arguments whatever they like, so the list would have kept drifting.
+
+    Checking every string is safe here only because the marks are boundary
+    matched and absolute. That is what removed the false positives, not the
+    field list.
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _strings(v)]
+    return []
 
 
-def _read_the_skill(call, marks: tuple[tuple[str, ...], str], skill: str) -> str | None:
+def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
     """Whether this call reached into the skill's own directory.
 
-    Structured path arguments are resolved and tested for containment, rather
-    than substring-matched on the skill's name. A bare name is a legal skill
-    name -- `structure.py` allows a single word and Anthropic ship `pdf`,
-    `docx`, `pptx` -- so matching `/{skill}/` against a serialised argument
-    blob reported `/run/user/1000` as contamination for a skill named `run`,
-    and the cost of that false positive is the highest there is here:
-    `_voided_if_dirty` converts the two verdicts this command exists to
-    surface into `ungraded`, and the report states the contamination as fact.
+    Every string argument is tested, as written and as the path it resolves to.
+    Resolution is skipped for anything with whitespace in it: that is a command
+    line rather than a path, and it is matched as written.
 
-    Shell commands keep substring matching, because there is no field to
-    resolve -- but against the resolved absolute path, not the bare name.
+    The graded side reads its own installed skill by design, so a hit there is
+    expected. It is the baseline where this means the room was not empty.
     """
     arguments = getattr(call, "arguments", None) or {}
     if not isinstance(arguments, dict):
         return None
 
-    for field in PATH_FIELDS:
-        value = arguments.get(field)
-        if not isinstance(value, str) or not value:
-            continue
-        try:
-            resolved = _normalise(str(Path(value).resolve()))
-        except Exception:  # noqa: BLE001 -- an unparseable path named nothing
-            continue
-        if _under(resolved, marks):
-            return f"read the skill's own files ({skill})"
-
-    roots, staged = marks
-    for field in COMMAND_FIELDS:
-        value = arguments.get(field)
-        if not isinstance(value, str):
-            continue
+    reason = f"read the skill's own files ({skill})"
+    for value in _strings(arguments):
         text = _normalise(value)
-        if staged in text or any(root in text for root in roots):
-            return f"read the skill's own files ({skill})"
+        if any(_mentions(text, mark) for mark in marks):
+            return reason
+        # `../x`, `~/x` and `./x` name the same file by another spelling, and
+        # a structured path field is where those arrive.
+        if value and not any(c.isspace() for c in value):
+            try:
+                resolved = _normalise(str(Path(value).expanduser().resolve()))
+            except (Exception, SystemExit):  # noqa: BLE001 -- not a path, then
+                continue
+            if any(_mentions(resolved, mark) for mark in marks):
+                return reason
 
     # The one mark that is not a path. `_bundled_skills` is the harness's own
     # staging directory, so its name in any argument is the agent having found
     # the staging area rather than a file of its own.
-    if "_bundled_skills" in _normalise(json.dumps(arguments, ensure_ascii=False)):
-        return f"read the skill's own files ({skill})"
+    if any("_bundled_skills" in _normalise(v) for v in _strings(arguments)):
+        return reason
     return None
 
 

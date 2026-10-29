@@ -280,21 +280,22 @@ def outcomes_from_log(log) -> tuple[str, bool, str | None, list[BehaviorOutcome]
     )
 
 
-def from_logs(log_dir: str) -> list[Comparison]:
+def from_logs(log_dir: str, *, unlabelled: bool = False) -> list[Comparison]:
     """Rebuild the comparison from logs already on disk.
 
     Two runs become a pair because they carry the same skill, the same
     `STALENESS_RUN_KEY`, and opposite `BASELINE_KEY` -- which is why all three
     are written as metadata rather than inferred from a task name.
 
-    Grouping on the run key is what makes this safe to point at
+    Grouping on the run id is what makes this safe to point at
     `.skillscope/logs`, which is the documented thing to do with it. That
     directory is shared by `behavioral`, `verify` and `routing`, is gitignored
     wholesale, and nothing prunes it; and every ordinary `behavioral` run
-    stamps `BASELINE_KEY: False`, so a run key is the only thing separating
+    stamps `BASELINE_KEY: False`, so a run id is the only thing separating
     this run's graded half from an unrelated run of the same skill last month.
-    Logs with no run key predate the key rather than being suspect, and are
-    paired when the pairing is forced. See `LEGACY_RUN`.
+
+    Logs with no run id are skipped unless `unlabelled` asks for them. See
+    `LEGACY_RUN` for what that costs and what it is for.
 
     A directory holding only one side of a run is reported as a comparison
     against nothing, the same way a case missing from one side is: silently
@@ -323,9 +324,11 @@ def from_logs(log_dir: str) -> list[Comparison]:
     comparisons: list[Comparison] = []
     for key in sorted(sides):
         half = sides[key]
-        ambiguous = key[1] == LEGACY_RUN and any(
-            n > 1 for n in logs_per_side[key].values()
-        )
+        counts = logs_per_side[key]
+        if key[1] == LEGACY_RUN:
+            if not unlabelled or not counts.get(True):
+                continue
+        ambiguous = key[1] == LEGACY_RUN and any(n > 1 for n in counts.values())
         comparisons.extend(
             pair(
                 _no_duplicates(half.get(False, []), ambiguous),
@@ -337,19 +340,30 @@ def from_logs(log_dir: str) -> list[Comparison]:
 
 # The bucket for logs written before a run id was stamped on them.
 #
-# Refusing them outright was the first fix and it was too strong: it made the
-# only staleness logs in existence unreadable, including the run this command
-# was developed against, which is the one artifact anybody could check the
-# rebuild against. A log that predates the key is not suspect, it is merely
-# unlabelled.
+# Skipped by default, and taken only when the caller asks with
+# `--unlabelled-logs`. Both halves of that rule are load-bearing.
 #
-# What the key defends against is *choosing* -- a directory holding several
-# candidates for one side, where pairing picks one silently and `list_eval_logs`
-# makes that the older. Where a skill has one log per side there is nothing to
-# choose: the pairing is forced, and labelling it would not change which logs
-# pair. Where it has more, the ambiguity is precisely the hazard, and every
-# case is reported `ungraded` rather than guessed at. A labelled run never
-# falls back here, so this cannot weaken a run written by this version.
+# Taking them by default was wrong, and not only for old directories. A plain
+# `skillscope behavioral` run stamps `BASELINE_KEY: False` and never stamps a
+# run id, because only `cmd_staleness` mints one -- so an ordinary behavioral
+# log is shaped exactly like a pre-key graded half and always will be. Pooling
+# them inflated `cases` and `ungraded` with every skill the user had ever run
+# `behavioral` against, and could silently supply the "with skill" side of a
+# comparison it was never part of. That is the splicing bug this module's run
+# id exists to prevent, arriving through the back door.
+#
+# Refusing them outright was wrong too: it made the only staleness logs that
+# existed anywhere unreadable, the run this branch was developed against
+# included, which is the one artifact a rebuild could be checked against.
+#
+# So the caller asserts it. Even then a group needs a baseline side, which
+# nothing but `cmd_staleness` ever writes, so a directory of ordinary
+# `behavioral` logs stays out whatever flags it is given. And where a side
+# holds more than one log there is a choice to make and no way to make it, so
+# every case in that group is `ungraded` rather than guessed at.
+#
+# A labelled run never falls in here, so none of this can weaken a run written
+# by this version.
 LEGACY_RUN = "unlabelled"
 
 
