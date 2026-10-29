@@ -21,8 +21,37 @@ definition such as an `inspect_swe` one. Otherwise every agent would exist twice
 this repo, with its own command line, environment, skill staging and event handling,
 free to drift apart.
 
-Today one harness is registered, `claude-code`. The contract exists so that a
-second one is an adapter and a set of tests rather than a change to the engines.
+Two harnesses are registered, `claude-code` and `copilot`, and the contract exists
+so that another is an adapter and a set of tests rather than a change to the
+engines. Neither can be chosen from the command line yet; see
+[What is not yet behind the contract](#what-is-not-yet-behind-the-contract).
+
+## The harnesses
+
+| | `claude-code` | `copilot` |
+| --- | --- | --- |
+| Binary | `claude` | `copilot` |
+| Skills directory | `.claude/skills` | `.claude/skills` |
+| A skill activates by | a `Skill` tool call | a `skill` tool call |
+| Session lists its skills | yes (`system/init`) | no; `copilot skill list --json` does, without a model call |
+| Authenticates with | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` |
+| Config isolated by | `CLAUDE_CONFIG_DIR` | `COPILOT_HOME` |
+| Prompt | stdin | stdin |
+| A run is billed in | dollars | premium requests |
+
+Things to know about `copilot` before reading its numbers:
+
+* **Its room always contains built-in skills.** Copilot ships a few of its own,
+  so they are present beside the skills a run stages and can win a case.
+* **It reports its answer separately from its closing event.** The harness
+  remembers the last assistant message and attaches it to the end of the run.
+* **It reports tokens once, at the end,** and no dollar cost, so a spend cap in
+  dollars cannot bind.
+* **It runs unsandboxed with every permission granted** (`--allow-all`), as the
+  host engine's Claude Code does, because a non-interactive run cannot answer a
+  prompt. Use a throwaway runner.
+* **It uses its own model names** (`claude-sonnet-5.5`, not `sonnet`), and
+  models differ greatly in how many premium requests one run costs.
 
 ## What a harness provides
 
