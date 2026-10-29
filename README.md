@@ -15,13 +15,14 @@ SPDX-License-Identifier: MIT
 
 ![Skillscope](assets/banner.png)
 
-A test harness for AI agent skills. Install the harness, or point a workflow at your repo. Skillscope enables three main types of tests:
+A test harness for AI agent skills. Install the harness, or point a workflow at your repo. Skillscope enables four main types of tests:
 
 * **Structural**: Checks whether the skill is well structured (contains the expected files, a proper hierarchy, etc.).
 * **Routing**: Checks whether the skill triggers when it should and stays quiet when it shouldn't. You may also point to more than one skill here to explore how skills interfere with each other's routing.
 * **Behavioral**: Runs the agent end to end and uses an LLM judge to confirm the skill behaves correctly.
+* **Staleness**: Runs the behavioral cases a second time with the skill withheld, and compares. Tells you whether the cases still need the skill, or whether the model has caught up and the suite is passing on its own.
 
-All three read one dataset per skill, `<skill>/evals/evals.json`. How to write one is in [docs/authoring-evals.md](docs/authoring-evals.md).
+All four read one dataset per skill, `<skill>/evals/evals.json`. How to write one is in [docs/authoring-evals.md](docs/authoring-evals.md).
 
 > [!IMPORTANT]
 > **Early Days**: Flags, workflow inputs, and report formats may evolve quickly as this repo takes shape.
@@ -37,6 +38,7 @@ skillscope structural                        # no agent, no tokens
 skillscope structural --external             # the same, plus checking external URLs
 skillscope behavioral --skill my-skill       # needs an authenticated `claude` CLI
 skillscope routing --routing-room my-skill,its-neighbour  # also needs a key in the environment
+skillscope staleness --skill my-skill        # the same key: its baseline has to be an empty room
 ```
 
 `routing` needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, and refuses
@@ -46,6 +48,12 @@ runner's own `~/.claude/skills` join the room for every case and the scores
 describe a room nobody asked for. `behavioral` installs one skill and grades
 what the agent produced, so a stray skill is at worst noise there, and a plain
 `claude login` is fine.
+
+`staleness` is in `routing`'s camp, not `behavioral`'s, and refuses on the
+same terms. Its baseline half has to be a room with **no** skills in it, so
+the runner's own are not noise there — they are the measurement. Either set
+one of those variables, or use `--engine claude-code`, whose guest has no
+user-level skills at all.
 
 ## Run it from your CI
 
@@ -72,6 +80,7 @@ You may also choose to customize or even disable some tests if you prefer it. Se
 | `skillscope structural` | Skill folders, datasets, and markdown references. |
 | `skillscope routing` | Which skill fires, with several installed together. |
 | `skillscope behavioral` | What a skill does once it has fired. |
+| `skillscope staleness` | Whether those cases still need the skill. |
 | `skillscope select` | The CI plan for a change, as JSON. |
 | `skillscope list-skills` | The skills that have a dataset, as JSON. |
 | `skillscope template` | The dataset template a new skill starts from. |

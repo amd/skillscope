@@ -247,6 +247,117 @@ Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
 environment gets one matrix, labels and all.
 
+## Is the skill still earning its place?
+
+A behavioral run says a skill's cases pass. It cannot say they pass *because
+of* the skill, and those are different claims: an expectation any competent
+agent meets is a measurement of the model with the skill's name on it.
+
+`skillscope staleness` runs the same cases twice, once with the skill
+installed and once with nothing installed, and reports which ones moved.
+
+```bash
+skillscope staleness --skill my-skill
+```
+
+On the default engine this needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
+in the environment and refuses to start without one, the same way `routing`
+does and for a stronger version of the same reason: the key is what lets the
+run redirect the CLI away from the runner's own config dir, and the baseline
+half has to be a room with no skills in it. Without it, every skill installed
+on the machine joins the baseline, and a case one of them solves there is
+reported as a case the skill under test was not needed for. A plain `claude
+login` is enough for `behavioral` and is not enough here. `--engine
+claude-code` needs no key for this, since its guest has no user-level skills
+at all.
+
+| Verdict | Means |
+| --- | --- |
+| `earns_it` | passed with the skill, failed without it — the case discriminates |
+| `harmful` | failed with the skill, passed without it — the skill steered the agent wrong |
+| `no_signal` | passed either way — says nothing about the skill |
+| `fails_either_way` | failed both times — a broken case, or a hard one |
+| `guards_only` | asserts nothing the skill could be credited for — see the guard rails below |
+| `ungraded` | nothing could be concluded: a run errored on one side or both, a case was missing from a side, its baseline was not empty, or whether the baseline was empty could not be established |
+
+A verdict says what changed, not why. So the graded side also records whether
+the agent *reached for* the skill, using the same detector the routing leg
+uses: installing a skill does not make an agent use it, and "installed and the
+outcome differed" is a weaker claim than "the skill fired and the outcome
+differed". An `earns_it` where the skill never fired is reported as the lead it
+is rather than as a result. Guard rails -- `unexpected_behavior` -- are kept
+out of the verdict entirely, since a good one holds whether or not the skill is
+installed; they are counted on their own, where a guard broken *with* the skill
+installed is the serious finding.
+
+`no_signal` is the verdict worth acting on, and it is two findings wearing one
+name: either the skill has stopped mattering, or the case was never evidence
+about it in the first place. The second is the more common, which makes this a
+check on the dataset as much as on the skill.
+
+Both halves write which side they were, whose skill they were about, where that
+skill was on disk, and which invocation wrote them into their inspect log
+metadata (`skillscope_baseline`, `skillscope_skill`, `skillscope_skill_dir`,
+`skillscope_staleness_run`). So a finished run can be looked at again without
+paying for it twice:
+
+```bash
+skillscope staleness --from-logs .skillscope/logs
+```
+
+That reaches no model and runs no preflight, having nothing to spend.
+
+Every key is load-bearing. `skillscope_skill_dir` is what lets a rebuild judge
+whether the baseline was really empty: the check recognises a tool call that
+reached the skill by comparing against the skill's absolute path, so a reader
+that worked that path out for itself would be working out its own rather than
+the run's, and would report a baseline the run had voided as a clean one. A log
+written without the key is read as an unknown room rather than an empty one.
+
+The run id is the key that makes this safe to point at `.skillscope/logs`. That directory is shared with `behavioral`
+and `routing`, is gitignored wholesale, and nothing prunes it — and every
+ordinary `behavioral` run writes the same `skillscope_baseline: false` a graded
+half does, with no run id. A plain `behavioral` log is therefore shaped exactly
+like a graded half, and always will be, since only `staleness` mints an id.
+Pairing on the skill alone would splice an unrelated run from last month in as
+this comparison's "with skill" side, under a table that reads exactly as
+confidently as a real one.
+
+So logs carrying no run id are passed over, and a directory of plain
+`behavioral` logs rebuilds as nothing rather than as a comparison. Logs written
+before the id existed are passed over for the same reason; `--unlabelled-logs`
+reads them:
+
+```bash
+skillscope staleness --from-logs .skillscope/logs --unlabelled-logs
+```
+
+That asserts the directory holds nothing else for the skills in it. Even then,
+a group of unlabelled logs needs a baseline half, which nothing but `staleness`
+ever writes, so ordinary `behavioral` logs stay out whatever flags you pass.
+Where one side holds several unlabelled logs there is a choice to make and
+nothing to make it with, so every case in that group is reported `ungraded`.
+
+The model and effort are not reported for a rebuild: nothing reads them off
+the logs, and the logs need not agree on them.
+
+Budget more wall clock than a `behavioral` run of the same cases, and more
+than double it. `--timeout` defaults to twice what the single-pass commands
+use for that reason. Both passes share one `--timeout`, and the baseline is
+reliably the slower half: the agent holding the skill goes straight to the
+work, while the one without it explores. On a two-case skill the graded pass
+took 2m23s and the baseline had not finished its second case half an hour
+later. A bound that expires partway reports the unreached cases as `ungraded`,
+after the graded half has already been paid for.
+
+It reports and never gates, for the reason the `claude-code` leg does not gate
+either: the agent is nondeterministic on both sides, so a single pair is a
+place to look rather than a verdict. [`tools/benchmark_engines.py`](../tools/benchmark_engines.py)
+is the shape of the honest version of this comparison — it measures agreement
+against how much one engine already disagrees with itself — and a staleness
+number deserves the same scepticism. It also costs twice what `behavioral`
+costs, which is why no workflow runs it for you.
+
 ## Which engine grades a run
 
 `--engine` chooses what actually runs the cases. The dataset, the CLI and the
@@ -279,7 +390,9 @@ The host leg cannot read the CLI's session-init event, so it has no way to
 notice such contamination or report it -- and therefore refuses to run a
 routing leg at all unless `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
 set, which is what lets it redirect the CLI's config dir away from the
-runner's own. Refusing beats being
+runner's own. It refuses a `staleness` run on the same terms and for a
+stronger version of the same reason: there the empty room is not one input to
+the measurement, it is the measurement. Refusing beats being
 quietly wrong about every case.
 
 Both legs stop at the decision, by different routes. `claude-code`'s calls

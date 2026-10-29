@@ -34,6 +34,7 @@ import tempfile
 import time
 import types
 import unittest
+from dataclasses import asdict
 import urllib.error
 from pathlib import Path
 from unittest import mock
@@ -50,6 +51,7 @@ from skillscope import (
     engine as engine_module,
     references,
     routing,
+    staleness,
     structure,
 )
 from skillscope import selection as select_module
@@ -2377,7 +2379,12 @@ class TestBehavioralEngineDispatch(unittest.TestCase):
         # The bug was a branch list that fell behind the choices list, so
         # the source is what to assert: every engine named, and an `else`
         # that raises rather than quietly picking one.
-        source = inspect.getsource(cli.cmd_behavioral)
+        #
+        # Read from `_run_behavioral` rather than `cmd_behavioral`: the
+        # dispatch moved there when `staleness` began running the same cases
+        # with the skill withheld, so both commands reach an engine by one
+        # route. The property being guarded is unchanged.
+        source = inspect.getsource(cli._run_behavioral)
         for engine in cli.ENGINES:
             with self.subTest(engine=engine):
                 self.assertIn(f'args.engine == "{engine}"', source)
@@ -5964,6 +5971,1267 @@ class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):
     def test_a_good_table_still_binds(self) -> None:
         self._apply('{"mockllm/model": {"input": 5.0, "output": 25.0}}')
         self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
+
+
+def _outcome(case_id: str, passed: bool, *, error: str | None = None, skill: str = "s"):
+    """One behavioral outcome, as either half of a staleness pair would report it.
+
+    Carries a positive claim matching `passed`, because that is what a verdict
+    is computed from -- an outcome asserting nothing is `guards_only`, which
+    has its own tests.
+    """
+    return behavior.BehaviorOutcome(
+        id=case_id, skill=skill, prompt="p", passed=passed, elapsed_s=0.0, error=error,
+        checks=[{
+            "kind": "expected_behavior", "expectation": "do the thing",
+            "passed": passed, "detail": "",
+        }],
+    )
+
+
+class TestStalenessSeparatesTheSkillFromTheModel(unittest.TestCase):
+    """The four verdicts, and why each is not the others."""
+
+    def test_a_case_that_needs_the_skill_is_the_one_that_moved(self) -> None:
+        self.assertEqual(
+            staleness.classify(_outcome("a", True), _outcome("a", False)), "earns_it"
+        )
+
+    def test_a_case_that_passes_unaided_is_not_evidence(self) -> None:
+        # The finding the command exists for: green with the skill, green
+        # without it, so the report was measuring the model.
+        self.assertEqual(
+            staleness.classify(_outcome("a", True), _outcome("a", True)), "no_signal"
+        )
+
+    def test_a_skill_that_makes_things_worse_is_called_that(self) -> None:
+        self.assertEqual(
+            staleness.classify(_outcome("a", False), _outcome("a", True)), "harmful"
+        )
+
+    def test_a_case_failing_both_ways_says_nothing_either(self) -> None:
+        self.assertEqual(
+            staleness.classify(_outcome("a", False), _outcome("a", False)),
+            "fails_either_way",
+        )
+
+    def test_an_errored_side_is_ungraded_rather_than_no_difference(self) -> None:
+        # A dropped connection measured nothing. Reading it as "the skill made
+        # no difference" is the most flattering possible reading of an error.
+        self.assertEqual(
+            staleness.classify(
+                _outcome("a", False, error="API Error: 504"), _outcome("a", False)
+            ),
+            "ungraded",
+        )
+
+
+class TestStalenessPairsEveryCaseItWasAskedFor(unittest.TestCase):
+    def test_a_case_missing_from_one_side_is_kept_as_ungraded(self) -> None:
+        # Comparing the intersection would shrink the denominator and make
+        # every surviving number look more confident than it is.
+        comparisons = staleness.pair([_outcome("a", True), _outcome("b", True)], [_outcome("a", False)])
+        verdicts = {c.id: c.verdict for c in comparisons}
+        self.assertEqual(verdicts, {"a": "earns_it", "b": "ungraded"})
+        missing = next(c for c in comparisons if c.id == "b")
+        self.assertIn("baseline", missing.error)
+
+    def test_the_share_is_over_what_was_graded_both_ways(self) -> None:
+        comparisons = staleness.pair(
+            [_outcome("a", True), _outcome("b", True), _outcome("c", True)],
+            [_outcome("a", False), _outcome("b", True)],
+        )
+        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["cases"], 3)
+        self.assertEqual(totals["graded"], 2)
+        self.assertEqual(totals["discriminating"], 0.5)
+
+    def test_nothing_graded_leaves_the_share_unset_rather_than_zero(self) -> None:
+        # Zero would read as "the skill never mattered", which is a result.
+        # None is the absence of one.
+        comparisons = staleness.pair([_outcome("a", True)], [])
+        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
+        self.assertIsNone(totals["discriminating"])
+
+
+class TestTheStalenessReportLeadsWithTheCaveat(unittest.TestCase):
+    def test_the_reader_is_told_it_does_not_gate_before_the_numbers(self) -> None:
+        comparisons = staleness.pair([_outcome("a", True)], [_outcome("a", True)])
+        summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertIn("Reporting only", report)
+        self.assertLess(report.index("Reporting only"), report.index("| Verdict |"))
+
+    def test_a_case_that_needed_nothing_is_named_with_what_to_do(self) -> None:
+        comparisons = staleness.pair([_outcome("a", True)], [_outcome("a", True)])
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertIn("`a`", report)
+        self.assertIn("unaided", report)
+
+
+@contextlib.contextmanager
+def _staleness_harness(test, *, dataset=None):
+    """A repo `cmd_staleness` can be run against, with the two halves recorded.
+
+    The command was never called by a test before this: every assertion about
+    it read its source. A regression that called `_run_behavioral` twice with
+    the same `install` -- which destroys the entire measurement, since the two
+    halves become the same run -- passed the whole suite.
+
+    `_run_behavioral` is the seam, so what each half was asked for is the
+    thing recorded. Everything below it reaches a provider.
+    """
+    repo = Repo(test)
+    repo.skill("alpha", dataset=dataset or _behavioral_dataset("alpha"))
+    repo.activate()
+
+    calls: list[dict] = []
+
+    def record(args, skills, gradable, *, install=True, config_dir=None, run_key=None):
+        calls.append(
+            {
+                "install": install,
+                "config_dir": config_dir,
+                "run_key": run_key,
+                "cases": [c.id for c in gradable],
+            }
+        )
+        return []
+
+    harness = types.SimpleNamespace(repo=repo, calls=calls)
+
+    def run(engine="claude-code", extra=None):
+        argv = [
+            "staleness", "--engine", engine, "--skip-preflight",
+            "--model", "mockllm/model", *(extra or []),
+        ]
+        args = cli.build_parser().parse_args(argv)
+        return cli.cmd_staleness(args)
+
+    harness.run = run
+
+    with mock.patch.object(cli, "_run_behavioral", record), \
+            mock.patch.object(cli, "_write_report", lambda *a, **k: None), \
+            mock.patch.object(cli, "_prepare_graded_run", lambda *a, **k: ["alpha"]):
+        yield harness
+
+
+def _behavioral_dataset(slug: str) -> dict:
+    """`tier0_dataset`, with every triggering case asserting a behaviour.
+
+    `_gradable_cases` keeps only cases with something to grade, so a routing
+    dataset leaves `cmd_staleness` with nothing to run and it returns before
+    reaching either half.
+    """
+    data = tier0_dataset(slug)
+    for evaluation in data[EVALUATIONS_KEY]:
+        if evaluation[TRIGGER_KEY]:
+            evaluation["expected_behavior"] = ["do the thing"]
+    return data
+
+
+def _checked(case_id: str, passed: bool, checks: list[dict], skill: str = "s"):
+    """A behavioral outcome carrying graded checks."""
+    return behavior.BehaviorOutcome(
+        id=case_id, skill=skill, prompt="p", passed=passed, elapsed_s=0.0, checks=checks
+    )
+
+
+def _check(text: str, passed: bool, detail: str = ""):
+    return {"kind": "expected_behavior", "expectation": text, "passed": passed, "detail": detail}
+
+
+class TestBothSidesReasonsSurviveIntoTheReport(unittest.TestCase):
+    """The first real run of this command failed both ways for *different*
+    reasons -- the agent tried the task and was blocked on one side, and never
+    attempted it on the other -- and neither the verdict nor the JSON could
+    show it. Only the raw inspect logs could, which is not a report."""
+
+    def _pair(self):
+        return staleness.pair(
+            [_checked("c", False, [
+                _check("Install it", False, "tried, blocked by missing sudo"),
+                _check("Avoid the cloud", True),
+            ])],
+            [_checked("c", False, [
+                _check("Install it", False, "only surveyed, never attempted"),
+                _check("Avoid the cloud", True),
+            ])],
+        )
+
+    def test_both_sides_checks_reach_the_comparison(self) -> None:
+        comparison = self._pair()[0]
+        self.assertEqual(len(comparison.checks_with), 2)
+        self.assertEqual(len(comparison.checks_without), 2)
+
+    def test_an_expectation_both_sides_met_is_not_reported_as_a_reason(self) -> None:
+        # Only what went unmet needs explaining.
+        rows = staleness._reasons(asdict(self._pair()[0]))
+        self.assertEqual([text for text, _, _ in rows], ["Install it"])
+
+    def test_the_two_reasons_appear_side_by_side(self) -> None:
+        summary = staleness.summarize(self._pair(), {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertIn("blocked by missing sudo", report)
+        self.assertIn("only surveyed, never attempted", report)
+
+    def test_a_clean_run_is_not_described_as_every_case_needing_the_skill(self) -> None:
+        # A `no_signal` case has no unmet expectation either, so the empty
+        # state is about unmet expectations rather than about the verdict.
+        # The first run with a no_signal case reported the opposite.
+        comparisons = staleness.pair(
+            [_checked("c", True, [_check("Do the thing", True)])],
+            [_checked("c", True, [_check("Do the thing", True)])],
+        )
+        summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertEqual(summary["totals"]["no_signal"], 1)
+        self.assertNotIn("every case needed the skill", report)
+        self.assertIn("every claim came out the same", report)
+
+    def test_a_check_only_one_side_graded_is_still_shown(self) -> None:
+        # Fewer checks on one side must not hide the difference.
+        comparisons = staleness.pair(
+            [_checked("c", False, [_check("Install it", False, "blocked")])],
+            [_checked("c", False, [])],
+        )
+        rows = staleness._reasons(asdict(comparisons[0]))
+        self.assertEqual(rows[0][2], "not graded this side")
+
+
+class _StubSample:
+    def __init__(self, sample_id, checks, error=None):
+        self.id = sample_id
+        self.scores = {"expectations": types.SimpleNamespace(metadata={"checks": checks})}
+        self.error = error
+        self.total_time = 1.0
+
+
+class _StubLog:
+    def __init__(self, skill, baseline, samples, run_key="run-1"):
+        metadata = {
+            engine_behavioral.SKILL_KEY: skill,
+            engine_behavioral.BASELINE_KEY: baseline,
+        }
+        if run_key is not None:
+            metadata[engine_behavioral.STALENESS_RUN_KEY] = run_key
+        self.eval = types.SimpleNamespace(
+            task=f"behavioral-{skill}", metadata=metadata
+        )
+        self.samples = samples
+
+
+class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):
+    """A guard rail holds with or without the skill -- that is its job.
+
+    Folding that into the verdict marks the checks most worth keeping as dead
+    weight, which would push an author to delete exactly the wrong ones.
+    """
+
+    def _guard(self, passed: bool):
+        return {"kind": "unexpected_behavior", "expectation": "no sudo",
+                "passed": passed, "detail": ""}
+
+    def test_a_guard_holding_on_both_sides_does_not_make_a_case_no_signal(self) -> None:
+        # The claim moved; the guard did not. The verdict follows the claim.
+        with_skill = _checked("c", True, [_check("run the CLI", True), self._guard(True)])
+        without = _checked("c", False, [_check("run the CLI", False), self._guard(True)])
+        self.assertEqual(staleness.classify(with_skill, without), "earns_it")
+
+    def test_a_case_with_only_guards_is_called_that(self) -> None:
+        # Nothing was claimed, so nothing can be credited -- but the case is
+        # not broken, which `fails_either_way` would imply.
+        both = _checked("c", True, [self._guard(True)])
+        self.assertEqual(staleness.classify(both, both), "guards_only")
+
+    def test_guards_only_cases_stay_out_of_the_discriminating_share(self) -> None:
+        comparisons = staleness.pair(
+            [_checked("a", True, [_check("x", True)]), _checked("b", True, [self._guard(True)])],
+            [_checked("a", False, [_check("x", False)]), _checked("b", True, [self._guard(True)])],
+        )
+        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["guards_only"], 1)
+        self.assertEqual(totals["graded"], 1)
+        self.assertEqual(totals["discriminating"], 1.0)
+
+    def test_a_guard_broken_with_the_skill_is_surfaced(self) -> None:
+        # The serious finding: the skill made the agent do the forbidden thing.
+        comparisons = staleness.pair(
+            [_checked("c", False, [_check("x", True), self._guard(False)])],
+            [_checked("c", True, [_check("x", True), self._guard(True)])],
+        )
+        summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        self.assertEqual(summary["totals"]["guards_broken_with_skill"], 1)
+        self.assertIn("forbidden thing", staleness.render_markdown(summary))
+
+    def test_the_evidence_shows_even_when_the_skill_earned_it(self) -> None:
+        # The old report skipped `earns_it` cases, so a run whose whole point
+        # was that three cases moved printed "nothing to show".
+        comparisons = staleness.pair(
+            [_checked("c", True, [_check("ran `rocm --version`", True)])],
+            [_checked("c", False, [_check("ran `rocm --version`", False)])],
+        )
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertIn("What the skill changed", report)
+        self.assertIn("rocm --version", report)
+
+
+class TestADirtyBaselineCannotShowWhatAnAgentDoesUnaided(unittest.TestCase):
+    """The first real runs had 40 user-level skills in the baseline room.
+
+    One case invoked an unrelated personal skill and another read the skill
+    under test straight off the repo; both were reported `no_signal`, which
+    claims the agent managed unaided. It had not.
+    """
+
+    def _pair(self, reason):
+        without = _checked("c", True, [_check("x", True)])
+        without.contaminated = reason
+        return staleness.pair([_checked("c", True, [_check("x", True)])], [without])
+
+    def test_a_contaminated_baseline_is_ungraded_not_no_signal(self) -> None:
+        self.assertEqual(self._pair("another skill fired: oss-contribution")[0].verdict, "ungraded")
+
+    def test_an_earns_it_survives_its_own_contamination(self) -> None:
+        # The baseline failed while holding more than it should have. It
+        # fails all the harder without it, so voiding the verdict would throw
+        # away a conclusion the run is entitled to -- which cost a real run a
+        # real verdict before this was split out.
+        without = _checked("c", False, [_check("x", False)])
+        without.contaminated = "read the skill's own files (rocm-doctor)"
+        comparisons = staleness.pair([_checked("c", True, [_check("x", True)])], [without])
+        self.assertEqual(comparisons[0].verdict, "earns_it")
+
+    def test_the_report_separates_the_voided_from_the_standing(self) -> None:
+        clean_fail = _checked("a", False, [_check("x", False)])
+        clean_fail.contaminated = "read the skill's own files (s)"
+        passed_both = _checked("b", True, [_check("y", True)])
+        passed_both.contaminated = "another skill fired: helper"
+        comparisons = staleness.pair(
+            [_checked("a", True, [_check("x", True)]), _checked("b", True, [_check("y", True)])],
+            [clean_fail, passed_both],
+        )
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertIn("1 of them are reported `ungraded`", report)
+        self.assertIn("1 still stand", report)
+        self.assertIn("`a` (earns_it)", report)
+
+    def test_a_clean_baseline_still_reports_no_signal(self) -> None:
+        self.assertEqual(self._pair(None)[0].verdict, "no_signal")
+
+    def test_the_reason_reaches_the_report(self) -> None:
+        summary = staleness.summarize(
+            self._pair("read the skill's own files (quark-torch-llm-ptq)"),
+            {"model": "m", "effort": "e"},
+        )
+        report = staleness.render_markdown(summary)
+        self.assertEqual(summary["totals"]["baseline_contaminated"], 1)
+        self.assertIn("baseline that was not empty", report)
+        self.assertIn("read the skill's own files", report)
+
+    def test_the_command_refuses_an_unisolatable_host_run(self) -> None:
+        # Routing has always refused this; staleness needs it more, because
+        # the baseline being empty is the measurement rather than an input.
+        #
+        # Run, not read. The version of this that grepped `cmd_staleness` for
+        # "can_isolate_config" passed just as happily with the `not` dropped
+        # from the guard, which is the one edit that turns the refusal into a
+        # run that reports a contaminated baseline as a clean one.
+        with _staleness_harness(self) as harness:
+            with mock.patch.object(cli.routing, "can_isolate_config", lambda: False):
+                with self.assertRaises(SystemExit) as caught:
+                    harness.run(engine="claude-code-no-sandbox")
+        self.assertIn("claude-code-no-sandbox", str(caught.exception))
+        self.assertEqual(harness.calls, [])
+
+    def test_an_isolatable_host_run_is_allowed_through(self) -> None:
+        # The other half of the guard. Without this the test above passes on a
+        # command that refuses everything.
+        with _staleness_harness(self) as harness:
+            with mock.patch.object(cli.routing, "can_isolate_config", lambda: True):
+                harness.run(engine="claude-code-no-sandbox")
+        self.assertEqual(len(harness.calls), 2)
+
+
+class TestASkillThatChangedNothingIsToldPlainly(unittest.TestCase):
+    """`earns_it | 0` is a true row that says nothing, and this is the one
+    result the command exists to surface."""
+
+    def _all_no_signal(self):
+        both = [_checked("a", True, [_check("x", True)])]
+        return staleness.pair(both, both)
+
+    def test_the_result_is_stated_rather_than_left_in_the_table(self) -> None:
+        report = staleness.render_markdown(
+            staleness.summarize(self._all_no_signal(), {"model": "m", "effort": "e"})
+        )
+        self.assertIn("No case in this suite shows the skill doing anything", report)
+
+    def test_it_names_both_explanations(self) -> None:
+        # Retire the skill and fix the cases are different actions, and the
+        # report cannot tell which applies.
+        report = staleness.render_markdown(
+            staleness.summarize(self._all_no_signal(), {"model": "m", "effort": "e"})
+        )
+        self.assertIn("stopped earning its place", report)
+        self.assertIn("never tested what it knows", report)
+
+    def test_a_run_with_a_discriminating_case_says_nothing_of_the_sort(self) -> None:
+        comparisons = staleness.pair(
+            [_checked("a", True, [_check("x", True)])],
+            [_checked("a", False, [_check("x", False)])],
+        )
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertNotIn("shows the skill doing anything", report)
+
+    def test_a_run_that_graded_nothing_does_not_claim_the_skill_is_idle(self) -> None:
+        # Nothing graded is not the same as nothing changed.
+        comparisons = staleness.pair([_checked("a", True, [_check("x", True)])], [])
+        report = staleness.render_markdown(
+            staleness.summarize(comparisons, {"model": "m", "effort": "e"})
+        )
+        self.assertNotIn("shows the skill doing anything", report)
+
+
+class TestEarningItMeansTheSkillActuallyFired(unittest.TestCase):
+    """Installing a skill does not make an agent use it.
+
+    Until activation was recorded, an `earns_it` meant only that the outcome
+    differed on the side where the skill happened to be installed.
+    """
+
+    def _pair(self, activated):
+        with_skill = _checked("c", True, [_check("ran the CLI", True)])
+        with_skill.activated = activated
+        return staleness.pair([with_skill], [_checked("c", False, [_check("ran the CLI", False)])])
+
+    def test_the_firing_is_carried_onto_the_comparison(self) -> None:
+        self.assertEqual(self._pair("rocm-doctor")[0].activated_with, "rocm-doctor")
+
+    def test_an_earns_it_that_never_fired_is_counted(self) -> None:
+        totals = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})["totals"]
+        self.assertEqual(totals["earns_it"], 1)
+        self.assertEqual(totals["earned_without_firing"], 1)
+
+    def test_an_earns_it_that_fired_is_not_counted(self) -> None:
+        totals = staleness.summarize(
+            self._pair("rocm-doctor"), {"model": "m", "effort": "e"}
+        )["totals"]
+        self.assertEqual(totals["earned_without_firing"], 0)
+
+    def test_the_reader_is_warned_before_believing_the_number(self) -> None:
+        summary = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})
+        report = staleness.render_markdown(summary)
+        self.assertIn("never activated the skill", report)
+        self.assertLess(report.index("never activated"), report.index("### Cases worth a look"))
+
+    def test_a_clean_run_says_nothing_about_firing(self) -> None:
+        # No warning when every earns_it fired: an unconditional note would be
+        # noise, and noise is what gets skipped on the run that matters.
+        report = staleness.render_markdown(
+            staleness.summarize(self._pair("rocm-doctor"), {"model": "m", "effort": "e"})
+        )
+        self.assertNotIn("never activated the skill", report)
+
+
+class TestAComparisonCanBeRebuiltFromLogs(unittest.TestCase):
+    """The pairing is written into the logs, so a directory is enough.
+
+    Without this the two runs are related only in the memory of the process
+    that launched them, and a finished run cannot be looked at again without
+    paying for it twice over.
+    """
+
+    def test_a_log_reports_which_side_it_was(self) -> None:
+        log = _StubLog("alpha", True, [_StubSample("c", [_check("do it", False)])])
+        skill, baseline, _, outcomes = staleness.outcomes_from_log(log)
+        self.assertEqual(skill, "alpha")
+        self.assertTrue(baseline)
+        self.assertEqual(len(outcomes), 1)
+        self.assertFalse(outcomes[0].passed)
+
+    def test_a_sample_passes_only_when_every_check_did(self) -> None:
+        log = _StubLog("alpha", False, [
+            _StubSample("c", [_check("a", True), _check("b", True)]),
+            _StubSample("d", [_check("a", True), _check("b", False)]),
+        ])
+        _, _, _, outcomes = staleness.outcomes_from_log(log)
+        self.assertEqual([o.passed for o in outcomes], [True, False])
+
+    def test_a_sample_with_no_checks_has_not_passed(self) -> None:
+        # An ungraded sample is not a green one.
+        log = _StubLog("alpha", False, [_StubSample("c", [])])
+        _, _, _, outcomes = staleness.outcomes_from_log(log)
+        self.assertFalse(outcomes[0].passed)
+
+    def test_a_rebuild_is_no_more_permissive_than_the_run_it_rebuilds(self) -> None:
+        # A sample whose checks could not be read is ungraded on the live path
+        # (`behavioral._outcomes` sets an error for it). Rebuilt without that,
+        # it comes back as `checks=[]`, which makes `_met()` False, which reads
+        # as the baseline having failed -- so a harness failure is promoted to
+        # `earns_it` and inflates the headline number.
+        #
+        # Asserted on the verdict, not on the source. The version of this that
+        # grepped `outcomes_from_log` for "_inspect_room" and "contaminated"
+        # passed for the whole life of the defect it was named after.
+        graded = _StubLog("alpha", False, [_StubSample("c", [_check("do it", True)])])
+        unreadable = _StubLog("alpha", True, [_StubSample("c", [])])
+        _, _, _, with_skill = staleness.outcomes_from_log(graded)
+        _, _, _, without = staleness.outcomes_from_log(unreadable)
+
+        self.assertEqual(
+            without[0].error, "case has no behavioral assertions to grade"
+        )
+        self.assertEqual(staleness.classify(with_skill[0], without[0]), "ungraded")
+
+    def test_the_live_path_and_the_rebuild_word_it_the_same_way(self) -> None:
+        # Two strings that have to match for the two paths to agree, and
+        # nothing else makes them.
+        live = inspect.getsource(engine_behavioral._outcomes)
+        rebuilt = inspect.getsource(staleness.outcomes_from_log)
+        message = "case has no behavioral assertions to grade"
+        self.assertIn(message, live)
+        self.assertIn(message, rebuilt)
+
+    def test_the_two_sides_pair_on_the_skill_they_name(self) -> None:
+        graded = _StubLog("alpha", False, [_StubSample("c", [_check("do it", True)])])
+        baseline = _StubLog("alpha", True, [_StubSample("c", [_check("do it", False)])])
+        sides = {}
+        for log in (graded, baseline):
+            skill, is_baseline, _, outcomes = staleness.outcomes_from_log(log)
+            sides.setdefault(skill, {}).setdefault(is_baseline, []).extend(outcomes)
+        comparisons = staleness.pair(sides["alpha"][False], sides["alpha"][True])
+        self.assertEqual([c.verdict for c in comparisons], ["earns_it"])
+
+
+class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
+    """The flag has to reach the driver, or the two halves are not comparable."""
+
+    def _staged(self, *, install: bool) -> list:
+        """Whether the solver reached `install_skill`, for one value of the flag.
+
+        Driven rather than read. The earlier version of this asserted that the
+        signature had an `install` parameter defaulting to True, which says
+        nothing about whether the flag reaches the staging step -- and the
+        staging step is the entire difference between the two halves.
+
+        The CLI call after it is cut off by giving it no output to parse, which
+        is the first thing the solver refuses: staging has already happened or
+        not by then.
+        """
+        import asyncio
+
+        staged: list[Path] = []
+        workspace = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+
+        async def no_workspace():
+            return workspace
+
+        async def no_output(*args, **kwargs):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        solve = engine_no_sandbox.claude_code_no_sandbox(
+            None, None, Path("alpha"), install=install
+        )
+        state = types.SimpleNamespace(input_text="p", messages=[], store=None)
+        with mock.patch.object(engine_no_sandbox, "_workspace", no_workspace), \
+                mock.patch.object(
+                    engine_no_sandbox, "install_skill",
+                    lambda d, w: staged.append(d),
+                ), \
+                mock.patch("inspect_ai.util.subprocess", no_output):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(solve(state, None))
+        return staged
+
+    def test_the_host_driver_stages_nothing_when_asked_not_to(self) -> None:
+        self.assertEqual(self._staged(install=False), [])
+
+    def test_the_host_driver_stages_the_skill_when_asked_to(self) -> None:
+        # The other half: a driver that staged nothing ever would pass the
+        # test above while making both halves the baseline.
+        self.assertEqual(self._staged(install=True), [Path("alpha")])
+
+    def test_the_task_name_says_which_half_it_is(self) -> None:
+        # Both halves write into one log directory; a name that did not say
+        # would leave the two indistinguishable on disk. Asserted on the names
+        # the two calls actually produce, rather than on the source containing
+        # the suffix somewhere.
+        repo = Repo(self)
+        repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        repo.activate()
+        cases = [c for c in datasets.load_all_cases() if c.skill == "alpha"][:1]
+
+        graded = engine_behavioral.build_task(
+            "alpha", cases, "mockllm/model", solver_factory=lambda d: None
+        )
+        baseline = engine_behavioral.build_task(
+            "alpha", cases, "mockllm/model",
+            solver_factory=lambda d: None, baseline=True,
+        )
+        self.assertFalse(graded.name.endswith("-baseline"))
+        self.assertTrue(baseline.name.endswith("-baseline"))
+        self.assertFalse(graded.metadata[engine_behavioral.BASELINE_KEY])
+        self.assertTrue(baseline.metadata[engine_behavioral.BASELINE_KEY])
+
+
+class TestTheRoomIsJudgedWhereTheRunWasNotWhereTheReaderIs(unittest.TestCase):
+    """A rebuilt contamination verdict must not depend on who is reading.
+
+    `_skill_marks` recognises a tool call that reached the skill by comparing
+    against the skill's absolute path. Worked out at read time it is the
+    *reader's* answer: rebuilt from another directory, or on a machine without
+    the skill checked out, the mark went missing and a baseline the run had
+    voided as `ungraded` came back `no_signal` -- stated in the report as
+    fact. So the run records where the skill was and the reader uses that.
+
+    This is the same hazard `test_a_rebuild_is_no_more_permissive_than_the_run_
+    it_rebuilds` guards for the no-checks branch, in the one place it was
+    still open.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("run", dataset=tier0_dataset("run"))
+        self.repo.activate()
+        self.cases = [c for c in datasets.load_all_cases() if c.skill == "run"][:1]
+
+    def _why(self, arguments, skill_dir=None):
+        from skillscope.engine import routing as routing_engine
+
+        call = _FakeCall("toolu_1", function="Read")
+        call.arguments = arguments
+        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, "run", skill_dir
+        )[1]
+
+    def test_the_run_records_where_the_skill_was(self) -> None:
+        # Without this the reader has only its own cwd to go on, and the
+        # rebuild silently returns to deriving the weaker answer -- which on
+        # the machine that wrote the logs looks exactly right.
+        own = str(config.active().skill_path("run").resolve())
+        for baseline in (False, True):
+            task = engine_behavioral.build_task(
+                "run", self.cases, "mockllm/model",
+                solver_factory=lambda d: None, baseline=baseline,
+            )
+            self.assertIn(
+                engine_behavioral.SKILL_DIR_KEY, task.metadata,
+                "the log does not say where the skill was",
+            )
+            self.assertEqual(task.metadata[engine_behavioral.SKILL_DIR_KEY], own)
+
+    def test_the_other_engine_records_it_too(self) -> None:
+        # `verify.build_task` needs `inspect_swe`, which the unit job does not
+        # install, so this is read rather than called -- the same compromise
+        # `test_the_behavioral_leg_completes_its_skill_too` makes for it. A
+        # log is paired without knowing which engine wrote it, so a key only
+        # one of them writes is a key the reader cannot rely on.
+        self.assertIn(
+            "SKILL_DIR_KEY", inspect.getsource(engine_verify.build_task)
+        )
+
+    def test_the_verdict_is_the_same_from_any_directory(self) -> None:
+        # The property, asserted as a property. A relative path resolves
+        # against whoever is running, so resolving one here made the answer a
+        # fact about the reader's cwd. Standing in the repo root used to say
+        # contaminated and standing anywhere else said clean, for the same
+        # recorded call.
+        own = str(config.active().skill_path("run").resolve())
+        argument = {"file_path": "run/SKILL.md"}
+
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+
+        os.chdir(self.repo.root)
+        from_the_repo_root = self._why(argument, skill_dir=own)
+        os.chdir(here)
+        from_anywhere_else = self._why(argument, skill_dir=own)
+
+        self.assertEqual(
+            from_the_repo_root, from_anywhere_else,
+            "the contamination verdict moved with the reader's cwd",
+        )
+
+
+class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
+    """`_inspect_room` answers two questions, and they must not cross.
+
+    `fired` is `None` or exactly the skill under test -- `detect_activation` is
+    called with `skills=[skill]`, so there is nothing else it can legitimately
+    be. When the two answers shared one `if/elif`, a second `other:<name>` hit
+    arriving after `why` was already set fell through to the `elif` and was
+    recorded as the skill having fired.
+
+    That string then reads as truthy everywhere downstream: `activated_with`
+    on the `Comparison`, and `earned_without_firing`, which tests `not
+    c.activated_with`. So the "never activated the skill" warning was
+    suppressed on exactly the contaminated cases that most need it, and the
+    marker landed verbatim in both JSON reports.
+    """
+
+    def _sample(self, calls):
+        return _FakeSample(messages=[_FakeMessage("m", calls)], events=[])
+
+    def _call(self, name, arguments=None):
+        call = _FakeCall("toolu_1", function=name)
+        call.arguments = arguments or {}
+        return call
+
+    def _inspect(self, sample, skill="alpha"):
+        from skillscope.engine import routing as routing_engine
+
+        # A directory for the skill, so the room is knowable and `why` reports
+        # what this class is about rather than `UNKNOWN_ROOM`. No case here
+        # names a path, so nothing can match it.
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, skill, f"/nonexistent/skills/{skill}"
+        )
+
+    def test_a_contamination_marker_is_never_reported_as_the_skill(self) -> None:
+        # Two `other:` hits. The first sets `why`; the second used to find it
+        # already set, fail the first condition, and land in `fired`.
+        sample = self._sample([
+            self._call("Skill", {"command": "beta"}),
+            self._call("Skill", {"command": "gamma"}),
+        ])
+        fired, why = self._inspect(sample)
+        self.assertIsNone(fired)
+        self.assertIsNotNone(why)
+        self.assertIn("another skill fired", why)
+
+    def test_the_skill_under_test_is_still_reported_when_it_fires(self) -> None:
+        # The other half: a fix that reports nothing would pass the test above.
+        sample = self._sample([self._call("Skill", {"command": "alpha"})])
+        fired, why = self._inspect(sample)
+        self.assertEqual(fired, "alpha")
+        self.assertIsNone(why)
+
+    def test_a_marker_cannot_reach_the_report_as_an_activation(self) -> None:
+        # The consequence, asserted where it is read: a truthy garbage string
+        # in `activated_with` suppresses the warning this totals.
+        sample = self._sample([
+            self._call("Skill", {"command": "beta"}),
+            self._call("Skill", {"command": "gamma"}),
+        ])
+        fired, _ = self._inspect(sample)
+        graded = behavior.BehaviorOutcome(
+            id="c", skill="alpha", prompt="p", passed=True, elapsed_s=0.0,
+            checks=[_check("do it", True)], activated=fired,
+        )
+        without = _checked("c", False, [_check("do it", False)], skill="alpha")
+        totals = staleness.summarize(
+            staleness.pair([graded], [without]), {"model": "m", "effort": "e"}
+        )["totals"]
+        self.assertEqual(totals["earns_it"], 1)
+        self.assertEqual(totals["earned_without_firing"], 1)
+
+
+class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
+    """A bare skill name is not evidence that the skill's files were read.
+
+    `structure.py` allows a single-word name and sets no minimum length, and
+    single-word names are the norm -- Anthropic ship `pdf`, `docx`, `pptx`. The
+    heuristic matched `/{skill}/` as a substring of every tool call's
+    serialised arguments, so a skill named `run` was reported as contaminated
+    by any agent that touched `/run/user/1000`, and `docs`, `test`, `tools` or
+    `scripts` by any ordinary path.
+
+    The cost of that false positive is the highest there is here:
+    `_voided_if_dirty` converts `no_signal` and `harmful` -- the two verdicts
+    the command exists to surface -- into `ungraded`, and the report states the
+    contamination as fact.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("run", dataset=tier0_dataset("run"))
+        self.repo.activate()
+
+    def _why(self, arguments, skill="run", skill_dir=None):
+        from skillscope.engine import routing as routing_engine
+
+        call = _FakeCall("toolu_1", function="Read")
+        call.arguments = arguments
+        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, skill, skill_dir
+        )[1]
+
+    def test_an_unrelated_path_sharing_the_skills_name_is_not_contamination(self) -> None:
+        self.assertIsNone(self._why({"file_path": "/run/user/1000/bus"}))
+
+    def test_a_bash_command_mentioning_the_name_is_not_contamination(self) -> None:
+        self.assertIsNone(
+            self._why({"command": "ls /run/systemd && mkdir -p build/run/out"})
+        )
+
+    def test_the_skills_own_directory_still_counts(self) -> None:
+        own = str(config.active().skill_path("run") / "SKILL.md")
+        self.assertIn("read the skill's own files", self._why({"file_path": own}))
+
+    def test_the_staged_copy_still_counts(self) -> None:
+        staged = "/tmp/ws-1234/.claude/skills/run/reference.md"
+        self.assertIn("read the skill's own files", self._why({"file_path": staged}))
+
+    def test_a_bash_command_naming_the_real_directory_still_counts(self) -> None:
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files", self._why({"command": f"cat {own}/SKILL.md"})
+        )
+
+    def test_the_harness_staging_directory_still_counts(self) -> None:
+        self.assertIn(
+            "read the skill's own files",
+            self._why({"file_path": "/opt/_bundled_skills/run/SKILL.md"}),
+        )
+
+    def test_a_sibling_skill_whose_name_extends_this_one_is_not_this_one(self) -> None:
+        # The false positive that survived the first fix in the shell branch,
+        # because the staged mark carried no trailing boundary there while
+        # the structured branch used `_under`. `run-extra` is its own skill.
+        self.assertIsNone(
+            self._why({"command": "cat /home/u/.claude/skills/run-extra/SKILL.md"})
+        )
+        self.assertIsNone(
+            self._why({"file_path": "/home/u/.claude/skills/run-extra/SKILL.md"})
+        )
+
+    def test_a_name_the_skills_own_name_is_a_prefix_of_is_not_a_hit(self) -> None:
+        own = str(config.active().skill_path("run"))
+        self.assertIsNone(self._why({"file_path": f"{own}.bak/SKILL.md"}))
+
+    def test_the_staged_copy_is_found_by_the_relative_name(self) -> None:
+        # `no_sandbox` runs the agent with `cwd=workspace`, so this is the
+        # natural shell form. A mark anchored with a leading separator missed
+        # it, and a missed contamination is the worse direction: the baseline
+        # is then reported clean, as fact.
+        self.assertIn(
+            "read the skill's own files",
+            self._why({"command": "cat .claude/skills/run/SKILL.md"}),
+        )
+
+    def test_an_argument_the_field_list_never_named_is_still_read(self) -> None:
+        # `pattern` is Glob's primary argument and is often its only one, so
+        # the old fixed field list made the call invisible. The tool surface
+        # is open, so the list was always going to drift behind it.
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files", self._why({"pattern": f"{own}/**/*.md"})
+        )
+
+    def test_a_tool_naming_its_arguments_anything_is_still_read(self) -> None:
+        # An MCP tool names its arguments whatever it likes.
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files", self._why({"some_mcp_arg": f"{own}/x.md"})
+        )
+
+    def test_a_path_nested_inside_a_structured_argument_is_still_read(self) -> None:
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files",
+            self._why({"edits": [{"file": f"{own}/SKILL.md"}]}),
+        )
+
+    def test_a_skill_with_no_directory_does_not_take_the_command_down(self) -> None:
+        # `config.skill_path` raises `SystemExit`, which `except Exception`
+        # does not catch -- so rebuilding somebody else's logs killed the
+        # process rather than reporting what it could.
+        why = self._why({"file_path": "/tmp/x"}, skill="not-a-skill")
+        self.assertIsNotNone(why)
+
+    def test_a_skill_with_no_directory_is_an_unknown_room_not_a_clean_one(self) -> None:
+        # It used to answer `None` here, which reads as "the baseline was
+        # clean" -- a verdict reached by not looking. The mark it dropped is
+        # the only one an absolute path can hit, so every tool call that
+        # reached the skill by its real path came back clean on any machine
+        # without the skill checked out.
+        why = self._why({"file_path": "/tmp/x"}, skill="not-a-skill")
+        self.assertEqual(why, engine_behavioral.UNKNOWN_ROOM)
+
+    def test_a_recorded_directory_answers_it_without_the_skill_on_this_machine(
+        self,
+    ) -> None:
+        # The point of recording it: the same log, read where the skill is not.
+        own = str(config.active().skill_path("run"))
+        self.assertIn(
+            "read the skill's own files",
+            self._why(
+                {"file_path": f"{own}/SKILL.md"}, skill="not-a-skill", skill_dir=own
+            ),
+        )
+
+
+class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
+    """The command's whole measurement is that the two runs differ in one way.
+
+    Called rather than read. Every earlier assertion about `cmd_staleness` was
+    a substring check against its source, and `cli._run_behavioral` was never
+    invoked by a test at all.
+    """
+
+    def test_the_cases_are_run_twice(self) -> None:
+        with _staleness_harness(self) as harness:
+            self.assertEqual(harness.run(), 0)
+        self.assertEqual(len(harness.calls), 2)
+
+    def test_the_two_halves_disagree_about_installing(self) -> None:
+        # The regression this exists for: two calls with the same `install`
+        # compare a run against itself and report `no_signal` for everything.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        self.assertEqual([c["install"] for c in harness.calls], [True, False])
+
+    def test_both_halves_grade_the_same_cases(self) -> None:
+        with _staleness_harness(self) as harness:
+            harness.run()
+        self.assertEqual(harness.calls[0]["cases"], harness.calls[1]["cases"])
+        self.assertTrue(harness.calls[0]["cases"])
+
+    def test_both_halves_carry_one_run_key(self) -> None:
+        # What `--from-logs` pairs on. Two different keys leave the halves
+        # unpairable; no key leaves them pairable with anything.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        keys = {c["run_key"] for c in harness.calls}
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys.pop())
+
+    def test_two_invocations_do_not_share_a_run_key(self) -> None:
+        with _staleness_harness(self) as harness:
+            harness.run()
+            harness.run()
+        self.assertNotEqual(harness.calls[0]["run_key"], harness.calls[2]["run_key"])
+
+    def test_a_dataset_with_nothing_to_grade_runs_neither_half(self) -> None:
+        with _staleness_harness(self, dataset=tier0_dataset("alpha")) as harness:
+            self.assertEqual(harness.run(), 0)
+        self.assertEqual(harness.calls, [])
+
+
+class TestARebuildPairsOneRunAndNotItsNeighbours(unittest.TestCase):
+    """`.skillscope/logs` is shared, never pruned, and gitignored wholesale.
+
+    Every ordinary `behavioral` run stamps `BASELINE_KEY: False`, so grouping
+    on `(skill, baseline)` alone made an unrelated run of the same skill a
+    candidate for this comparison's "with skill" half -- rendered into a table
+    that reads exactly as confidently as a real one. `docs/usage.md` documents
+    pointing `--from-logs` at that very directory.
+    """
+
+    def _rebuild(self, logs, unlabelled=True):
+        info = [types.SimpleNamespace(name=f"log-{i}") for i in range(len(logs))]
+        by_name = {i.name: log for i, log in zip(info, logs)}
+        with mock.patch("inspect_ai.log.list_eval_logs", lambda d: info), \
+                mock.patch("inspect_ai.log.read_eval_log", lambda n: by_name[n]):
+            return staleness.from_logs("anywhere", unlabelled=unlabelled)
+
+    def _log(self, baseline, passed, run_key="run-1", case="c"):
+        return _StubLog(
+            "alpha", baseline,
+            [_StubSample(case, [_check("do it", passed)])],
+            run_key=run_key,
+        )
+
+    def test_one_runs_two_halves_pair(self) -> None:
+        comparisons = self._rebuild([self._log(False, True), self._log(True, False)])
+        self.assertEqual([c.verdict for c in comparisons], ["earns_it"])
+
+    def test_a_neighbouring_runs_log_is_not_spliced_in(self) -> None:
+        # The stale graded half says the case passed; this run's says it
+        # failed. Pooled, the pair reads `earns_it` off a run nobody asked
+        # about. Kept apart, each run is compared with itself.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key="old"),
+            self._log(False, False, run_key="new"),
+            self._log(True, False, run_key="new"),
+        ])
+        verdicts = sorted(c.verdict for c in comparisons)
+        self.assertEqual(verdicts, ["fails_either_way", "ungraded"])
+
+    def test_unlabelled_logs_are_not_read_unless_asked_for(self) -> None:
+        # The default. A plain `behavioral` log carries `BASELINE_KEY: False`
+        # and no run id, which is the same shape a pre-id graded half has, so
+        # reading unlabelled logs unasked pools whatever is in the directory.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),
+            self._log(True, False, run_key=None),
+        ], unlabelled=False)
+        self.assertEqual(comparisons, [])
+
+    def test_an_unlabelled_pair_is_read_when_asked_for(self) -> None:
+        # What `--unlabelled-logs` is for: one log a side, nothing to choose
+        # between, and a baseline half that only a staleness run ever writes.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),
+            self._log(True, False, run_key=None),
+        ])
+        self.assertEqual([c.verdict for c in comparisons], ["earns_it"])
+
+    def test_graded_only_unlabelled_logs_are_never_read(self) -> None:
+        # The common hole. `behavioral` and `verify` runs never carry a run
+        # id by design, so these keep arriving forever -- and pooled they
+        # inflated `cases` and `ungraded` with every skill the user had ever
+        # run `behavioral` against, plus a `per_skill` row for it.
+        #
+        # Asking for unlabelled logs does not buy this: a baseline half is
+        # the one thing nothing but `cmd_staleness` writes, so requiring one
+        # keeps ordinary behavioral logs out whatever flags are passed.
+        for asked in (True, False):
+            with self.subTest(unlabelled=asked):
+                comparisons = self._rebuild(
+                    [self._log(False, True, run_key=None)], unlabelled=asked
+                )
+                self.assertEqual(comparisons, [])
+
+    def test_a_behavioral_log_cannot_supply_a_half_to_a_stale_baseline(self) -> None:
+        # The rarer hole, and the original splicing bug through the back door:
+        # a plain `behavioral` log for a skill, plus a leftover pre-id
+        # baseline for the same skill, is one log a side and was paired.
+        # `summarize` counts what comes back, so this has to stay empty.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),   # indistinguishable from
+                                                    # a plain behavioral run
+            self._log(True, False, run_key=None),
+        ], unlabelled=False)
+        self.assertEqual(staleness.summarize(comparisons, {})["totals"]["cases"], 0)
+
+    def test_unlabelled_logs_with_a_choice_to_make_are_not_guessed_at(self) -> None:
+        # Two candidates for the graded side and no way to tell which run
+        # either belongs to. That ambiguity is the whole hazard, so it is
+        # reported rather than silently resolved to the older log.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),
+            self._log(False, False, run_key=None, case="d"),
+            self._log(True, False, run_key=None),
+        ])
+        self.assertTrue(comparisons)
+        self.assertEqual({c.verdict for c in comparisons}, {"ungraded"})
+        self.assertIn("no run id", comparisons[0].error)
+
+    def test_a_labelled_run_never_falls_back_to_the_unlabelled_bucket(self) -> None:
+        # A labelled half and an unlabelled one are not two halves of
+        # anything, however tempting the arithmetic. Both are reported as the
+        # lone halves they are, rather than paired into an `earns_it`.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key="new"),
+            self._log(True, False, run_key=None),
+        ])
+        self.assertEqual([c.verdict for c in comparisons], ["ungraded", "ungraded"])
+        self.assertTrue(all("no result from" in c.error for c in comparisons))
+
+    def test_two_logs_reporting_one_case_are_reported_rather_than_resolved(self) -> None:
+        # `pair` builds a dict keyed by case id, so a duplicate collapses
+        # silently -- and `list_eval_logs` returns newest first, which makes
+        # the survivor the older of the two.
+        comparisons = self._rebuild([
+            self._log(False, True),
+            self._log(False, False),
+            self._log(True, False),
+        ])
+        self.assertEqual([c.verdict for c in comparisons], ["ungraded"])
+        self.assertIn("more than one log", comparisons[0].error)
+
+
+class TestAStalenessRunHonoursHooksTheSameWayBehavioralDoes(unittest.TestCase):
+    """It drives the same `build_task`, so it cannot skip what that refuses to.
+
+    `_require_hook_support` guarded on `command != "behavioral"`, and
+    `_prepare_graded_run` passes `args.command` -- so under `staleness` the
+    guard returned before it checked anything. A skill whose `evals/hooks.py`
+    defines `check` or `setup_session` had them silently skipped, on both
+    halves, which is the exact "dangerous half" the function exists to
+    prevent: the case is graded as though the hook ran.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill(
+            "alpha",
+            dataset=tier0_dataset("alpha"),
+            hooks="def check(run):\n    return True\n",
+        )
+        self.repo.activate()
+
+    def _refused(self, command):
+        try:
+            cli._require_hook_support("claude-code", ["alpha"], command)
+        except SystemExit as caught:
+            return str(caught)
+        return None
+
+    def test_a_staleness_run_is_refused_the_same_as_a_behavioral_one(self) -> None:
+        refusal = self._refused("staleness")
+        self.assertIsNotNone(refusal)
+        self.assertIn("check", refusal)
+
+    def test_the_behavioral_refusal_is_unchanged(self) -> None:
+        self.assertIsNotNone(self._refused("behavioral"))
+
+    def test_routing_is_still_exempt(self) -> None:
+        # It installs the skills, asks which one fired, and executes nothing.
+        self.assertIsNone(self._refused("routing"))
+
+
+class TestAnOfflineRebuildDoesNotClaimAModelItNeverRan(unittest.TestCase):
+    """`--from-logs` reaches no model, so it has no model to report.
+
+    The meta dict passed `args.model` / `args.effort` straight through, and
+    nothing was read off the logs -- so rebuilding a run taken on `sonnet` at
+    `low` with a bare `--from-logs` printed "on `opus` (effort `high`)". Not a
+    hedge: a false statement about where a measurement came from, in the one
+    mode that never runs `enforce_model_policy` either.
+    """
+
+    def _report(self, meta):
+        comparisons = staleness.pair(
+            [_checked("c", True, [_check("do it", True)])],
+            [_checked("c", False, [_check("do it", False)])],
+        )
+        return staleness.render_markdown(staleness.summarize(comparisons, meta))
+
+    def test_a_rebuild_names_no_model(self) -> None:
+        report = self._report({"from_logs": "/logs", "skills": ["alpha"]})
+        headline = report.split("\n\n")[1]
+        self.assertNotIn("(effort", headline)
+        self.assertNotIn(" on `", headline)
+        self.assertIn("Rebuilt offline", report)
+        self.assertIn("/logs", report)
+
+    def test_a_live_run_still_names_its_model(self) -> None:
+        report = self._report({"model": "sonnet", "effort": "low"})
+        self.assertIn("`sonnet`", report)
+        self.assertIn("effort `low`", report)
+
+    def test_the_command_passes_no_model_through_on_a_rebuild(self) -> None:
+        captured: dict = {}
+        real = staleness.summarize
+
+        def record(comparisons, meta):
+            captured.update(meta)
+            return real(comparisons, meta)
+
+        args = cli.build_parser().parse_args(
+            ["staleness", "--from-logs", "/logs", "--model", "opus"]
+        )
+        with mock.patch.object(staleness, "summarize", record), \
+                mock.patch.object(staleness, "from_logs", lambda d, **k: staleness.pair(
+                    [_checked("c", True, [_check("x", True)])],
+                    [_checked("c", False, [_check("x", False)])],
+                )), \
+                mock.patch.object(cli, "_write_report", lambda *a, **k: None):
+            cli.cmd_staleness(args)
+        self.assertNotIn("model", captured)
+        self.assertNotIn("effort", captured)
+        self.assertEqual(captured["from_logs"], "/logs")
+
+
+class TestUnlabelledLogsAreOptedIntoRatherThanAssumed(unittest.TestCase):
+    """The flag has to reach `from_logs`, and mean nothing without a rebuild."""
+
+    def _run(self, argv):
+        captured: dict = {}
+
+        def record(log_dir, *, unlabelled=False):
+            captured["unlabelled"] = unlabelled
+            return staleness.pair(
+                [_checked("c", True, [_check("x", True)])],
+                [_checked("c", False, [_check("x", False)])],
+            )
+
+        args = cli.build_parser().parse_args(argv)
+        with mock.patch.object(staleness, "from_logs", record), \
+                mock.patch.object(cli, "_write_report", lambda *a, **k: None):
+            cli.cmd_staleness(args)
+        return captured
+
+    def test_a_rebuild_does_not_read_unlabelled_logs_by_default(self) -> None:
+        self.assertIs(self._run(["staleness", "--from-logs", "/l"])["unlabelled"], False)
+
+    def test_the_flag_reaches_the_rebuild(self) -> None:
+        self.assertIs(
+            self._run(
+                ["staleness", "--from-logs", "/l", "--unlabelled-logs"]
+            )["unlabelled"],
+            True,
+        )
+
+    def test_the_flag_is_refused_without_a_rebuild(self) -> None:
+        # A live run stamps a run id on both halves, so there is nothing
+        # unlabelled for this to reach. Refused rather than ignored.
+        args = cli.build_parser().parse_args(["staleness", "--unlabelled-logs"])
+        with self.assertRaises(SystemExit) as caught:
+            cli.cmd_staleness(args)
+        self.assertIn("--from-logs", str(caught.exception))
+
+
+class TestTheSecondPassGetsABudgetOfItsOwn(unittest.TestCase):
+    """Two passes under one bound, and the baseline is the slower half.
+
+    Measured on a two-case skill: the graded pass finished both cases in
+    2m23s, and the baseline had not finished the second after 30 minutes. An
+    agent holding the skill goes straight to the work; an agent without it
+    explores. On the default 900s the baseline got ~637s of a documented
+    1800s+ need, which makes truncation the expected outcome on the command's
+    own canonical example rather than a risk.
+    """
+
+    def _timeout(self, argv):
+        return cli.build_parser().parse_args(argv).timeout
+
+    def test_staleness_defaults_to_twice_the_shared_bound(self) -> None:
+        self.assertEqual(
+            self._timeout(["staleness"]), 2 * deadline.DEFAULT_TIMEOUT_S
+        )
+
+    def test_the_single_pass_commands_are_unchanged(self) -> None:
+        self.assertEqual(
+            self._timeout(["behavioral"]), deadline.DEFAULT_TIMEOUT_S
+        )
+        self.assertEqual(self._timeout(["routing"]), deadline.DEFAULT_TIMEOUT_S)
+
+    def test_an_explicit_timeout_still_wins(self) -> None:
+        self.assertEqual(self._timeout(["staleness", "--timeout", "60"]), 60.0)
+
+    def test_the_help_text_names_the_default_actually_in_force(self) -> None:
+        # The help was a static string built in the shared helper, so the
+        # `set_defaults` override changed the value and left `--help` saying
+        # 900 -- three lines under a description announcing that staleness
+        # defaults to twice the usual. One screen contradicting itself.
+        import contextlib
+        import io
+
+        def help_for(command):
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(SystemExit):
+                    cli.build_parser().parse_args([command, "--help"])
+            return " ".join(buffer.getvalue().split())
+
+        self.assertIn("Default: 1800 (30 minutes)", help_for("staleness"))
+        self.assertIn("Default: 900 (15 minutes)", help_for("behavioral"))
+
+    def test_the_help_text_lists_staleness_as_a_command_sharing_the_bound(self) -> None:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(["staleness", "--help"])
+        self.assertIn("behavioral and staleness", " ".join(buffer.getvalue().split()))
+
 
 
 if __name__ == "__main__":
