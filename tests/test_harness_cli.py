@@ -33,7 +33,7 @@ RECORDING = Path(__file__).parent / "fixtures" / "harness" / "copilot" / "trigge
 # A `copilot` that records how it was started and replays the recorded session.
 # Nothing here uses a backslash or a quote that would need escaping twice.
 STUB = """
-import json, os, sys
+import json, os, sys, time
 
 if "--version" in sys.argv:
     print("GitHub Copilot CLI 9.9.9.")
@@ -41,14 +41,18 @@ if "--version" in sys.argv:
 
 prompt = sys.stdin.read()
 skills = os.path.join(os.getcwd(), ".claude", "skills")
-with open(os.environ["STUB_RECORD"], "a", encoding="utf-8") as handle:
+# One file per process, named so they sort in the order they started. Cases run
+# concurrently, and appends from two processes to one file are not atomic on
+# Windows: a record can be overwritten or cut in half.
+name = "%020d-%d.json" % (time.time_ns(), os.getpid())
+with open(os.path.join(os.environ["STUB_RECORD"], name), "w", encoding="utf-8") as handle:
     handle.write(json.dumps({
         "argv": sys.argv[1:],
         "prompt": prompt,
         "home": os.environ.get("COPILOT_HOME"),
         "staged": sorted(os.listdir(skills)) if os.path.isdir(skills) else None,
         "token_present": bool(os.environ.get("GH_TOKEN")),
-    }) + chr(10))
+    }))
 
 if prompt == "Reply with the single word: ok":
     print(json.dumps({"type": "result", "exitCode": 0}), flush=True)
@@ -74,7 +78,8 @@ class _Copilot(unittest.TestCase):
         stub_cli(self, "copilot", STUB)
         scratch = Path(tempfile.mkdtemp(prefix="ss-cli-"))
         self.addCleanup(shutil.rmtree, scratch, True)
-        self.record = scratch / "starts.jsonl"
+        self.record = scratch / "starts"
+        self.record.mkdir()
         self.report = scratch / "report.json"
 
         env = mock.patch.dict(
@@ -111,8 +116,11 @@ class _Copilot(unittest.TestCase):
             return cli.cmd_routing(args)
 
     def starts(self) -> list[dict]:
-        lines = self.record.read_text(encoding="utf-8").splitlines()
-        return [json.loads(line) for line in lines if line.strip()]
+        """How each CLI process was started, in the order they started."""
+        return [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(self.record.glob("*.json"))
+        ]
 
     def meta(self) -> dict:
         return json.loads(self.report.read_text(encoding="utf-8"))["meta"]
@@ -209,7 +217,7 @@ class TestWhatIsRefusedBeforeAnythingRuns(_Copilot):
     def refused(self, *argv: str) -> str:
         with self.assertRaises(SystemExit) as raised, contextlib.redirect_stdout(io.StringIO()):
             self.run_routing(*argv)
-        self.assertFalse(self.record.exists(), "the CLI was started before the refusal")
+        self.assertEqual(self.starts(), [], "the CLI was started before the refusal")
         return str(raised.exception)
 
     def test_a_room_that_cannot_be_isolated(self) -> None:
@@ -240,11 +248,9 @@ class TestWhatIsRefusedBeforeAnythingRuns(_Copilot):
         with self.assertRaises(SystemExit) as raised:
             cli._prepare_graded_run(args)
         self.assertIn("cannot run behavioral yet", str(raised.exception))
-        self.assertFalse(self.record.exists())
+        self.assertEqual(self.starts(), [])
 
     def test_a_preflight_that_fails_says_why(self) -> None:
-        with mock.patch.dict(os.environ, {"STUB_REPLAY": str(self.record.parent / "absent")}):
-            pass  # the replay is not reached: the stub answers the preflight itself
         with mock.patch.object(harness.get("copilot"), "preflight",
                                lambda model, timeout=60.0: (False, "Bad credentials")):
             message = self.refused("--harness", "copilot")
