@@ -293,6 +293,14 @@ skillscope staleness --from-logs .skillscope/logs
 
 That reaches no model and runs no preflight, having nothing to spend.
 
+Budget more wall clock than a `behavioral` run of the same cases, and more
+than double it. Both passes share one `--timeout`, and the baseline is
+reliably the slower half: the agent holding the skill goes straight to the
+work, while the one without it explores. On a two-case skill the graded pass
+took 2m23s and the baseline had not finished its second case half an hour
+later. A bound that expires partway reports the unreached cases as `ungraded`,
+after the graded half has already been paid for.
+
 It reports and never gates, for the reason the `claude-code` leg does not gate
 either: the agent is nondeterministic on both sides, so a single pair is a
 place to look rather than a verdict. [`tools/benchmark_engines.py`](../tools/benchmark_engines.py)

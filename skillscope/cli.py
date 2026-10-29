@@ -68,6 +68,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -695,6 +696,7 @@ def _run_behavioral(
     gradable: list,
     *,
     install: bool = True,
+    config_dir: Path | None = None,
 ) -> list:
     """Run the behavioral cases on the selected engine.
 
@@ -729,7 +731,7 @@ def _run_behavioral(
             engine_models.resolve(args.model),
             args.effort,
             solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
-                args.model, args.effort, d, install=install
+                args.model, args.effort, d, config_dir, install=install
             ),
             baseline=not install,
         )
@@ -795,9 +797,15 @@ def cmd_staleness(args: argparse.Namespace) -> int:
 
     Both passes run under the one `--timeout`, so a deadline that expires
     partway leaves the rest of the second pass unmeasured -- those cases are
-    reported `ungraded` rather than as a skill that made no difference. Give
-    this command roughly twice the bound a `behavioral` run of the same cases
-    would want.
+    reported `ungraded` rather than as a skill that made no difference.
+
+    Budget for a baseline that runs *longer than the graded pass*, not the
+    same. An agent holding the skill goes straight to the work; an agent
+    without it explores -- building throwaway virtualenvs, dry-running
+    installs, reading around the problem. Measured on a two-case skill: the
+    graded pass finished both cases in 2m23s and the baseline was still going
+    on the second after 30 minutes. Twice a `behavioral` bound is the floor,
+    not the figure.
 
     Always exits 0 on a completed run. The comparison is nondeterministic on
     both sides, so a verdict here is somewhere to look rather than a build
@@ -848,9 +856,32 @@ def cmd_staleness(args: argparse.Namespace) -> int:
         )
         return 0
 
+    # The runner's own `~/.claude/skills` are registered beside the staged
+    # ones, so without this the baseline is not an empty room -- it is this
+    # machine's skills minus the one under test. `routing` has refused to run
+    # without isolation for the same reason; staleness needs it more, because
+    # the baseline being empty is the entire measurement rather than one
+    # input to it.
+    if args.engine == "claude-code-no-sandbox" and not routing.can_isolate_config():
+        raise SystemExit(
+            "error: staleness cannot run on --engine claude-code-no-sandbox "
+            f"without {' or '.join(routing.ENV_CREDENTIALS)}. The baseline "
+            "half has to be a room with no skills in it, and redirecting the "
+            "CLI away from the runner's own config dir only works when auth "
+            "comes from the environment. Without it every skill installed on "
+            "this machine joins the baseline, and a case it solves there "
+            "would be reported as one the skill under test was not needed "
+            "for.\n    Set one of those, or use --engine claude-code, whose "
+            "guest has no user-level skills at all."
+        )
+
     print(f"[staleness] {len(gradable)} case(s), run twice", flush=True)
-    with_skill = _run_behavioral(args, skills, gradable)
-    without = _run_behavioral(args, skills, gradable, install=False)
+    with tempfile.TemporaryDirectory(prefix="skillscope-staleness-") as config_dir:
+        isolated = Path(config_dir) if args.engine == "claude-code-no-sandbox" else None
+        with_skill = _run_behavioral(args, skills, gradable, config_dir=isolated)
+        without = _run_behavioral(
+            args, skills, gradable, install=False, config_dir=isolated
+        )
 
     comparisons = staleness.pair(with_skill, without)
     summary = staleness.summarize(
@@ -1194,8 +1225,10 @@ def build_parser() -> argparse.ArgumentParser:
             "once with nothing installed -- and report which cases moved. A "
             "case that passes either way is not evidence about the skill. "
             "Reports only: it never fails a run. It costs twice what "
-            "`behavioral` costs and wants roughly twice the --timeout, "
-            "since both passes run under the one bound."
+            "`behavioral` costs, and wants more than twice the --timeout: "
+            "both passes share one bound, and the baseline is the slower "
+            "half because an agent without the skill explores instead of "
+            "going straight to the work."
         ),
     )
     _add_graded_arguments(staleness_parser)

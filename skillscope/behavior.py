@@ -36,6 +36,11 @@ class BehaviorOutcome:
     # and the outcome differed" is a weaker claim than "the skill fired and the
     # outcome differed", and only the second is evidence about the skill.
     activated: str | None = None
+    # Why this run was not the room it claimed to be: another skill fired, or
+    # the agent read the skill's own source off disk. Harmless noise in a
+    # behavioral run, which grades what the agent produced. Fatal to a
+    # staleness baseline, whose whole claim is that nothing was available.
+    contaminated: str | None = None
     # Set when the failure was the model provider's rather than the skill's.
     # A behavioral case that failed on a gateway 504 is a skill nobody
     # measured, and reporting it beside one that genuinely failed its
