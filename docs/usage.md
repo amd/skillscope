@@ -260,13 +260,25 @@ installed and once with nothing installed, and reports which ones moved.
 skillscope staleness --skill my-skill
 ```
 
+On the default engine this needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
+in the environment and refuses to start without one, the same way `routing`
+does and for a stronger version of the same reason: the key is what lets the
+run redirect the CLI away from the runner's own config dir, and the baseline
+half has to be a room with no skills in it. Without it, every skill installed
+on the machine joins the baseline, and a case one of them solves there is
+reported as a case the skill under test was not needed for. A plain `claude
+login` is enough for `behavioral` and is not enough here. `--engine
+claude-code` needs no key for this, since its guest has no user-level skills
+at all.
+
 | Verdict | Means |
 | --- | --- |
 | `earns_it` | passed with the skill, failed without it — the case discriminates |
 | `harmful` | failed with the skill, passed without it — the skill steered the agent wrong |
 | `no_signal` | passed either way — says nothing about the skill |
 | `fails_either_way` | failed both times — a broken case, or a hard one |
-| `ungraded` | a run errored on one side or both |
+| `guards_only` | asserts nothing the skill could be credited for — see the guard rails below |
+| `ungraded` | a run errored on one side or both, or its baseline was not empty |
 
 A verdict says what changed, not why. So the graded side also records whether
 the agent *reached for* the skill, using the same detector the routing leg
@@ -283,9 +295,10 @@ name: either the skill has stopped mattering, or the case was never evidence
 about it in the first place. The second is the more common, which makes this a
 check on the dataset as much as on the skill.
 
-Both halves write which side they were, and whose skill they were about, into
-their inspect log metadata (`skillscope_baseline`, `skillscope_skill`). So a
-finished run can be looked at again without paying for it twice:
+Both halves write which side they were, whose skill they were about, and which
+invocation wrote them into their inspect log metadata (`skillscope_baseline`,
+`skillscope_skill`, `skillscope_staleness_run`). So a finished run can be
+looked at again without paying for it twice:
 
 ```bash
 skillscope staleness --from-logs .skillscope/logs
@@ -293,8 +306,21 @@ skillscope staleness --from-logs .skillscope/logs
 
 That reaches no model and runs no preflight, having nothing to spend.
 
+All three keys are load-bearing, and the run id is the one that makes this
+safe to point at `.skillscope/logs`. That directory is shared with `behavioral`
+and `routing`, is gitignored wholesale, and nothing prunes it — and every
+ordinary `behavioral` run writes the same `skillscope_baseline: false` a graded
+half does. Pairing on the skill alone would therefore splice an unrelated run
+from last month in as this comparison's "with skill" side, under a table that
+reads exactly as confidently as a real one. Logs with no run id are not a half
+of anything and are passed over, so a directory of plain `behavioral` logs
+rebuilds as nothing rather than as a comparison. The model and effort are not
+reported for a rebuild: nothing reads them off the logs, and the logs need not
+agree on them.
+
 Budget more wall clock than a `behavioral` run of the same cases, and more
-than double it. Both passes share one `--timeout`, and the baseline is
+than double it. `--timeout` defaults to twice what the single-pass commands
+use for that reason. Both passes share one `--timeout`, and the baseline is
 reliably the slower half: the agent holding the skill goes straight to the
 work, while the one without it explores. On a two-case skill the graded pass
 took 2m23s and the baseline had not finished its second case half an hour
@@ -341,7 +367,9 @@ The host leg cannot read the CLI's session-init event, so it has no way to
 notice such contamination or report it -- and therefore refuses to run a
 routing leg at all unless `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
 set, which is what lets it redirect the CLI's config dir away from the
-runner's own. Refusing beats being
+runner's own. It refuses a `staleness` run on the same terms and for a
+stronger version of the same reason: there the empty room is not one input to
+the measurement, it is the measurement. Refusing beats being
 quietly wrong about every case.
 
 Both legs stop at the decision, by different routes. `claude-code`'s calls

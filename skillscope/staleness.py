@@ -40,7 +40,7 @@ go and look into, not a build failure.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from .behavior import BehaviorOutcome
 
@@ -223,8 +223,8 @@ def pair(
     return comparisons
 
 
-def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
-    """`(skill, was_baseline, outcomes)` for one inspect log.
+def outcomes_from_log(log) -> tuple[str, bool, str | None, list[BehaviorOutcome]]:
+    """`(skill, was_baseline, run_key, outcomes)` for one inspect log.
 
     Rebuilt from the samples rather than from a dataset, because an offline
     reader has no `Case` list: the log is all there is. Prompts are left empty
@@ -242,6 +242,15 @@ def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
         for score in (sample.scores or {}).values():
             checks.extend((score.metadata or {}).get(scorers.CHECKS, []))
         error = sample.error.message if sample.error is not None else None
+        if error is None and not checks:
+            # Exactly what the live path sets (`behavioral._outcomes`), and it
+            # has to be the same string for the same reason the detector is
+            # shared: a sample whose checks could not be read rebuilds as
+            # `checks=[]`, which makes `_met()` False, which makes the case
+            # `earns_it` off the back of a harness failure. Without this the
+            # rebuild is *more permissive than the run it rebuilds*, quietly
+            # restoring a verdict the live run had voided as `ungraded`.
+            error = "case has no behavioral assertions to grade"
         outcomes.append(
             BehaviorOutcome(
                 id=str(sample.id),
@@ -263,17 +272,33 @@ def outcomes_from_log(log) -> tuple[str, bool, list[BehaviorOutcome]]:
                 ),
             )
         )
-    return skill, bool(eval_meta.get(behavioral.BASELINE_KEY)), outcomes
+    return (
+        skill,
+        bool(eval_meta.get(behavioral.BASELINE_KEY)),
+        eval_meta.get(behavioral.STALENESS_RUN_KEY),
+        outcomes,
+    )
 
 
 def from_logs(log_dir: str) -> list[Comparison]:
     """Rebuild the comparison from logs already on disk.
 
-    Two runs become a pair because they carry the same skill and opposite
-    `BASELINE_KEY`, which is why those are written as metadata rather than
-    inferred from a task name. A directory holding only one side of a skill is
-    reported as a comparison against nothing, the same way a case missing from
-    one side is: silently dropping it would read as a smaller, cleaner run.
+    Two runs become a pair because they carry the same skill, the same
+    `STALENESS_RUN_KEY`, and opposite `BASELINE_KEY` -- which is why all three
+    are written as metadata rather than inferred from a task name.
+
+    Grouping on the run key is what makes this safe to point at
+    `.skillscope/logs`, which is the documented thing to do with it. That
+    directory is shared by `behavioral`, `verify` and `routing`, is gitignored
+    wholesale, and nothing prunes it; and every ordinary `behavioral` run
+    stamps `BASELINE_KEY: False`, so a run key is the only thing separating
+    this run's graded half from an unrelated run of the same skill last month.
+    Logs with no run key are skipped for that reason: they were not written by
+    a staleness run and have no half to be.
+
+    A directory holding only one side of a run is reported as a comparison
+    against nothing, the same way a case missing from one side is: silently
+    dropping it would read as a smaller, cleaner run.
 
     Logs that are not skillscope's own are passed over. A shared log directory
     is normal, and failing on a neighbour's file would make this unusable in
@@ -283,18 +308,55 @@ def from_logs(log_dir: str) -> list[Comparison]:
 
     from .engine import behavioral
 
-    sides: dict[str, dict[bool, list[BehaviorOutcome]]] = {}
+    sides: dict[tuple[str, str], dict[bool, list[BehaviorOutcome]]] = {}
     for info in list_eval_logs(log_dir):
         log = read_eval_log(info.name)
         if behavioral.BASELINE_KEY not in (log.eval.metadata or {}):
             continue
-        skill, baseline, outcomes = outcomes_from_log(log)
-        sides.setdefault(skill, {}).setdefault(baseline, []).extend(outcomes)
+        skill, baseline, run_key, outcomes = outcomes_from_log(log)
+        if not run_key:
+            continue
+        sides.setdefault((skill, run_key), {}).setdefault(baseline, []).extend(outcomes)
 
     comparisons: list[Comparison] = []
-    for skill in sorted(sides):
-        comparisons.extend(pair(sides[skill].get(False, []), sides[skill].get(True, [])))
+    for key in sorted(sides):
+        half = sides[key]
+        comparisons.extend(
+            pair(
+                _no_duplicates(half.get(False, [])),
+                _no_duplicates(half.get(True, [])),
+            )
+        )
     return comparisons
+
+
+def _no_duplicates(outcomes: list[BehaviorOutcome]) -> list[BehaviorOutcome]:
+    """`outcomes`, with every case id that appears twice on this side errored.
+
+    One run key and one side can still span several logs -- a run grades one
+    skill per task, and a run key covers the whole invocation -- and nothing
+    stops two of them carrying the same case id. `pair` builds
+    `{o.id: o for o in ...}`, so a duplicate silently collapses to whichever
+    came last, and `list_eval_logs` returns newest first, which makes the
+    survivor the *older* of the two.
+
+    Both copies are errored, not just the later one: which of them is this
+    side's answer is exactly what cannot be told, so keeping either would be
+    the guess. `classify` turns the error into `ungraded`, consistent with how
+    this module reports every other ambiguity it cannot resolve.
+    """
+    tally: dict[str, int] = {}
+    for outcome in outcomes:
+        tally[outcome.id] = tally.get(outcome.id, 0) + 1
+    return [
+        outcome if tally[outcome.id] == 1
+        else replace(
+            outcome,
+            error="this run has more than one log reporting this case, and "
+            "which of them is its answer cannot be told apart",
+        )
+        for outcome in outcomes
+    ]
 
 
 def summarize(comparisons: list[Comparison], meta: dict) -> dict:
@@ -395,13 +457,30 @@ def render_markdown(summary: dict) -> str:
         else "**Nothing was graded both ways.**"
     )
 
+    # Said only when it is known. A `--from-logs` rebuild runs no model, and
+    # the invocation's own `--model`/`--effort` defaults describe the command
+    # that read the logs rather than the runs that wrote them -- rebuilding a
+    # `sonnet`/`low` run with a bare `--from-logs` printed "on `opus` (effort
+    # `high`)", which is not a hedge but a false statement about a measurement.
+    ran_on = (
+        f" on `{meta['model']}` (effort `{meta['effort']}`)"
+        if meta.get("model") and meta.get("effort")
+        else ""
+    )
     lines = [
         "## Skill staleness",
         "",
-        f"{headline} on `{meta['model']}` (effort `{meta['effort']}`). Every case "
+        f"{headline}{ran_on}. Every case "
         "ran twice: once with the skill installed, once with nothing installed.",
         "",
     ]
+    if meta.get("from_logs"):
+        lines += [
+            f"Rebuilt offline from the logs in `{meta['from_logs']}`; nothing "
+            "was run. The model and effort are whatever wrote them, which the "
+            "logs do not have to agree on, so they are not claimed here.",
+            "",
+        ]
 
     # Nothing discriminated. The row `earns_it | 0` is true and says nothing,
     # and this is the one result the command exists to surface, so it is said
