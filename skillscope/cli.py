@@ -821,12 +821,24 @@ def cmd_staleness(args: argparse.Namespace) -> int:
     """
     started = time.time()
 
+    if args.unlabelled_logs and not args.from_logs:
+        # The repo's habit: refuse an argument that cannot do anything rather
+        # than accept and ignore it. A live run writes its own run id on both
+        # halves, so there is nothing unlabelled for this to reach.
+        raise SystemExit(
+            "error: --unlabelled-logs only means something with --from-logs. "
+            "A run started now stamps a run id on both halves, so it has no "
+            "unlabelled logs to read."
+        )
+
     if args.from_logs:
         # Nothing is run, so nothing is prepared: no structural gate, no model
         # pin, no reachability probe. Those guard a spend that is not about to
         # happen, and demanding them would make a free command fail for
         # reasons that cannot affect its answer.
-        comparisons = staleness.from_logs(args.from_logs)
+        comparisons = staleness.from_logs(
+            args.from_logs, unlabelled=args.unlabelled_logs
+        )
         if not comparisons:
             from .engine import behavioral as engine_behavioral
 
@@ -835,8 +847,15 @@ def cmd_staleness(args: argparse.Namespace) -> int:
                 f"Both halves of a comparison carry `{engine_behavioral.SKILL_KEY}`, "
                 f"`{engine_behavioral.BASELINE_KEY}` and "
                 f"`{engine_behavioral.STALENESS_RUN_KEY}` in their eval "
-                "metadata; logs written before that, by another tool, or by a "
-                "plain `behavioral` run cannot be paired."
+                "metadata; logs written by another tool, or by a plain "
+                "`behavioral` run, cannot be paired."
+                + (
+                    ""
+                    if args.unlabelled_logs
+                    else "\n    Logs written before the run id existed carry "
+                    "none, and are passed over. `--unlabelled-logs` reads "
+                    "them, where a baseline half is there to pair with."
+                )
             )
         # No `model`, `engine` or `effort`. Nothing here read them off the
         # logs, and `args` holds this invocation's defaults -- which describe
@@ -1271,8 +1290,23 @@ def build_parser() -> argparse.ArgumentParser:
             "were, and the run that wrote them in their eval metadata, so a "
             "log directory is enough to pair them -- and to tell this run's "
             "halves from a neighbouring run of the same skill. Costs nothing "
-            "and reaches no model. Logs written by a plain `behavioral` run "
-            "are not a half of anything and are passed over."
+            "and reaches no model. Logs carrying no run id are passed over; "
+            "see --unlabelled-logs."
+        ),
+    )
+    staleness_parser.add_argument(
+        "--unlabelled-logs",
+        action="store_true",
+        help=(
+            "With --from-logs, also read logs that carry no run id, which "
+            "means logs written before this command stamped one. Off by "
+            "default: an ordinary `behavioral` log is shaped exactly like a "
+            "pre-id graded half, so reading them unasked inflates the counts "
+            "with skills the run never covered, and can hand a comparison a "
+            "'with skill' half from a different run. Passing this asserts the "
+            "directory holds nothing else for these skills. A group still "
+            "needs a baseline side, and a side holding several logs is "
+            "reported `ungraded` rather than guessed at."
         ),
     )
     staleness_parser.set_defaults(handler=cmd_staleness)
