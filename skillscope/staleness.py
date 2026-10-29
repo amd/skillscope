@@ -293,8 +293,8 @@ def from_logs(log_dir: str) -> list[Comparison]:
     wholesale, and nothing prunes it; and every ordinary `behavioral` run
     stamps `BASELINE_KEY: False`, so a run key is the only thing separating
     this run's graded half from an unrelated run of the same skill last month.
-    Logs with no run key are skipped for that reason: they were not written by
-    a staleness run and have no half to be.
+    Logs with no run key predate the key rather than being suspect, and are
+    paired when the pairing is forced. See `LEGACY_RUN`.
 
     A directory holding only one side of a run is reported as a comparison
     against nothing, the same way a case missing from one side is: silently
@@ -309,29 +309,58 @@ def from_logs(log_dir: str) -> list[Comparison]:
     from .engine import behavioral
 
     sides: dict[tuple[str, str], dict[bool, list[BehaviorOutcome]]] = {}
+    logs_per_side: dict[tuple[str, str], dict[bool, int]] = {}
     for info in list_eval_logs(log_dir):
         log = read_eval_log(info.name)
         if behavioral.BASELINE_KEY not in (log.eval.metadata or {}):
             continue
         skill, baseline, run_key, outcomes = outcomes_from_log(log)
-        if not run_key:
-            continue
-        sides.setdefault((skill, run_key), {}).setdefault(baseline, []).extend(outcomes)
+        key = (skill, run_key or LEGACY_RUN)
+        sides.setdefault(key, {}).setdefault(baseline, []).extend(outcomes)
+        tally = logs_per_side.setdefault(key, {})
+        tally[baseline] = tally.get(baseline, 0) + 1
 
     comparisons: list[Comparison] = []
     for key in sorted(sides):
         half = sides[key]
+        ambiguous = key[1] == LEGACY_RUN and any(
+            n > 1 for n in logs_per_side[key].values()
+        )
         comparisons.extend(
             pair(
-                _no_duplicates(half.get(False, [])),
-                _no_duplicates(half.get(True, [])),
+                _no_duplicates(half.get(False, []), ambiguous),
+                _no_duplicates(half.get(True, []), ambiguous),
             )
         )
     return comparisons
 
 
-def _no_duplicates(outcomes: list[BehaviorOutcome]) -> list[BehaviorOutcome]:
-    """`outcomes`, with every case id that appears twice on this side errored.
+# The bucket for logs written before a run id was stamped on them.
+#
+# Refusing them outright was the first fix and it was too strong: it made the
+# only staleness logs in existence unreadable, including the run this command
+# was developed against, which is the one artifact anybody could check the
+# rebuild against. A log that predates the key is not suspect, it is merely
+# unlabelled.
+#
+# What the key defends against is *choosing* -- a directory holding several
+# candidates for one side, where pairing picks one silently and `list_eval_logs`
+# makes that the older. Where a skill has one log per side there is nothing to
+# choose: the pairing is forced, and labelling it would not change which logs
+# pair. Where it has more, the ambiguity is precisely the hazard, and every
+# case is reported `ungraded` rather than guessed at. A labelled run never
+# falls back here, so this cannot weaken a run written by this version.
+LEGACY_RUN = "unlabelled"
+
+
+def _no_duplicates(
+    outcomes: list[BehaviorOutcome], ambiguous: bool = False
+) -> list[BehaviorOutcome]:
+    """`outcomes`, with every case this side cannot answer for errored.
+
+    `ambiguous` errors all of them: see `LEGACY_RUN`, where unlabelled logs
+    leave several candidates for a side and no way to tell which run each
+    belongs to. Otherwise only a case id this side reports twice is errored.
 
     One run key and one side can still span several logs -- a run grades one
     skill per task, and a run key covers the whole invocation -- and nothing
@@ -345,6 +374,16 @@ def _no_duplicates(outcomes: list[BehaviorOutcome]) -> list[BehaviorOutcome]:
     the guess. `classify` turns the error into `ungraded`, consistent with how
     this module reports every other ambiguity it cannot resolve.
     """
+    if ambiguous:
+        return [
+            replace(
+                outcome,
+                error="these logs carry no run id and there is more than one "
+                "of them on a side, so which run this case belongs to cannot "
+                "be told apart",
+            )
+            for outcome in outcomes
+        ]
     tally: dict[str, int] = {}
     for outcome in outcomes:
         tally[outcome.id] = tally.get(outcome.id, 0) + 1

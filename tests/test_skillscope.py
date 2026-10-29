@@ -6803,10 +6803,44 @@ class TestARebuildPairsOneRunAndNotItsNeighbours(unittest.TestCase):
         verdicts = sorted(c.verdict for c in comparisons)
         self.assertEqual(verdicts, ["fails_either_way", "ungraded"])
 
-    def test_a_plain_behavioral_log_is_not_a_half_of_anything(self) -> None:
-        # It carries `BASELINE_KEY: False` like a graded half and no run key.
+    def test_a_lone_unlabelled_log_is_still_reported(self) -> None:
+        # Logs written before the run id existed are unlabelled, not suspect.
+        # Refusing them outright made the only staleness logs in existence
+        # unreadable, this branch's own included.
         comparisons = self._rebuild([self._log(False, True, run_key=None)])
-        self.assertEqual(comparisons, [])
+        self.assertEqual([c.verdict for c in comparisons], ["ungraded"])
+        self.assertIn("no result from the baseline run", comparisons[0].error)
+
+    def test_an_unlabelled_pair_with_one_log_a_side_is_forced_and_kept(self) -> None:
+        # Nothing to choose between, so labelling would not change which logs
+        # pair. This is the shape every pre-fix run on disk has.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),
+            self._log(True, False, run_key=None),
+        ])
+        self.assertEqual([c.verdict for c in comparisons], ["earns_it"])
+
+    def test_unlabelled_logs_with_a_choice_to_make_are_not_guessed_at(self) -> None:
+        # Two candidates for the graded side and no way to tell which run
+        # either belongs to. That ambiguity is the whole hazard, so it is
+        # reported rather than silently resolved to the older log.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key=None),
+            self._log(False, False, run_key=None, case="d"),
+            self._log(True, False, run_key=None),
+        ])
+        self.assertTrue(comparisons)
+        self.assertEqual({c.verdict for c in comparisons}, {"ungraded"})
+        self.assertIn("no run id", comparisons[0].error)
+
+    def test_a_labelled_run_never_falls_back_to_the_unlabelled_bucket(self) -> None:
+        # A labelled half and an unlabelled one are not two halves of
+        # anything, however tempting the arithmetic.
+        comparisons = self._rebuild([
+            self._log(False, True, run_key="new"),
+            self._log(True, False, run_key=None),
+        ])
+        self.assertEqual([c.verdict for c in comparisons], ["ungraded", "ungraded"])
 
     def test_two_logs_reporting_one_case_are_reported_rather_than_resolved(self) -> None:
         # `pair` builds a dict keyed by case id, so a duplicate collapses
