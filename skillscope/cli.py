@@ -5,7 +5,7 @@
 """The one entry point for skill evals.
 
 Every skill owns a single dataset at ``<skill>/evals/evals.json``. This runner
-reads those datasets and grades them with three commands:
+reads those datasets and grades them with four commands:
 
   * ``structural`` -- every skill folder, every dataset, and every reference
     the skill's markdown makes. No agent, no tokens, instant.
@@ -18,13 +18,17 @@ reads those datasets and grades them with three commands:
     grades ``expected_behavior`` / ``unexpected_behavior`` / ``logs_contain``
     / ``files_exist``. Only runs evaluations that assert something beyond the
     routing decision.
+  * ``staleness`` -- runs ``behavioral``'s cases twice, once with the skill
+    installed and once without, and compares. Answers a question the other
+    three cannot: whether the cases still need the skill, or whether the model
+    has caught up and the suite is passing on its own.
 
 A skill may also ship ``<skill>/evals/extended_evals.json``, in the same format
-and under no coverage requirement of its own. Both graded commands include it
+and under no coverage requirement of its own. The graded commands include it
 by default; ``--no-extended`` grades the required dataset alone.
 
-The prompt is written once and both graded commands read it, which is the whole
-point: the alternative is a central routing prompt set plus a separate
+The prompt is written once and every graded command reads it, which is the
+whole point: the alternative is a central routing prompt set plus a separate
 per-skill test file that re-asserts routing with a substring match on the
 transcript.
 
@@ -369,7 +373,7 @@ def _fail_if_expired() -> int | None:
 def _prepare_graded_run(
     args: argparse.Namespace, scope: list[str] | None = None
 ) -> list[str]:
-    """Structural checks, model pin, and API reachability. Shared by both graders.
+    """Structural checks, model pin, and API reachability. Shared by the graders.
 
     The structural gate reads `scope`, defaulting to the skills ``--skill``
     selected -- the ones about to be graded, and nobody else. A routing run
@@ -396,8 +400,8 @@ def _prepare_graded_run(
         )
         # Also before the probe, and for the same reason: a malformed price
         # table should fail the command, not one sample into a graded run.
-        # Registered here rather than in the engine because both graded
-        # commands come through this function and inspect's registry is
+        # Registered here rather than in the engine because every graded
+        # command comes through this function and inspect's registry is
         # process-global -- setting it twice would be the same work.
         from .engine import pricing as engine_pricing
 
@@ -1062,8 +1066,8 @@ def _add_graded_arguments(
             "`claude-code-no-sandbox` runs it on the host, on any platform. "
             "`claude-code` runs it inside a container via inspect_swe, which "
             "needs a POSIX guest and so is Linux only, and additionally "
-            "needs `pip install 'skillscope[verify]'`. Both run both graded "
-            "commands. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
+            "needs `pip install 'skillscope[verify]'`. Both run every graded "
+            "command. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
         ),
     )
     _add_timeout_argument(parser, timeout)

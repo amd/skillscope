@@ -224,7 +224,14 @@ skillscope structural                               # your folder, prose, and da
 skillscope behavioral --skill <your-skill>          # your skill, end to end
 skillscope routing --routing-room <your-skill>,<a-neighbour>
 skillscope routing --only <case-id> --keep-logs logs # one case, keeping the transcript
+skillscope staleness --skill <your-skill>           # do your cases still need the skill?
 ```
+
+`staleness` is the one aimed at this file's subject. It runs your behavioral
+cases twice, once with the skill installed and once without, and reports which
+of them passed either way. Those are cases that are not evidence about the
+skill — either it has stopped mattering, or the case never tested it. It costs
+two runs, so it belongs on a schedule rather than in the loop.
 
 `structural` is instant and needs no agent. Everything else needs the `claude`
 CLI authenticated, plus whatever your own cases need. Flags, what each check
