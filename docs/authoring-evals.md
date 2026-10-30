@@ -187,7 +187,9 @@ prerequisites:
 - **Commands are argv lists.** A command may also be a mapping per platform,
   for example `{linux: [sh, x.sh], windows: [pwsh, x.ps1]}`. A container
   always counts as `linux`, and the structural check wants a command for every
-  platform in `os`. On the host, steps run in this directory. In a container
+  platform in `os`. An `os` label that is not linux, windows, or macos is
+  reported too, when this skill has prerequisites: a typo would otherwise skip
+  that check. On the host, steps run in this directory. In a container
   they run in a scratch directory holding only the files they name.
 - **What a container gets.** Under `claude-code`, an argv item of `check` or
   `install` that is a path to a file in this directory or below it, like
