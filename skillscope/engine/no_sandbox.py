@@ -477,11 +477,13 @@ def harness_solver(
                 prompt=prompt,
                 model=model,
                 effort=effort,
-                config_dir=config_dir,
+                config_dir=str(config_dir) if config_dir is not None else None,
                 extra_flags=tuple(extra_flags or ()),
             )
-            cmd = harness.command(spec)
-            env = harness.env(spec)
+            # Started on the host, so the executable is looked up here and the
+            # runner's environment goes under what the harness sets.
+            cmd = harness.host_command(spec)
+            env = harness.host_env(spec)
             # Closed either way: a CLI that is not given its prompt on stdin
             # can still sit waiting on it.
             stdin_text = prompt if harness.prompt_on_stdin else ""

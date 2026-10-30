@@ -77,17 +77,23 @@ def enforce_model_policy(model: str | None) -> str | None:
     return AUTOMATED_MODEL
 
 
-def claude_env() -> dict[str, str]:
-    """Environment for `claude` subprocesses.
+def claude_settings() -> dict[str, str]:
+    """What `claude` is told, beyond whatever environment it is started in.
 
     Disable the CLI's internal retry loop by default so a network/auth problem
     (e.g. not connected to the network that can reach the API) fails fast
     instead of being retried into a long, confusing hang. The caller can still
     override by exporting ``CLAUDE_CODE_MAX_RETRIES``.
+
+    Only the settings, not the runner's environment: where the CLI runs decides
+    what else it is given.
     """
-    env = dict(os.environ)
-    env.setdefault("CLAUDE_CODE_MAX_RETRIES", "0")
-    return env
+    return {"CLAUDE_CODE_MAX_RETRIES": os.environ.get("CLAUDE_CODE_MAX_RETRIES", "0")}
+
+
+def claude_env() -> dict[str, str]:
+    """Environment for `claude` subprocesses started on this machine."""
+    return {**os.environ, **claude_settings()}
 
 
 def check_api_reachable(model: str | None = DEFAULT_MODEL, timeout: float = 60) -> tuple[bool, str]:

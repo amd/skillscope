@@ -21,10 +21,10 @@ Adding a harness is one subclass of `Harness`, registered in
 
 from __future__ import annotations
 
+import os
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable
 
 
@@ -43,7 +43,9 @@ class RunSpec:
     effort: str | None = None
     # A throwaway config directory, so the runner's own settings and user-level
     # skills stay out of the session. `None` when the caller does not isolate.
-    config_dir: Path | None = None
+    # A path wherever the agent runs, like `workspace`: on the host a host path,
+    # in a container a path inside it.
+    config_dir: str | None = None
     # The harness's own spend or session controls, already built by the caller.
     extra_flags: tuple[str, ...] = ()
 
@@ -67,17 +69,49 @@ class Harness(ABC):
     prompt_on_stdin: bool = True
 
     def require(self) -> None:
-        """Refuse to start when the harness is not installed."""
+        """Refuse to start on the host when the harness is not installed there.
+
+        This asks the runner's `PATH`, which is the right question for a run
+        started on the host. A leg that starts the agent in a container asks
+        about the image instead.
+        """
         if not shutil.which(self.binary):
             raise SystemExit(f"error: '{self.binary}' CLI not found on PATH")
 
     @abstractmethod
     def command(self, spec: RunSpec) -> list[str]:
-        """The argv that runs one case, headless, streaming JSON events."""
+        """The argv that runs one case, headless, streaming JSON events.
+
+        The executable is named, not located: `self.binary`, never an absolute
+        path on this machine. Whoever starts the process resolves it, so the same
+        command can be started on the host or inside a container.
+        """
 
     @abstractmethod
     def env(self, spec: RunSpec) -> dict[str, str]:
-        """The environment that process gets, config isolation included."""
+        """What the harness sets in the process's environment, and nothing else.
+
+        Its own settings, and whatever points it at `spec.config_dir` so the
+        runner's own settings and skills stay out of the session. Not the runner's
+        environment: `PATH`, `HOME` and every key on the machine are not the
+        harness's to carry, and a container must not inherit them. Whoever starts
+        the process puts this on top of the environment it has.
+        """
+
+    def host_command(self, spec: RunSpec) -> list[str]:
+        """`command(spec)` with its executable resolved on this machine.
+
+        What a run started on the host executes. The lookup is `shutil.which`
+        rather than leaving it to the operating system, because on Windows a CLI
+        installed with npm is a `.cmd` shim that only the former finds.
+        """
+        argv = self.command(spec)
+        return [shutil.which(argv[0]) or argv[0], *argv[1:]]
+
+    def host_env(self, spec: RunSpec) -> dict[str, str]:
+        """The environment a run started on the host gets: this machine's, with
+        what the harness sets on top."""
+        return {**os.environ, **self.env(spec)}
 
     def normalize(self, event: dict) -> list[dict]:
         """Translate one event the harness printed into canonical events.

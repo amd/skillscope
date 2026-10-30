@@ -12,8 +12,6 @@ event form, so `normalize` is the default identity.
 
 from __future__ import annotations
 
-import shutil
-
 from .. import agent
 from .base import Harness, RunSpec
 
@@ -25,7 +23,7 @@ class ClaudeCode(Harness):
 
     def command(self, spec: RunSpec) -> list[str]:
         cmd = [
-            shutil.which(self.binary), "-p",
+            self.binary, "-p",
             "--output-format", "stream-json", "--verbose",
             "--dangerously-skip-permissions",
             "--add-dir", spec.workspace,
@@ -38,7 +36,7 @@ class ClaudeCode(Harness):
         return cmd
 
     def env(self, spec: RunSpec) -> dict[str, str]:
-        env = agent.claude_env()
+        env = agent.claude_settings()
         if spec.config_dir is not None:
-            env["CLAUDE_CONFIG_DIR"] = str(spec.config_dir)
+            env["CLAUDE_CONFIG_DIR"] = spec.config_dir
         return env

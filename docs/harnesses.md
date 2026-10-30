@@ -13,6 +13,14 @@ a container); the harness says *what*. The engines drive a harness as a
 subprocess, so the contract between them is small, and this page is that
 contract.
 
+**A harness defines the agent once, for both answers to *where*.** On the host the
+engine starts `command(spec)` as a subprocess: the executable resolved on the host,
+and the runner's environment underneath what `env(spec)` sets. A sandbox leg starts
+the same command inside the container, rather than delegating to a separate agent
+definition such as an `inspect_swe` one. Otherwise every agent would exist twice in
+this repo, with its own command line, environment, skill staging and event handling,
+free to drift apart.
+
 Today one harness is registered, `claude-code`. The contract exists so that a
 second one is an adapter and a set of tests rather than a change to the engines.
 
@@ -24,19 +32,21 @@ A harness is a subclass of `skillscope.harness.Harness`, registered in
 | Member | What it is |
 | --- | --- |
 | `name` | The name reports and `--harness` use. |
-| `binary` | The executable looked up on `PATH`. |
+| `binary` | The executable's name. Whoever starts the process resolves it: on the host with `shutil.which`, in a container by the guest's `PATH`. |
 | `skills_dir` | Where, relative to the workspace, the harness discovers skills (`.claude/skills` for Claude Code). The engine stages each skill there. |
 | `has_skill_tool` | Whether activating a skill is a tool call in the stream. A harness that activates a skill by reading its `SKILL.md` sets this `False`, and routing reads activation from the file access instead. |
 | `prompt_on_stdin` | Whether the prompt is written to stdin. A harness that takes it as an argument builds it into `command` and sets this `False`; stdin is closed either way, because some CLIs wait on it. |
-| `require()` | Refuse to start when the harness is not installed. The default checks `binary` is on `PATH`. |
-| `command(spec)` | The argv that runs one case, headless, streaming JSON events. |
-| `env(spec)` | The environment of that process, including whatever points it at `spec.config_dir` so the runner's own settings and skills stay out of the session. |
+| `require()` | Refuse to start **on the host** when the harness is not installed there. The default checks `binary` is on the runner's `PATH`. A leg that starts the agent in a container checks the image instead. |
+| `command(spec)` | The argv that runs one case, headless, streaming JSON events. The executable is named (`binary`), never an absolute path on this machine, so the same command can be started on the host or in a container. |
+| `env(spec)` | What the harness sets in the process's environment, and nothing else: its own settings, and whatever points it at `spec.config_dir` so the runner's own settings and skills stay out of the session. Not the runner's environment (`PATH`, `HOME`, every key on the machine), which a container must not inherit. Whoever starts the process puts this on top of the environment it has. |
+| `host_command(spec)`, `host_env(spec)` | What a run started on the host executes: `command(spec)` with its executable found by `shutil.which` (on Windows an npm-installed CLI is a `.cmd` shim that only that finds), and `os.environ` with `env(spec)` on top. A sandbox leg uses `command` and `env` directly. |
 | `normalize(event)` | Turns one event the harness printed into canonical events (below). Stateless. |
 | `normalizer()` | A translator for one run's events, which may keep state. The engine asks for a fresh one per case. Override it when an event cannot be translated on its own, for instance when the closing event does not repeat the answer and it has to be remembered from an earlier one. The default returns `normalize`. |
 
 `spec` is a `RunSpec`: the workspace, the prompt, the model and effort, an
 optional throwaway config directory, and any spend or session flags the caller
-built.
+built. The workspace and the config directory are strings naming a path wherever
+the agent runs: a host path on the host, a path inside the container in a sandbox.
 
 ## The canonical event form
 
@@ -93,5 +103,10 @@ still assume Claude Code, and a second harness will need to move them behind it:
 * the spend-limit flags, which are probed from `claude --help`;
 * the CI model pin, which forces `opus`;
 * the judge, which uses an Anthropic model through `inspect_ai`;
+* **the sandbox leg**: `--engine claude-code` still runs Claude Code through
+  `inspect_swe`, with its own command line, environment, skill staging and event
+  handling. It should start the harness's `command(spec)` in the container, so that
+  each agent is defined once. Until it does, a harness other than Claude Code has no
+  sandboxed leg;
 * `.claude/skills` as the path routing treats as a skills inspection, rather than
   a harness's own `skills_dir`.

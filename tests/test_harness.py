@@ -66,14 +66,15 @@ class TestClaudeCodeIsWhatTheEngineAlwaysRan(unittest.TestCase):
         return harness.RunSpec(**values)
 
     def command(self, **overrides) -> list[str]:
-        with mock.patch("shutil.which", lambda _: "/usr/bin/claude"):
-            return harness.get("claude-code").command(self.spec(**overrides))
+        return harness.get("claude-code").command(self.spec(**overrides))
 
     def test_the_command_is_the_one_the_engine_built_inline(self) -> None:
+        # Naming the executable and not locating it is the one difference from
+        # what the engine built inline: `host_command` puts the located path back.
         self.assertEqual(
             self.command(model="opus", effort="high"),
             [
-                "/usr/bin/claude", "-p",
+                "claude", "-p",
                 "--output-format", "stream-json", "--verbose",
                 "--dangerously-skip-permissions",
                 "--add-dir", "/ws",
@@ -91,15 +92,49 @@ class TestClaudeCodeIsWhatTheEngineAlwaysRan(unittest.TestCase):
         command = self.command(extra_flags=("--max-budget-usd", "1"))
         self.assertEqual(command[-2:], ["--max-budget-usd", "1"])
 
+    def test_run_on_the_host_it_is_the_executable_found_here(self) -> None:
+        claude = harness.get("claude-code")
+        with mock.patch("shutil.which", lambda _: "/usr/bin/claude"):
+            started = claude.host_command(self.spec(model="opus", effort="high"))
+        self.assertEqual(started[0], "/usr/bin/claude")
+        self.assertEqual(started[1:], self.command(model="opus", effort="high")[1:])
+
+    def test_an_executable_that_is_not_found_is_left_for_the_start_to_refuse(self) -> None:
+        with mock.patch("shutil.which", lambda _: None):
+            started = harness.get("claude-code").host_command(self.spec())
+        self.assertEqual(started[0], "claude")
+
     def test_a_config_dir_is_only_exported_when_one_was_given(self) -> None:
         claude = harness.get("claude-code")
         self.assertEqual(
-            claude.env(self.spec(config_dir=Path("/cfg")))["CLAUDE_CONFIG_DIR"],
-            str(Path("/cfg")),
+            claude.env(self.spec(config_dir="/cfg"))["CLAUDE_CONFIG_DIR"], "/cfg"
         )
-        with mock.patch.dict(os.environ, clear=False):
-            os.environ.pop("CLAUDE_CONFIG_DIR", None)
-            self.assertNotIn("CLAUDE_CONFIG_DIR", claude.env(self.spec()))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", claude.env(self.spec()))
+
+    def test_the_environment_is_only_what_the_harness_sets(self) -> None:
+        # Not the runner's: a container must not inherit its PATH, its HOME or
+        # every key on the machine.
+        claude = harness.get("claude-code")
+        ambient = {"PATH": "/runner/bin", "HOME": "/home/runner", "ANTHROPIC_API_KEY": "sk-x"}
+        with mock.patch.dict(os.environ, ambient):
+            env = claude.env(self.spec(config_dir="/cfg"))
+        self.assertEqual(set(env), {"CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CONFIG_DIR"})
+
+    def test_on_the_host_the_environment_is_what_the_engine_always_built(self) -> None:
+        # The old inline code: the runner's environment, a retry default that the
+        # caller can override, and the isolation setting on top of everything.
+        claude = harness.get("claude-code")
+        for retries in (None, "3"):
+            with self.subTest(retries=retries), mock.patch.dict(
+                os.environ, {"CLAUDE_CONFIG_DIR": "/runners/own"}, clear=False
+            ):
+                os.environ.pop("CLAUDE_CODE_MAX_RETRIES", None)
+                if retries:
+                    os.environ["CLAUDE_CODE_MAX_RETRIES"] = retries
+                expected = dict(os.environ)
+                expected.setdefault("CLAUDE_CODE_MAX_RETRIES", "0")
+                expected["CLAUDE_CONFIG_DIR"] = "/cfg"
+                self.assertEqual(claude.host_env(self.spec(config_dir="/cfg")), expected)
 
     def test_the_cli_is_told_not_to_retry_unless_the_caller_says_otherwise(self) -> None:
         claude = harness.get("claude-code")
@@ -222,8 +257,7 @@ class TestEveryRegisteredHarnessMeetsTheContract(unittest.TestCase):
                     effort="high",
                 )
                 with mock.patch.dict(os.environ, {"SOME_API_KEY": "sk-secret-value"}):
-                    with mock.patch("shutil.which", lambda b: f"/bin/{b}"):
-                        command = subject.command(spec)
+                    command = subject.command(spec)
                 self.assertIn("a-model", command)
                 self.assertIn("high", command)
                 self.assertFalse(
@@ -236,14 +270,52 @@ class TestEveryRegisteredHarnessMeetsTheContract(unittest.TestCase):
             with self.subTest(harness=name):
                 subject = harness.get(name)
                 spec = harness.RunSpec(
-                    workspace="ws", prompt="p", config_dir=Path("throwaway-config"),
+                    workspace="ws", prompt="p", config_dir="throwaway-config",
                 )
                 env = subject.env(spec)
                 self.assertIn(
-                    str(Path("throwaway-config")), env.values(),
+                    "throwaway-config", env.values(),
                     "no environment variable points the harness at the throwaway "
                     "config dir, so the runner's own skills would join the room",
                 )
+
+    def test_the_command_names_its_executable_and_does_not_locate_it(self) -> None:
+        # So the same command can be started on the host or in a container. An
+        # absolute path on the runner is wrong anywhere else.
+        for name in harness.names():
+            with self.subTest(harness=name):
+                subject = harness.get(name)
+                command = subject.command(harness.RunSpec(workspace="ws", prompt="p"))
+                self.assertEqual(command[0], subject.binary)
+
+    def test_the_environment_carries_only_what_the_harness_sets(self) -> None:
+        # Not the runner's PATH, its HOME or any key on it: a container would
+        # inherit all of it.
+        for name in harness.names():
+            with self.subTest(harness=name):
+                subject = harness.get(name)
+                ambient = {
+                    "PATH": "/runner/bin", "HOME": "/home/runner",
+                    "SOME_API_KEY": "sk-secret-value", "SYSTEMROOT": "C:/Windows",
+                }
+                with mock.patch.dict(os.environ, ambient):
+                    env = subject.env(harness.RunSpec(
+                        workspace="ws", prompt="p", config_dir="throwaway-config",
+                    ))
+                for variable in ambient:
+                    self.assertNotIn(variable, env)
+                self.assertTrue(all(isinstance(v, str) for v in env.values()))
+
+    def test_on_the_host_what_the_harness_sets_goes_on_top_of_the_runners(self) -> None:
+        for name in harness.names():
+            with self.subTest(harness=name):
+                subject = harness.get(name)
+                spec = harness.RunSpec(workspace="ws", prompt="p", config_dir="cfg")
+                with mock.patch.dict(os.environ, {"AMBIENT_FOR_THE_TEST": "kept"}):
+                    host = subject.host_env(spec)
+                self.assertEqual(host["AMBIENT_FOR_THE_TEST"], "kept")
+                for key, value in subject.env(spec).items():
+                    self.assertEqual(host[key], value)
 
     def test_a_skill_is_staged_where_the_harness_looks(self) -> None:
         for name in harness.names():
@@ -304,15 +376,17 @@ class ForeignHarness(harness.Harness):
 
     def __init__(self, script: Path) -> None:
         self.script = script
+        self.specs: list[harness.RunSpec] = []
 
     def require(self) -> None:
         return None
 
     def command(self, spec: harness.RunSpec) -> list[str]:
+        self.specs.append(spec)
         return [sys.executable, "-u", str(self.script), spec.prompt]
 
     def env(self, spec: harness.RunSpec) -> dict[str, str]:
-        return dict(os.environ)
+        return {}
 
     def normalizer(self):
         # Its closing event does not repeat the answer, so it is remembered from
@@ -353,7 +427,7 @@ class TestTheSeamTranslatesAnotherHarnessesEvents(unittest.IsolatedAsyncioTestCa
     async def stream(self, stop_when) -> tuple[list[dict], str | None]:
         spec = harness.RunSpec(workspace=self.tmp, prompt="go")
         events, reason, _, _ = await no_sandbox._stream_until(
-            self.foreign.command(spec), "", self.tmp, self.foreign.env(spec),
+            self.foreign.host_command(spec), "", self.tmp, self.foreign.host_env(spec),
             stop_when, self.foreign.normalizer(),
         )
         return events, reason
@@ -418,13 +492,14 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.script = Path(self.tmp) / "foreign_agent.py"
         self.script.write_text(_FOREIGN_AGENT, encoding="utf-8")
+        self.foreign = ForeignHarness(self.script)
         self.skill = Path(self.tmp) / "alpha"
         self.skill.mkdir()
         (self.skill / "SKILL.md").write_text(
             "---\nname: alpha\ndescription: does alpha things\n---\n", encoding="utf-8"
         )
 
-    def run_case(self, *, stop_when_factory=None):
+    def run_case(self, *, stop_when_factory=None, config_dir=None):
         import contextlib
         import io
 
@@ -435,8 +510,8 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
         task = Task(
             dataset=[Sample(id="c1", input="do the alpha thing")],
             solver=no_sandbox.harness_solver(
-                ForeignHarness(self.script), "mockllm/model", None, self.skill,
-                stop_when_factory=stop_when_factory,
+                self.foreign, "mockllm/model", None, self.skill,
+                config_dir=config_dir, stop_when_factory=stop_when_factory,
             ),
             sandbox="local",
         )
@@ -490,6 +565,15 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
         answers = {sample.id: sample.output.completion for sample in log.samples}
         self.assertEqual(answers["talks"], "all done")
         self.assertEqual(answers["silent"], "(no final message)")
+
+    def test_the_harness_is_told_where_the_agent_runs_as_strings(self) -> None:
+        # A path wherever the agent runs, so a container leg can name one inside
+        # it: the engine hands over strings, not host Path objects.
+        self.run_case(config_dir=Path(self.tmp) / "cfg")
+        [spec] = self.foreign.specs
+        self.assertIsInstance(spec.config_dir, str)
+        self.assertEqual(spec.config_dir, str(Path(self.tmp) / "cfg"))
+        self.assertIsInstance(spec.workspace, str)
 
     def test_the_skill_is_staged_where_that_harness_looks(self) -> None:
         # The agent script checks for the file itself, in the workspace it was
