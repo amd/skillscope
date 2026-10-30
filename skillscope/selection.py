@@ -48,7 +48,9 @@ nothing to do.
 ``skipped`` holds legs whose gate label is missing from the pull request. They
 are reported so the gate job can warn that a change shipped without ever
 running on real hardware, rather than failing a pull request for a test it
-deliberately did not request.
+deliberately did not request. A leg whose ``machine.yml`` could not be read
+is held back the same way, with ``error`` set and ``gate`` empty, so one
+broken file does not drop the matrix for every other skill.
 """
 
 from __future__ import annotations
@@ -169,7 +171,11 @@ def matrix_entries(
     ignore_gates: bool = False,
     extended: bool = True,
 ) -> tuple[list[dict], list[dict]]:
-    """Split `skills` into matrix legs to run and legs held back by a gate."""
+    """Split `skills` into matrix legs to run and legs held back.
+
+    A missing gate holds a leg back, and so does a ``machine.yml`` that
+    cannot be read. Either way the other skills are still planned.
+    """
     cfg = config.active()
     include: list[dict] = []
     skipped: list[dict] = []
@@ -177,7 +183,19 @@ def matrix_entries(
     for skill in skills:
         if not has_behavior_cases(skill, extended):
             continue
-        plan = datasets.machine_plan(skill)
+        try:
+            plan = datasets.machine_plan(skill)
+        except SystemExit as exc:
+            # One skill's broken machine.yml used to raise out of this loop
+            # and drop the matrix for every skill after it. It is named with
+            # the legs held back; the rest are still planned.
+            print(exc, file=sys.stderr)
+            skipped.append({
+                "skill": skill,
+                "gate": "",
+                "error": str(exc).removeprefix("error: "),
+            })
+            continue
         # Asking for a runner label is what makes a leg scoped: it is going on
         # hardware the repo singled out, which is also the hardware it rations
         # and pays for separately.
@@ -266,5 +284,5 @@ def plan(
         "default": [leg for leg in include if "environment" not in leg],
         "scoped": [leg for leg in include if "environment" in leg],
         "skipped": skipped,
-        "gates": sorted({leg["gate"] for leg in skipped}),
+        "gates": sorted(leg["gate"] for leg in skipped if leg["gate"]),
     }
