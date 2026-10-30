@@ -29,7 +29,8 @@ authors = [{ name = "Advanced Micro Devices, Inc." }]
 #
 # `anthropic` is listed explicitly: inspect-ai treats every model provider as
 # optional, so installing it alone gets you a harness that cannot reach a model.
-# PyYAML reads the optional evals/machine.yml, which only CI planning touches.
+# PyYAML reads the optional evals/machine.yml: CI planning, and a behavioral
+# run reading each skill's prerequisites.
 dependencies = [
     "pyyaml>=6.0",
     "inspect-ai>=0.3.263",

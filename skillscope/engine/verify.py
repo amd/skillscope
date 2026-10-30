@@ -37,6 +37,7 @@ from . import (
     convert,
     hooks,
     models,
+    prerequisites,
     sandbox as sandbox_spec,
     scorers,
     stats,
@@ -238,28 +239,40 @@ def build_task(
     # whichever engine started it.
     hook = hooks.load(skill)
 
-    bound = deadline.active()
-    return Task(
-        name=f"claude-code-{skill}",
-        setup=hooks.setup_solver(hook, skill, cases),
-        cleanup=hooks.cleanup_fn(hook, skill, cases),
-        dataset=samples,
+    def agent(env: dict[str, str]):
         # `skills=` installs into .claude/skills inside the sandbox, which is
         # where the real harness looks -- the point of this leg is that its
         # discovery machinery, not ours, decides what happens.
         # `effort` reaches the agent rather than being dropped here: unset is
         # not neutral, it is the model's own default, and the legs this one is
         # compared against all pass the value they were given.
-        # A behavioral case has more riding on this than a routing one: it runs
-        # the skill to completion, so a `reference.md` the installer dropped is
-        # a step the agent cannot take, and the scorer records it as work the
-        # skill failed to do.
+        # `env` is unset rather than empty when there is nothing to add, so a
+        # skill without prerequisites builds the agent it always has.
+        return claude_code(
+            skills=[skill_dir],
+            cwd=tools.workdir_path(),
+            effort=effort or None,
+            env=env or None,
+        )
+
+    bound = deadline.active()
+    return Task(
+        name=f"claude-code-{skill}",
+        setup=hooks.setup_solver(hook, skill, cases),
+        cleanup=hooks.cleanup_fn(hook, skill, cases),
+        dataset=samples,
+        # A behavioral case has more riding on a complete skill than a routing
+        # one: it runs the skill to completion, so a `reference.md` the
+        # installer dropped is a step the agent cannot take, and the scorer
+        # records it as work the skill failed to do.
         solver=chain(
             _ensure_workdir(),
             complete_skills_solver({skill_dir.name: skill_dir}),
-            claude_code(
-                skills=[skill_dir], cwd=tools.workdir_path(), effort=effort or None
-            ),
+            # A skill that declares prerequisites gets them provided in this
+            # case's container first, and an agent built with the env they
+            # produced. One that declares none gets the agent exactly as before.
+            prerequisites.claude_code_agent(skill, agent)
+            or agent({}),
         ),
         scorer=scorers.expectations(),
         sandbox=sandbox_spec.for_skill(skill),
@@ -292,13 +305,33 @@ def run(
             continue
 
         print(f"[claude-code] {skill}: {len(skill_cases)} case(s)", flush=True)
+        try:
+            task = build_task(skill, skill_cases, model, effort=effort)
+        except prerequisites.PrerequisiteError as exc:
+            # A declaration this engine refuses to carry into a container -- a
+            # step naming the answer key -- fails its skill, as on the host.
+            outcomes.extend(
+                behavioral._failed(skill, skill_cases, f"{skill}: {exc}", degraded=False)
+            )
+            continue
+        except SystemExit as exc:
+            # A machine.yml that does not parse, as `behavioral.run` treats it:
+            # that skill's failure, not the end of every skill after it. Not a
+            # provider outage, whatever the path in the message happens to say.
+            outcomes.extend(
+                behavioral._failed(skill, skill_cases, str(exc), degraded=False)
+            )
+            continue
         logs = behavioral.run_eval(
             inspect_eval,
-            build_task(skill, skill_cases, model, effort=effort),
+            task,
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
             log_realtime=behavioral.realtime_logging(),
+            # A case whose container could not be prepared -- an install that
+            # failed there -- is that case's failure. See `behavioral.run`.
+            fail_on_error=False,
             display="plain",
         )
         if not logs and behavioral.stop_requested():

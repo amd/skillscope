@@ -396,6 +396,20 @@ def _record_room(state, event: dict, room_names: list[str] | None) -> None:
     state.store.set(EXTRA_SKILLS_KEY, routing_core.init_extra_skills(event, room_names))
 
 
+def behavioral_solver_factory(model: str | None, effort: str | None):
+    """The `solver_factory` the behavioral leg is run with on this engine.
+
+    `behavioral.build_task` calls it per skill with the skill's directory and
+    the env its prerequisites produced; both go to the solver, the env as
+    `extra_env` so it reaches this skill's agent and no other.
+    """
+
+    def factory(skill_dir: Path, env: dict[str, str]):
+        return claude_code_no_sandbox(model, effort, skill_dir, extra_env=env)
+
+    return factory
+
+
 def claude_code_no_sandbox(
     model: str | None,
     effort: str | None,
@@ -404,8 +418,14 @@ def claude_code_no_sandbox(
     extra_flags: list[str] | None = None,
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
+
+    `extra_env` is set for the CLI on top of this process's environment: what
+    the skill's prerequisites need the agent to see (`prerequisites.on_host`).
+    Passed here rather than written into ``os.environ``, so it reaches this
+    skill's agent and nothing else.
 
     `extra_flags` are the CLI's own controls -- `--max-budget-usd` and
     `--no-session-persistence` -- built by `routing.host_cost_flags`, which
@@ -465,6 +485,7 @@ def claude_code_no_sandbox(
             cmd += list(extra_flags or [])
 
             env = legacy_agent.claude_env()
+            env.update(extra_env or {})
             if config_dir is not None:
                 env["CLAUDE_CONFIG_DIR"] = str(config_dir)
 

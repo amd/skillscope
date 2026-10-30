@@ -93,8 +93,9 @@ python -m pip install -e .
 python -m unittest discover -s tests -t .
 ```
 
-Runtime dependencies are PyYAML for frontmatter, `inspect-ai` for the eval
-framework both engines are built on, and `anthropic` for the model client.
+Runtime dependencies are PyYAML for frontmatter and `evals/machine.yml`,
+`inspect-ai` for the eval framework both engines are built on, and `anthropic`
+for the model client.
 `inspect-ai` became required when the last stdlib-only engine was removed; the
 test suite still runs on the standard library alone, and builds a throwaway
 repo in a temp directory rather than reading the tree it runs in.

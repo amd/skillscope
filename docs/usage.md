@@ -322,7 +322,9 @@ membership.
 `sandbox: compose.yaml` in its `evals/machine.yml`, resolved beside it. Skills get a container with
 no network by default; one that installs a server or pulls a model cannot run
 that way and says so. Selecting a provider does not discard what a skill asked
-for -- the compose file rides along.
+for -- the compose file rides along. A skill that needs a tool installed first
+declares it as [prerequisites](authoring-evals.md#prerequisites) in the same
+file, and an install that downloads anything needs that egress too.
 
 [`examples/skill-with-a-device/evals/`](../examples/skill-with-a-device/evals)
 is the pair, worked through: a `machine.yml` that asks for GPU runners and

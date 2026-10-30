@@ -129,8 +129,10 @@ Two optional files sit beside the dataset.
 
 ### `evals/machine.yml`
 
-Only for a skill whose behavioral cases cannot run on the everyday runners on
-every platform. Both keys are optional:
+Only for a skill whose behavioral cases need something the everyday runners
+do not give them: a narrower set of platforms, particular hardware, a sandbox of
+its own (`sandbox:`, see [usage.md](usage.md#where-a-sandboxed-run-is-sandboxed)),
+or [prerequisites](#prerequisites). Every key is optional:
 
 ```yaml
 os: [Linux]                 # defaults to whatever platforms the repo runs on
@@ -145,6 +147,92 @@ moves the leg onto that pool.
 
 Most skills that need this file need only `os: [Linux]`, to drop a Windows leg
 that would just exercise the failure path of Linux-only tooling.
+
+#### Prerequisites
+
+A skill whose behavioral cases need something the runner may not have, such as
+a library to build or a package to install, declares it here once. Every engine
+applies the same declaration where its agent runs. Routing never does: it runs
+no case to completion.
+
+```yaml
+os: [Linux]
+prerequisites:
+  - name: rocprof-trace-decoder
+    check: [python3, -c, "import elftools, rocprof_trace_decoder"]
+    install: [sh, install-decoder.sh]   # beside this file
+    env:
+      PYTHONPATH: "${SKILL_CACHE_DIR}/decoder/python"
+      ROCPROF_TRACE_DECODER_LIB: "${SKILL_CACHE_DIR}/decoder/lib/librocprof-trace-decoder.so"
+```
+
+- **The order is check, then install, then check again.**
+  - `check` runs first, without this prerequisite's `env`. If it exits 0, the
+    prerequisite is already there: nothing is installed and its `env` is not
+    applied, because whatever provides it already says where it is. Write
+    `check` so it exits 0 only when the agent would work without this `env`.
+    The log names which were satisfied by the environment and which were installed.
+  - Otherwise `install` runs, then `check` runs again with `env` applied. If it
+    still fails, the skill's cases are reported as failed, with the step's
+    output.
+  - Prerequisites run in order, and each one's steps see the `env` of the ones
+    before it that had to be installed.
+- **When it runs depends on the engine.**
+  - The default engine runs it once per skill, on the host, before the first
+    case.
+  - `--engine claude-code` runs it in each case's container, before the agent
+    starts, so the container needs whatever `install` uses: network access for
+    a download, which the default sandbox does not have, and a user that can
+    write to `/opt/skillscope`.
+- **Commands are argv lists.** A command may also be a mapping per platform,
+  for example `{linux: [sh, x.sh], windows: [pwsh, x.ps1]}`. A container
+  always counts as `linux`, and the structural check wants a command for every
+  platform in `os`. An `os` label that is not linux, windows, or macos is
+  reported too, when this skill has prerequisites: a typo would otherwise skip
+  that check. On the host, steps run in this directory. In a container
+  they run in a scratch directory holding only the files they name.
+- **What a container gets.** Under `claude-code`, an argv item of `check` or
+  `install` that is a path to a file in this directory or below it, like
+  `install-decoder.sh` above, is copied into the container for the step, at the
+  same relative path, and removed before the agent starts. A file mentioned
+  only inside a string, as in `sh -c "..."`, is not. A copied file is not
+  executable there, so run a script through its interpreter (`[sh, install.sh]`,
+  not `[./install.sh]`). A step that names `evals.json` or `extended_evals.json`
+  is refused, and the skill's cases fail, rather than carry the answer key into
+  the agent's room.
+- **No step has a time limit of its own.** On the host only `--timeout` stops
+  a hung install. It stops the processes the install started as well, whether
+  it stops the run gracefully or kills it outright. In a container the case's
+  own time limit does, which `--timeout` sets; without one, nothing does. A
+  host step also waits for everything holding its output open, so a step that
+  leaves a server running in the background does not finish.
+- **Steps see two variables, and `env` values may refer to these two only.**
+  - `SKILL_SOURCE_DIR` is the source tree the skill came from, resolved the
+    way `sources.resolve` does (below). It is host only: a container has no
+    copy of it, and on the host it is unset if no tree can be found. An `env`
+    value naming it fails before anything is installed when it is missing.
+  - `SKILL_CACHE_DIR` is scratch space for what `install` builds. On the host
+    it is removed after the skill's last case. In a container it is
+    `/opt/skillscope/cache`. That path is provisional until a skill's image
+    is built against it.
+- **An `env` value replaces the variable, it does not extend it.** No other
+  `$` is expanded. `PATH` cannot be set here: it would replace the agent's
+  search path, and everything the agent starts would see only that value.
+  Variables the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`,
+  `IS_SANDBOX`) cannot be set here either.
+- **Installing once per image instead of once per case.** Under `claude-code`,
+  build your `sandbox:` image so that `check` passes in it without this
+  prerequisite's `env`: run the same `install` at `SKILL_CACHE_DIR=/opt/skillscope/cache`
+  and set the same `env` in the image, or install wherever the image's own
+  environment already finds it. A source tree the install needs has to be put
+  into the image as well.
+- **What it sets stays with its skill.** The `env` reaches only its own skill's
+  agent, and `SKILL_CACHE_DIR` is removed after the skill. Anything `install`
+  writes elsewhere on the host, such as a pip cache, is not cleaned up.
+- **Steps are trusted like the rest of the skill.** On the host they run with
+  the runner's whole environment, credentials included, as `evals/hooks.py`
+  does; in a container they see only the container's. A failing step's output
+  ends up in the report.
 
 ### `evals/hooks.py`
 
@@ -186,15 +274,17 @@ def setup_session(cache_dir): ...     # NOT supported
 def check(run, case, ctx): ...        # NOT supported
 ```
 
-`check` was handed the retired engine's `Run` object; the engines here have
-inspect's `TaskState`, which is a different thing with different attributes.
-`setup_session` returned `{name: value}` pairs substituted into prompts as
-`{placeholders}`, and prompts are built before any hook runs -- so honouring it
-would mean constructing every case after the hook rather than before. A `setup`
-that *returns* placeholders is refused at runtime for the same reason.
+`setup_session` is replaced by [prerequisites](#prerequisites). It ran once,
+on the host, and anything it set reached the agent only through the host's
+environment, so a skill that also ran under `claude-code` had to describe its
+environment a second time for the container, and the two descriptions
+drifted. Its `{placeholder}` return value has no replacement: nothing used it.
+Put such values in the dataset instead.
 
-If you were relying on either, move the work into `setup`/`teardown`, or put
-the value in the dataset.
+`check` was handed the retired engine's `Run` object. The engines here have
+inspect's `TaskState`, which is a different thing with different attributes.
+Move what it asserted into the dataset. A `setup` that *returns* placeholders
+is refused at runtime, because prompts are built before any hook runs.
 
 Keep prompts and expectations in the dataset even when you use hooks, so what
 is being asserted stays readable without opening Python.

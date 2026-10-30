@@ -31,6 +31,7 @@ import runpy
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -69,6 +70,7 @@ from skillscope.engine import tools as engine_tools
 from skillscope.engine import scorers as engine_scorers
 from skillscope.engine import stats as engine_stats
 from skillscope.engine import pricing as engine_pricing
+from skillscope.engine import prerequisites as engine_prerequisites
 from skillscope import usage
 
 REPO_ROOT = datasets.PACKAGE_DIR.parent
@@ -352,6 +354,10 @@ class TestMachineSchema(unittest.TestCase):
 
     def test_documented_keys_match_the_parser(self) -> None:
         self.assertEqual(set(self.schema["properties"]), datasets.MACHINE_KEYS)
+        item = self.schema["properties"]["prerequisites"]["items"]
+        self.assertEqual(set(item["properties"]), datasets.PREREQUISITE_KEYS)
+        per_platform = self.schema["$defs"]["command"]["oneOf"][1]["properties"]
+        self.assertEqual(set(per_platform), set(datasets.COMMAND_PLATFORMS))
 
     def test_no_list_key_is_enumerated_in_the_schema(self) -> None:
         # Neither `os` nor `labels` can be: a label means whatever a repo
@@ -1126,6 +1132,19 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(
             json.loads(plan["default"][0]["runner"]), ["self-hosted", "gpu", "Linux"]
         )
+
+    def test_one_bad_machine_yml_does_not_drop_the_matrix(self) -> None:
+        self.repo.skill("gamma", dataset=self.graded)
+        (self.repo.root / "gamma" / "evals" / "machine.yml").write_text(
+            "os: [\n", encoding="utf-8"
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+        self.assertIn("alpha", [leg["skill"] for leg in plan["default"]])
+        [broken] = [item for item in plan["skipped"] if item["skill"] == "gamma"]
+        self.assertEqual(broken["gate"], "")
+        self.assertIn("not valid YAML", broken["error"])
+        self.assertNotIn("", plan["gates"])
 
 
 class TestWhatABranchChanged(unittest.TestCase):
@@ -3445,8 +3464,8 @@ class TestHooksRunOrTheRunStops(unittest.TestCase):
 
     `check` and `setup_session` do not. `check` is handed the legacy engine's
     `Run` object and these engines have inspect's `TaskState`; `setup_session`
-    returns template variables that are substituted into prompts before any
-    hook runs. Both are refused rather than skipped, because skipping leaves
+    is replaced by `prerequisites:` in machine.yml, which every engine applies.
+    Both are refused rather than skipped, because skipping leaves
     no trace: the case is graded as though the hook had run, and the failure
     surfaces later as a skill that mysteriously does not work on this runner.
 
@@ -3497,6 +3516,8 @@ class TestHooksRunOrTheRunStops(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             self.refuse("claude-code", ["sessioned"])
         self.assertIn("setup_session", str(caught.exception))
+        # And says what replaced it, so the author is not left to search.
+        self.assertIn("prerequisites:", str(caught.exception))
 
     def test_the_refusal_names_every_skill_it_blocks(self) -> None:
         # Naming one of three sends someone round the loop twice.
@@ -5318,12 +5339,27 @@ class TestTheRoomCheckIsBackAndSaysWhenItDidNotRun(unittest.TestCase):
 
 
 _STUB_CLAUDE = r'''
-import json, sys
+import json, os, sys
 
 if "--help" in sys.argv:
     print("--max-budget-usd --no-session-persistence")
     sys.exit(0)
-sys.stdin.read()
+prompt = sys.stdin.read()
+# What the agent would have seen, for tests that need to know: the prompt it was
+# given, and every PREREQ_* variable with whether the path it names exists. One
+# file per process: agents run concurrently, and appends to one shared file are
+# not atomic on Windows, so a record could be lost.
+record = os.environ.get("STUB_CLAUDE_RECORD")
+if record:
+    seen = {k: v for k, v in os.environ.items() if k.startswith("PREREQ_")}
+    os.makedirs(record, exist_ok=True)
+    with open(os.path.join(record, f"{os.getpid()}.json"), "w", encoding="utf-8") as out:
+        out.write(json.dumps({
+            "argv": sys.argv[1:],
+            "prompt": prompt,
+            "env": seen,
+            "exists": {k: os.path.exists(v) for k, v in seen.items()},
+        }) + "\n")
 for event in [
     {"type": "system", "subtype": "init",
      "skills": ["alpha", "a-stray-runner-skill"], "tools": ["Skill"]},
@@ -5462,6 +5498,11 @@ class TestAStoppedRunKeepsWhatItFinished(unittest.TestCase):
         self.addCleanup(deadline.use, previous)
         self.logs = tempfile.mkdtemp(prefix="ss-stopped-")
         self.addCleanup(shutil.rmtree, self.logs, True)
+        # A real skill, because the run reads its evals/machine.yml before
+        # building the task that these tests replace.
+        repo = Repo(self)
+        repo.skill("alpha", dataset=tier0_dataset("alpha"))
+        repo.activate()
         self.case = datasets.Case(id="c1", skill="alpha", prompt="p",
                                   skill_should_trigger=True, files_exist=["x"])
         for patch in (mock.patch.object(engine_sandbox, "require_provider"),
@@ -5964,6 +6005,1249 @@ class TestARateThatWouldSilentlyDisableTheCapIsRefused(unittest.TestCase):
     def test_a_good_table_still_binds(self) -> None:
         self._apply('{"mockllm/model": {"input": 5.0, "output": 25.0}}')
         self.assertTrue(engine_models.cost_limit_binds("mockllm/model"))
+
+
+class TestTheCliHandsTheFactoryItsFlags(unittest.TestCase):
+    """`--model` and `--effort` reach the default engine's agent factory.
+
+    The end-to-end tests above build the factory themselves, so they cannot
+    see the CLI dropping a flag on the way -- the class of bug that once ran a
+    whole comparison at the wrong reasoning effort.
+    """
+
+    def test_the_flags_are_passed_through(self) -> None:
+        repo = Repo(self)
+        repo.skill("alpha", dataset=tier0_dataset(
+            "alpha", evaluations=[{"id": "a1", TRIGGER_KEY: True, "prompt": "p",
+                                   "logs_contain": ["x"]}]))
+        repo.activate()
+        args = cli.build_parser().parse_args(
+            ["behavioral", "--engine", "claude-code-no-sandbox",
+             "--model", "opus", "--effort", "low"])
+        handed = []
+        with mock.patch.object(cli, "_prepare_graded_run", lambda a: ["alpha"]), \
+                mock.patch.object(engine_no_sandbox, "require_local"), \
+                mock.patch.object(engine_no_sandbox, "behavioral_solver_factory",
+                                  lambda model, effort: handed.append((model, effort))), \
+                mock.patch.object(engine_behavioral, "run", lambda *a, **k: []), \
+                mock.patch.object(cli, "_write_report"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli.cmd_behavioral(args)
+        self.assertEqual(handed, [("opus", "low")])
+
+
+# A prerequisite the tests can provide on any platform: `check` passes when
+# PREREQ_TOOL names a file that exists, and `install` creates one in the cache
+# and logs that it ran, so a test can count installs.
+_PY = sys.executable
+_CHECK_TOOL = (
+    "import os, sys; p = os.environ.get('PREREQ_TOOL'); "
+    "sys.exit(0 if p and os.path.exists(p) else 1)"
+)
+_INSTALL_TOOL = (
+    "import os, pathlib; "
+    "pathlib.Path(os.environ['SKILL_CACHE_DIR'], 'tool.txt').write_text('x'); "
+    "open(os.environ['SS_TEST_INSTALL_LOG'], 'a').write('installed\\n')"
+)
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process is still running. Windows has no signal 0."""
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                             capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie still answers signal 0; reap-or-not, it is no longer running.
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+def _machine(*prerequisites: dict) -> str:
+    """A machine.yml declaring `prerequisites`. JSON is YAML, and quotes paths."""
+    return json.dumps({"prerequisites": list(prerequisites)})
+
+
+def _tool(**overrides) -> dict:
+    declared = {
+        "name": "tool",
+        "check": [_PY, "-c", _CHECK_TOOL],
+        "install": [_PY, "-c", _INSTALL_TOOL],
+        "env": {"PREREQ_TOOL": "${SKILL_CACHE_DIR}/tool.txt"},
+    }
+    declared.update(overrides)
+    return declared
+
+
+def _fake_inspect_swe(claude_code):
+    """`inspect_swe` with `claude_code` replaced, whether or not it is installed.
+
+    The unit-test job installs skillscope without the `verify` extra, so a test
+    that skipped when `inspect_swe` was missing never ran in CI.
+    """
+    fake = types.ModuleType("inspect_swe")
+    fake.claude_code = claude_code
+    return mock.patch.dict(sys.modules, {"inspect_swe": fake})
+
+
+def _noop_solver():
+    from inspect_ai.solver import solver
+
+    @solver
+    def noop():
+        async def solve(state, generate):
+            return state
+
+        return solve
+
+    return noop()
+
+
+class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
+    """A malformed declaration stops at the structural check, not at run time.
+
+    At run time it would surface as every case of the skill failing on a runner
+    already paid for; here it costs seconds and names the field.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.activate()
+
+    def errors_for(self, machine: str) -> list[str]:
+        self.repo.skill("demo", dataset=tier0_dataset("demo"), machine=machine)
+        return datasets.structural_errors(["demo"])
+
+    def test_a_well_formed_declaration_passes(self) -> None:
+        self.assertEqual(self.errors_for(_machine(_tool())), [])
+        [found] = datasets.machine_prerequisites("demo")
+        self.assertEqual(found.name, "tool")
+        self.assertEqual(found.command("check", "windows"), [_PY, "-c", _CHECK_TOOL])
+
+    def test_a_command_can_differ_per_platform(self) -> None:
+        self.errors_for(_machine(_tool(install={"linux": ["sh", "a.sh"],
+                                                "windows": ["pwsh", "a.ps1"]})))
+        [found] = datasets.machine_prerequisites("demo")
+        self.assertEqual(found.command("install", "linux"), ["sh", "a.sh"])
+        self.assertEqual(found.command("install", "windows"), ["pwsh", "a.ps1"])
+        self.assertIsNone(found.command("install", "macos"))
+
+    def test_each_mistake_is_named(self) -> None:
+        missing_install = _tool()
+        del missing_install["install"]
+        for machine, expected in [
+            (_machine(_tool(extra=1)), "unknown key(s): extra"),
+            (_machine(missing_install), "is missing install"),
+            (_machine(_tool(env={"X": "${HOME}/x"})), "uses `$`"),
+            (_machine(_tool(check={"solaris": ["true"]})), "unknown platform(s): solaris"),
+            (_machine(_tool(check="true")), "must be a command"),
+            (_machine(_tool(), _tool(name=" tool ")), "declared twice"),
+            (json.dumps({"prerequisites": []}), "non-empty list"),
+            (json.dumps({"prerequisites": None}), "non-empty list"),
+            (json.dumps({"prerequisites": ["tool"]}), "must be a mapping"),
+            (_machine(_tool(name="  ")), "non-empty string"),
+            (_machine(_tool(name=3)), "non-empty string"),
+            (_machine(_tool(env={"X": 1})), "map variable names to strings"),
+            (_machine(_tool(env={"": "x"})), "map variable names to strings"),
+            (_machine(_tool(env={"X": "$HOME/x"})), "`prerequisites[0].env.X` uses `$`"),
+            (_machine(_tool(env={"X": "${SKILL_CACHE_DIR"})), "uses `$`"),
+            (_machine(_tool(env={"ANTHROPIC_BASE_URL": "x"})), "set by the harness"),
+            (_machine(_tool(env={"CLAUDE_CONFIG_DIR": "x"})), "set by the harness"),
+            (_machine(_tool(env={"IS_SANDBOX": "0"})), "set by the harness"),
+            (_machine(_tool(env={"PATH": "${SKILL_CACHE_DIR}/bin"})), "replaces PATH"),
+            # Windows environment names are case-insensitive, so `Path` is
+            # `PATH` and `anthropic_api_key` is `ANTHROPIC_API_KEY`.
+            (_machine(_tool(env={"Path": "/usr/bin"})), "replaces PATH"),
+            (_machine(_tool(env={"anthropic_api_key": "x"})), "set by the harness"),
+            (_machine(_tool(env={"A=B": "x"})), "cannot be set in a process environment"),
+            (_machine(_tool(env={"1A": "x"})), "cannot be set in a process environment"),
+            (_machine(_tool(env={"A": "x\u0000y"})), "cannot be set in a process environment"),
+            # `$` matches before a trailing newline; the name is still illegal.
+            (_machine(_tool(env={"FOO\n": "x"})), "cannot be set in a process environment"),
+            (_machine(_tool(install=["cmd", ""])), "must be a non-empty list of strings"),
+            # Two unknown keys of different types: sorting them must not crash.
+            ("os: [Linux]\nprerequisites:\n  - {name: t, check: [a], install: [b], 1: x, z: y}\n",
+             "unknown key(s): 1, z"),
+            (_machine(_tool(check={"windows": ["a"]})), "no check command for Linux"),
+            (_machine(_tool(), _tool(name="b", install={"linux": ["sh", 1]})),
+             "`prerequisites[1].install.linux` must be a non-empty list"),
+            (_machine(_tool(env=["X"])), "`prerequisites[0].env` must map"),
+            ("prerequisites:\n  - {name: t, check: [a], install: [b], env: {1: x}}\n",
+             "`prerequisites[0].env` must map"),
+            (_machine(_tool(check={})), "`prerequisites[0].check` must be a command"),
+            (json.dumps({"prerequisites": "abc"}), "non-empty list"),
+        ]:
+            with self.subTest(expected=expected):
+                errors = self.errors_for(machine)
+                self.assertTrue(any(expected in e for e in errors), errors)
+
+    def test_an_argv_is_kept_as_written(self) -> None:
+        # An inline script's newline and an argument's leading spaces are part
+        # of the command; trimming them changes what runs.
+        self.errors_for(_machine(_tool(install=["sh", "-c", "echo a\n", "  x"])))
+        [found] = datasets.machine_prerequisites("demo")
+        self.assertEqual(found.command("install", "linux"), ["sh", "-c", "echo a\n", "  x"])
+
+    def test_yaml_that_does_not_parse_is_named_not_raised(self) -> None:
+        errors = self.errors_for("prerequisites: [unclosed\n")
+        self.assertTrue(any("is not valid YAML" in e for e in errors), errors)
+
+    def test_a_per_platform_command_is_still_an_argv(self) -> None:
+        for bad in ("sh install.sh", []):
+            with self.subTest(command=bad):
+                errors = self.errors_for(_machine(_tool(install={"linux": bad})))
+                self.assertTrue(
+                    any("must be a non-empty list of strings" in e for e in errors), errors)
+
+    def test_an_unrecognised_os_label_is_not_a_silent_skip(self) -> None:
+        # `Liunx` used to be skipped like a custom runner label, so the
+        # command-for-every-platform check never saw it.
+        linux_only = _tool(check={"linux": ["c"]}, install={"linux": ["i"]})
+        machine = json.dumps({"os": ["Linux", "Liunx"], "prerequisites": [linux_only]})
+        errors = self.errors_for(machine)
+        self.assertTrue(any("Liunx" in e for e in errors), errors)
+
+    def test_an_os_label_without_prerequisites_stays_a_runner_label(self) -> None:
+        # No command to check, so a label the workflow invented is its business.
+        self.assertEqual(self.errors_for(json.dumps({"os": ["Plan9"]})), [])
+
+    def test_a_prerequisite_may_not_override_the_inputs(self) -> None:
+        for name in datasets.PREREQUISITE_INPUTS:
+            with self.subTest(name=name):
+                errors = self.errors_for(_machine(_tool(env={name: "/elsewhere"})))
+                self.assertTrue(any("supplies to every step" in e for e in errors), errors)
+
+    def test_mixed_type_top_level_keys_are_named_not_crashed_on(self) -> None:
+        errors = self.errors_for("os: [Linux]\n1: x\nz: y\n")
+        self.assertTrue(any("unknown key(s): 1, z" in e for e in errors), errors)
+
+    def test_a_missing_install_for_a_platform_is_a_gap_too(self) -> None:
+        machine = json.dumps({"os": ["Linux", "Windows"], "prerequisites": [
+            _tool(install={"linux": ["sh", "i.sh"]})]})
+        errors = self.errors_for(machine)
+        self.assertTrue(any("no install command for Windows" in e for e in errors), errors)
+
+    def test_a_name_is_reported_as_written_without_padding(self) -> None:
+        self.errors_for(_machine(_tool(name="  tool  ")))
+        [found] = datasets.machine_prerequisites("demo")
+        self.assertEqual(found.name, "tool")
+
+    def test_macos_commands_are_accepted(self) -> None:
+        self.errors_for(_machine(_tool(install={"macos": ["sh", "m.sh"]})))
+        [found] = datasets.machine_prerequisites("demo")
+        self.assertEqual(found.command("install", "macos"), ["sh", "m.sh"])
+
+    def test_os_narrows_which_platforms_need_a_command(self) -> None:
+        # `os` narrows what is required: a Windows-only command is a gap only
+        # for a skill that also runs on Linux.
+        windows_only = _tool(check={"windows": ["a"]}, install={"windows": ["b"]})
+        machine = json.dumps({"os": ["Windows"], "prerequisites": [windows_only]})
+        self.assertEqual(self.errors_for(machine), [])
+
+
+class TestProvidingAPrerequisite(unittest.TestCase):
+    """The one rule both engines apply, driven with a recording runner."""
+
+    def run_provide(self, declared, present=False, install_ok=True, recheck_ok=True):
+        calls = []
+
+        async def run(argv, env):
+            step = argv[0]
+            calls.append((step, dict(env)))
+            if step == "check":
+                first = sum(1 for s, _ in calls if s == "check") == 1
+                if first:
+                    return (0 if present else 1), ""
+                return (0 if recheck_ok else 1), "still missing"
+            return (0, "built") if install_ok else (2, "compiler exploded")
+
+        provision = asyncio.run(
+            engine_prerequisites.provide(
+                declared, {"SKILL_CACHE_DIR": "/cache"}, "linux", run
+            )
+        )
+        return provision, calls
+
+    def declared(self, **env):
+        return [datasets.Prerequisite(
+            name="tool", check={"*": ["check"]}, install={"*": ["install"]},
+            env=env or {"TOOL": "${SKILL_CACHE_DIR}/tool"},
+        )]
+
+    def test_present_means_nothing_installed_and_no_env(self) -> None:
+        provision, calls = self.run_provide(self.declared(), present=True)
+        self.assertEqual(provision.env, {})
+        self.assertEqual(provision.satisfied, ("tool",))
+        self.assertEqual(provision.installed, ())
+        self.assertEqual([s for s, _ in calls], ["check"])
+
+    def test_missing_means_install_then_check_again_with_the_env(self) -> None:
+        provision, calls = self.run_provide(self.declared())
+        self.assertEqual([s for s, _ in calls], ["check", "install", "check"])
+        self.assertEqual(provision.env, {"TOOL": "/cache/tool"})
+        self.assertEqual(provision.installed, ("tool",))
+        self.assertEqual(provision.satisfied, ())
+        # The re-check sees the declared env; the steps before it do not.
+        self.assertNotIn("TOOL", calls[1][1])
+        self.assertEqual(calls[2][1]["TOOL"], "/cache/tool")
+        self.assertEqual(calls[2][1]["SKILL_CACHE_DIR"], "/cache")
+
+    def test_a_failed_install_says_why(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_provide(self.declared(), install_ok=False)
+        self.assertIn("install exited 2", str(raised.exception))
+        self.assertIn("compiler exploded", str(raised.exception))
+
+    def test_an_install_that_did_not_take_is_a_failure(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_provide(self.declared(), recheck_ok=False)
+        self.assertIn("still not present after install", str(raised.exception))
+
+    def test_an_input_this_engine_cannot_supply_is_named_before_installing(self) -> None:
+        steps = []
+
+        async def run(argv, env):
+            steps.append(argv[0])
+            return 1, ""
+
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            asyncio.run(engine_prerequisites.provide(
+                self.declared(SRC="${SKILL_SOURCE_DIR}/x"),
+                {"SKILL_CACHE_DIR": "/cache"}, "linux", run,
+                {"SKILL_SOURCE_DIR": "no tree here"},
+            ))
+        self.assertIn("${SKILL_SOURCE_DIR}", str(raised.exception))
+        self.assertIn("no tree here", str(raised.exception))
+        self.assertEqual(steps, ["check"])  # no build was spent finding out
+
+    def test_a_failed_skill_is_an_outage_only_when_its_detail_reads_as_one(self) -> None:
+        case = datasets.Case(id="c", skill="s", prompt="p", skill_should_trigger=True)
+        [outage] = engine_behavioral._failed("s", [case], "upstream 502 gateway timeout")
+        [plain] = engine_behavioral._failed("s", [case], "no such file")
+        self.assertTrue(outage.degraded)
+        self.assertFalse(plain.degraded)
+
+    def test_only_this_engines_prerequisite_error_is_excused_as_an_outage(self) -> None:
+        def error(traceback):
+            return types.SimpleNamespace(traceback=traceback)
+
+        ours = "skillscope.engine.prerequisites.PrerequisiteError: install exited 1"
+        inspects = "inspect_ai._util.error.PrerequisiteError: upstream 502 gateway"
+        self.assertFalse(engine_behavioral._is_outage(error(ours), "upstream 502 gateway"))
+        # inspect's class of the same name is not ours, so the heuristic applies.
+        self.assertTrue(engine_behavioral._is_outage(error(inspects), "upstream 502 gateway"))
+
+    def test_no_command_for_this_platform_is_named(self) -> None:
+        # Reachable on a host whose platform `os` does not list, which the
+        # structural check therefore did not look at.
+        async def run(argv, env):
+            return 1, ""
+
+        declared = [datasets.Prerequisite("tool", {"windows": ["c"]}, {"windows": ["i"]})]
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            asyncio.run(engine_prerequisites.provide(declared, {}, "linux", run))
+        self.assertIn("declares no command for linux", str(raised.exception))
+
+    def test_a_long_failure_keeps_its_end(self) -> None:
+        async def run(argv, env):
+            return (1, "") if argv[0] == "check" else (1, "noise " * 2000 + "THE REAL ERROR")
+
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            asyncio.run(engine_prerequisites.provide(
+                self.declared(), {"SKILL_CACHE_DIR": "/c"}, "linux", run))
+        message = str(raised.exception)
+        self.assertTrue(message.endswith("THE REAL ERROR"))
+        self.assertLess(len(message), engine_prerequisites.OUTPUT_TAIL + 200)
+
+    def test_an_argv_the_os_cannot_take_is_a_failed_step(self) -> None:
+        run = engine_prerequisites._host_runner(Path(tempfile.gettempdir()))
+        code, output = asyncio.run(run(["bad\0argv"], {}))
+        self.assertEqual(code, 127)
+        self.assertIn("could not start", output)
+
+    def test_the_host_names_macs_the_way_declarations_do(self) -> None:
+        with mock.patch.object(engine_prerequisites.platform, "system", lambda: "Darwin"):
+            self.assertEqual(engine_prerequisites.host_platform(), "macos")
+        with mock.patch.object(engine_prerequisites.platform, "system", lambda: "Windows"):
+            self.assertEqual(engine_prerequisites.host_platform(), "windows")
+
+    def test_a_later_prerequisite_builds_on_an_earlier_one(self) -> None:
+        seen = []
+
+        async def run(argv, env):
+            seen.append((argv[0], dict(env)))
+            return (1 if argv[0] == "first-check" and len(seen) == 1 else 0), ""
+
+        declared = [
+            datasets.Prerequisite("a", {"*": ["first-check"]}, {"*": ["first-install"]},
+                                  {"A": "${SKILL_CACHE_DIR}/a"}),
+            datasets.Prerequisite("b", {"*": ["second-check"]}, {"*": ["second-install"]}),
+        ]
+        asyncio.run(engine_prerequisites.provide(
+            declared, {"SKILL_CACHE_DIR": "/cache"}, "linux", run
+        ))
+        second = next(env for step, env in seen if step == "second-check")
+        self.assertEqual(second["A"], "/cache/a")
+
+    def test_the_report_names_each_branch(self) -> None:
+        # A check that passes and one that does not must be distinguishable.
+        # The count of prerequisites is the same either way.
+        present = datasets.Prerequisite(
+            "system", {"*": ["present"]}, {"*": ["install-present"]}, {"S": "1"}
+        )
+        missing = datasets.Prerequisite(
+            "built", {"*": ["missing"]}, {"*": ["install-missing"]},
+            {"B": "${SKILL_CACHE_DIR}/b"},
+        )
+
+        async def run(argv, env):
+            # The first `missing` check fails; install succeeds; the re-check
+            # sees the env the install just applied.
+            if argv[0] in ("present", "install-missing") or env.get("B"):
+                return 0, ""
+            return 1, ""
+
+        provision = asyncio.run(engine_prerequisites.provide(
+            [present, missing], {"SKILL_CACHE_DIR": "/cache"}, "linux", run
+        ))
+        self.assertEqual(provision.satisfied, ("system",))
+        self.assertEqual(provision.installed, ("built",))
+        self.assertEqual(provision.env, {"B": "/cache/b"})
+        self.assertEqual(
+            engine_prerequisites._provision_line("demo", provision),
+            "[prerequisites] demo: system satisfied by the environment; built installed",
+        )
+
+
+class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
+    """The host leg end to end: real solver, real inspect `eval()`, stub `claude`.
+
+    The stub records the PREREQ_* variables each agent was started with and
+    whether the paths they name exist, so these tests observe what the agent
+    saw rather than how the engine was written.
+    """
+
+    def setUp(self) -> None:
+        _stub_claude_on_path(self)
+        self.scratch = Path(tempfile.mkdtemp(prefix="ss-prereq-"))
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.record = self.scratch / "agents"
+        self.installs = self.scratch / "installs.log"
+        env = mock.patch.dict(os.environ, {
+            engine_sandbox.SANDBOX_ENV: "local",
+            "ANTHROPIC_API_KEY": "sk-test-not-a-key",
+            "STUB_CLAUDE_RECORD": str(self.record),
+            "SS_TEST_INSTALL_LOG": str(self.installs),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("PREREQ_TOOL", None)
+        self.repo = Repo(self)
+        self.repo.activate()
+
+    def skill(self, name: str, machine: str | None = None) -> None:
+        self.repo.skill(name, dataset=tier0_dataset(name), machine=machine)
+
+    def run_cases(self, *skills: str, per_skill: int = 1, model=None, effort=None):
+        cases = [
+            datasets.Case(id=f"{skill}-{i}", skill=skill, prompt=f"work for {skill} {i}",
+                          skill_should_trigger=True, logs_contain=["done"])
+            for skill in skills for i in range(per_skill)
+        ]
+        with contextlib.redirect_stdout(io.StringIO()):
+            return engine_behavioral.run(
+                list(skills), cases, "mockllm/model", "high",
+                # The factory the CLI uses; what the CLI hands it is tested in
+                # `TestTheCliHandsTheFactoryItsFlags`.
+                solver_factory=engine_no_sandbox.behavioral_solver_factory(model, effort),
+                log_dir=str(self.scratch / "logs"),
+            )
+
+    def seen(self) -> list[dict]:
+        """What each agent saw, in the order the cases were given."""
+        if not self.record.exists():
+            return []
+        records = [json.loads(f.read_text()) for f in self.record.iterdir()]
+        return sorted(records, key=lambda r: r["prompt"])
+
+    def install_count(self) -> int:
+        return len(self.installs.read_text().splitlines()) if self.installs.exists() else 0
+
+    def test_a_missing_prerequisite_is_installed_once_and_every_case_can_use_it(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        outcomes = self.run_cases("needs-tool", per_skill=2)
+        self.assertFalse([o.error for o in outcomes if o.error])
+        self.assertEqual(self.install_count(), 1)
+        seen = self.seen()
+        self.assertEqual(len(seen), 2)
+        for agent in seen:
+            self.assertTrue(agent["env"].get("PREREQ_TOOL"), agent)
+            self.assertTrue(agent["exists"]["PREREQ_TOOL"], agent)
+
+    def test_the_log_names_the_branch_that_provided_it(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), engine_prerequisites.on_host("needs-tool"):
+            pass
+        text = out.getvalue()
+        self.assertIn("[prerequisites] needs-tool: 1 to provide", text)
+        self.assertIn("[prerequisites] needs-tool: tool installed", text)
+
+        existing = self.scratch / "preinstalled.txt"
+        existing.write_text("x")
+        os.environ["PREREQ_TOOL"] = str(existing)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), engine_prerequisites.on_host("needs-tool"):
+            pass
+        text = out.getvalue()
+        self.assertIn("tool satisfied by the environment", text)
+        self.assertNotIn("installed", text)
+
+    def test_a_prerequisite_already_present_is_used_as_is(self) -> None:
+        existing = self.scratch / "preinstalled.txt"
+        existing.write_text("x")
+        os.environ["PREREQ_TOOL"] = str(existing)
+        self.skill("needs-tool", _machine(_tool()))
+        self.run_cases("needs-tool")
+        self.assertEqual(self.install_count(), 0)
+        [agent] = self.seen()
+        self.assertEqual(agent["env"]["PREREQ_TOOL"], str(existing))
+
+    def test_a_prerequisite_that_cannot_be_installed_fails_only_its_skill(self) -> None:
+        # Output full of what a provider outage looks like, as build logs are.
+        self.skill("broken", _machine(_tool(install=[_PY, "-c", (
+            "import sys; print('no compiler here: upstream 502 gateway timeout'); "
+            "sys.exit(3)"
+        )])))
+        self.skill("fine")
+        outcomes = {o.skill: o for o in self.run_cases("broken", "fine")}
+        self.assertFalse(outcomes["broken"].passed)
+        self.assertTrue(outcomes["broken"].error.startswith("broken: "), outcomes["broken"].error)
+        self.assertIn("install exited 3", outcomes["broken"].error)
+        self.assertIn("no compiler here", outcomes["broken"].error)
+        self.assertFalse(outcomes["fine"].error)
+        # A build log is not a provider outage, whatever words it contains.
+        self.assertFalse(outcomes["broken"].degraded)
+        # Only the skill that ran reached an agent.
+        self.assertEqual([a["prompt"] for a in self.seen()], ["work for fine 0"])
+
+    def test_the_host_runs_the_command_for_its_own_platform(self) -> None:
+        # The host is told it is Windows and only Windows commands exist, so
+        # the run passes only if the host's platform is what selects them.
+        self.skill("keyed", _machine(_tool(
+            check={"windows": [_PY, "-c", _CHECK_TOOL]},
+            install={"windows": [_PY, "-c", _INSTALL_TOOL]},
+        )))
+        with mock.patch.object(engine_prerequisites, "host_platform", lambda: "windows"):
+            [outcome] = self.run_cases("keyed")
+        self.assertFalse(outcome.error)
+        self.assertEqual(self.install_count(), 1)
+
+    def test_the_watchdogs_hard_exit_kills_a_running_install_and_its_children(self) -> None:
+        # `os._exit` reaches neither the step's own kill nor any `finally`, so
+        # the watchdog's callback is all that stops what the install started.
+        self.assertIn(engine_prerequisites._on_expire, deadline._expire_callbacks)
+        pids_file = self.scratch / "pids"
+        script = (
+            "import subprocess, sys, time; "
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+            f"open({str(pids_file)!r}, 'w').write(f'{{child.pid}}'); "
+            "time.sleep(60)"
+        )
+        run = engine_prerequisites._host_runner(self.scratch)
+        worker = threading.Thread(
+            target=lambda: asyncio.run(run([_PY, "-c", script], {})), daemon=True)
+        worker.start()
+        for _ in range(100):
+            if pids_file.exists() and pids_file.read_text():
+                break
+            time.sleep(0.1)
+        [step] = list(engine_prerequisites._live_steps)
+        child = int(pids_file.read_text())
+        # The flag stays set: the process is about to exit. This one is not.
+        self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
+        engine_prerequisites._on_expire()
+        worker.join(timeout=10)
+        for pid in (step, child):
+            for _ in range(50):
+                if not _alive(pid):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(_alive(pid), f"process {pid} outlived the hard exit")
+        self.assertEqual(engine_prerequisites._live_steps, set())
+
+    def test_a_step_that_appears_after_the_snapshot_is_killed_too(self) -> None:
+        # The pid is known only once the process exists. If the watchdog has
+        # already snapped the set, the spawner has to kill it: os._exit will not.
+        self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
+        engine_prerequisites._steps_closed = True
+        run = engine_prerequisites._host_runner(self.scratch)
+        code, _ = asyncio.run(asyncio.wait_for(
+            run([_PY, "-c", "import time; time.sleep(30)"], {}),
+            5,
+        ))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(engine_prerequisites._live_steps, set())
+
+    def test_steps_run_beside_machine_yml(self) -> None:
+        # The documented form: a script named by its path relative to the file.
+        folder = self.repo.skill("scripted", dataset=tier0_dataset("scripted"),
+                                 machine=_machine(_tool(install=[_PY, "install.py"])))
+        (folder / "evals" / "install.py").write_text(
+            "import os, pathlib\n"
+            "pathlib.Path(os.environ['SKILL_CACHE_DIR'], 'tool.txt').write_text('x')\n"
+            "open(os.environ['SS_TEST_INSTALL_LOG'], 'a').write('installed\\n')\n",
+            encoding="utf-8",
+        )
+        [outcome] = self.run_cases("scripted")
+        self.assertFalse(outcome.error)
+        self.assertEqual(self.install_count(), 1)
+
+    def test_what_a_failing_step_says_on_stderr_reaches_the_report(self) -> None:
+        self.skill("noisy", _machine(_tool(install=[_PY, "-c", (
+            "import sys; sys.stderr.write('fatal: STDERR-MARK\\n'); sys.exit(2)"
+        )])))
+        [outcome] = self.run_cases("noisy")
+        self.assertIn("STDERR-MARK", outcome.error)
+
+    def test_a_skill_without_prerequisites_resolves_and_creates_nothing(self) -> None:
+        self.skill("plain")
+        before = set(engine_prerequisites._created_caches)
+        with mock.patch.object(engine_prerequisites.sources, "resolve") as resolve, \
+                mock.patch.object(engine_prerequisites.tempfile, "mkdtemp") as mkdtemp:
+            with engine_prerequisites.on_host("plain") as env:
+                self.assertEqual(env, {})
+        resolve.assert_not_called()
+        mkdtemp.assert_not_called()
+        self.assertEqual(set(engine_prerequisites._created_caches), before)
+
+    def test_the_model_and_effort_reach_the_agent_with_the_env(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        self.run_cases("needs-tool", model="opus", effort="low")
+        [agent] = self.seen()
+        argv = agent["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+        self.assertEqual(argv[argv.index("--effort") + 1], "low")
+        self.assertTrue(agent["env"].get("PREREQ_TOOL"))
+
+    def test_steps_are_given_the_skill_source_tree(self) -> None:
+        # Resolved as `sources.resolve` would: here, the git checkout the skill
+        # sits in. Not via $SKILL_SOURCE_DIR, which a step would inherit from
+        # this process anyway and so could not tell the two apart.
+        os.environ.pop("SKILL_SOURCE_DIR", None)
+        subprocess.run(["git", "init", "-q", str(self.repo.root)], check=True)
+        tree = self.repo.root
+        self.skill("needs-tool", _machine(_tool(install=[_PY, "-c", (
+            "import os, pathlib; "
+            "pathlib.Path(os.environ['SKILL_CACHE_DIR'], 'tool.txt').write_text('x'); "
+            "open(os.environ['SS_TEST_INSTALL_LOG'], 'a')"
+            ".write(os.environ['SKILL_SOURCE_DIR'] + '\\n')"
+        )])))
+        self.run_cases("needs-tool")
+        self.assertEqual(self.installs.read_text().strip(), str(tree.resolve()))
+
+    def test_an_env_value_can_name_the_source_tree(self) -> None:
+        os.environ.pop("SKILL_SOURCE_DIR", None)
+        subprocess.run(["git", "init", "-q", str(self.repo.root)], check=True)
+        self.skill("needs-tool", _machine(_tool(env={
+            "PREREQ_TOOL": "${SKILL_CACHE_DIR}/tool.txt",
+            "PREREQ_SRC": "${SKILL_SOURCE_DIR}/sub",
+        })))
+        self.run_cases("needs-tool")
+        [agent] = self.seen()
+        # Compared as a path: on Windows the `/` written in the declaration
+        # sits beside the `\\` of the expanded directory, and both are valid.
+        self.assertEqual(Path(agent["env"]["PREREQ_SRC"]), self.repo.root / "sub")
+
+    def test_a_finished_step_is_no_longer_the_watchdogs_to_kill(self) -> None:
+        # A pid left behind could later be signalled after the OS reused it.
+        self.skill("needs-tool", _machine(_tool()))
+        self.run_cases("needs-tool")
+        self.assertEqual(engine_prerequisites._live_steps, set())
+
+    def test_a_declaration_that_does_not_parse_fails_only_its_skill(self) -> None:
+        # Named so its path carries words a provider outage is recognised by.
+        self.skill("upstream-gateway", json.dumps({"prerequisites": [5]}))
+        self.skill("broken-yaml", "prerequisites: [unclosed\n")
+        self.skill("fine")
+        outcomes = {o.skill: o for o in self.run_cases("upstream-gateway", "broken-yaml", "fine")}
+        self.assertIn("must be a mapping", outcomes["upstream-gateway"].error)
+        self.assertFalse(outcomes["upstream-gateway"].degraded)
+        self.assertIn("is not valid YAML", outcomes["broken-yaml"].error)
+        self.assertFalse(outcomes["fine"].error)
+
+    def test_a_failed_install_leaves_no_cache_behind(self) -> None:
+        made = []
+        real = tempfile.mkdtemp
+
+        def recording(*a, **k):
+            made.append(real(*a, **k))
+            return made[-1]
+
+        self.skill("broken", _machine(_tool(install=[_PY, "-c", "import sys; sys.exit(1)"])))
+        with mock.patch.object(engine_prerequisites.tempfile, "mkdtemp", recording):
+            self.run_cases("broken")
+        [cache] = [m for m in made if "skillscope-prerequisites" in m]
+        self.assertFalse(Path(cache).exists())
+
+    def test_the_declared_env_wins_over_a_stale_value(self) -> None:
+        # The runner's own PREREQ_TOOL names nothing, so `check` fails and the
+        # install runs; the agent must then see what the install provided.
+        os.environ["PREREQ_TOOL"] = str(self.scratch / "nothing-here")
+        self.skill("needs-tool", _machine(_tool()))
+        self.run_cases("needs-tool")
+        [agent] = self.seen()
+        self.assertNotEqual(agent["env"]["PREREQ_TOOL"], str(self.scratch / "nothing-here"))
+        self.assertTrue(agent["exists"]["PREREQ_TOOL"])
+
+    def test_output_that_is_not_text_is_still_reported(self) -> None:
+        self.skill("binary", _machine(_tool(install=[_PY, "-c", (
+            "import sys; sys.stdout.buffer.write(b'bad \\xff byte'); sys.exit(1)"
+        )])))
+        [outcome] = self.run_cases("binary")
+        self.assertIn("bad \ufffd byte", outcome.error)
+
+    def test_an_install_that_cannot_start_says_so(self) -> None:
+        self.skill("absent", _machine(_tool(install=["no-such-installer-xyz"])))
+        [outcome] = self.run_cases("absent")
+        self.assertIn("install exited 127", outcome.error)
+        self.assertIn("no-such-installer-xyz", outcome.error)
+
+    def test_a_source_tree_that_cannot_be_fetched_fails_only_what_needs_it(self) -> None:
+        # A vendored skill's fetch raises `RuntimeError`, not `SystemExit`. A
+        # skill whose prerequisites never use the tree must run regardless.
+        self.skill("needs-tool", _machine(_tool()))
+        with mock.patch.object(
+            engine_prerequisites.sources, "resolve",
+            side_effect=RuntimeError("git fetch failed"),
+        ):
+            [outcome] = self.run_cases("needs-tool")
+        self.assertFalse(outcome.error)
+        self.assertEqual(self.install_count(), 1)
+
+    def test_the_watchdog_takes_the_host_caches_with_it(self) -> None:
+        # The `--timeout` hard exit skips the `finally` that removes the cache,
+        # so the cache a real install made must be where the watchdog looks.
+        self.skill("needs-tool", _machine(_tool()))
+        self.assertIn(engine_prerequisites._on_expire, deadline._expire_callbacks)
+        with contextlib.redirect_stdout(io.StringIO()), \
+                engine_prerequisites.on_host("needs-tool") as env:
+            cache = Path(env["PREREQ_TOOL"]).parent
+            self.assertIn(str(cache), engine_prerequisites._created_caches)
+            self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
+            engine_prerequisites._on_expire()
+            self.assertFalse(cache.exists())
+
+    def test_a_finished_skill_leaves_nothing_for_the_watchdog(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        with contextlib.redirect_stdout(io.StringIO()), \
+                engine_prerequisites.on_host("needs-tool") as env:
+            cache = Path(env["PREREQ_TOOL"]).parent
+        self.assertFalse(cache.exists())
+        self.assertNotIn(str(cache), engine_prerequisites._created_caches)
+
+    def test_an_input_this_run_could_not_resolve_is_unset_and_explained(self) -> None:
+        # The runner's own $SKILL_SOURCE_DIR names nothing, so resolution fails.
+        # A step must then see the input unset, not the stale value, and a
+        # failure must say why it was unset.
+        os.environ["SKILL_SOURCE_DIR"] = str(self.scratch / "no-such-tree")
+        self.addCleanup(os.environ.pop, "SKILL_SOURCE_DIR", None)
+        self.skill("needs-source", _machine(_tool(install=[_PY, "-c", (
+            "import os, sys; "
+            "open(os.environ['SS_TEST_INSTALL_LOG'], 'a')"
+            ".write(os.environ.get('SKILL_SOURCE_DIR', 'unset') + '\\n'); "
+            "print('MISSING-TREE'); sys.exit(1)"
+        )])))
+        [outcome] = self.run_cases("needs-source")
+        self.assertEqual(self.installs.read_text().strip(), "unset")
+        # The step's own words before the explanation, so a summary that keeps
+        # only the start of the error still shows what the step said.
+        self.assertIn("install exited 1: MISSING-TREE", outcome.error)
+        self.assertIn("SKILL_SOURCE_DIR was not available", outcome.error)
+
+    def test_a_stop_during_an_install_fails_the_skill_and_keeps_the_report(self) -> None:
+        # The deadline's graceful stage interrupts the main thread. Landing in
+        # a host install -- the slowest thing a run does outside inspect -- it
+        # must end the install promptly and fail that skill, not escape `run`
+        # and take every earlier skill's result with it.
+        self.skill("graded")
+        # The install starts a child of its own, as a build script does; the
+        # stop has to reach that too.
+        self.skill("slow", _machine(_tool(install=[_PY, "-c", (
+            "import os, subprocess, sys, time; "
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+            "open(os.environ['SS_TEST_INSTALL_LOG'], 'a')"
+            ".write(f'{os.getpid()} {child.pid}\\n'); "
+            "time.sleep(60)"
+        )])))
+        bound = deadline.Deadline(600.0, command="behavioral")
+        previous = deadline.use(bound)
+        self.addCleanup(deadline.use, previous)
+
+        # Fired once the install has started, not on a clock: the stop has to
+        # land in the install, and the skill before it takes as long as it takes.
+        def stop_once_installing() -> None:
+            for _ in range(600):
+                if self.installs.exists() and len(self.installs.read_text().split()) == 2:
+                    bound.interrupted = True
+                    deadline._interrupt_main()
+                    return
+                time.sleep(0.1)
+
+        threading.Thread(target=stop_once_installing, daemon=True).start()
+        started = time.monotonic()
+        try:
+            outcomes = {o.skill: o for o in self.run_cases("graded", "slow")}
+        except KeyboardInterrupt:
+            self.fail("the stop escaped the run and lost the report")
+        self.assertLess(time.monotonic() - started, 30, "the install was not stopped")
+        self.assertFalse(outcomes["graded"].error)
+        self.assertIn("exceeded --timeout", outcomes["slow"].error)
+        # Stopped, not abandoned: the install and what it started are gone.
+        for pid in map(int, self.installs.read_text().split()):
+            for _ in range(50):
+                if not _alive(pid):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(_alive(pid), f"process {pid} outlived the stop")
+
+    def test_a_person_pressing_ctrl_c_still_stops_the_command(self) -> None:
+        # Only the deadline's stop is turned into a failed skill.
+        self.skill("needs-tool", _machine(_tool()))
+        with mock.patch.object(
+            engine_prerequisites, "provide", side_effect=KeyboardInterrupt
+        ), self.assertRaises(KeyboardInterrupt):
+            self.run_cases("needs-tool")
+
+    def test_nothing_a_skill_installs_reaches_the_next_one(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        self.skill("plain")
+        self.run_cases("needs-tool", "plain")
+        first, second = self.seen()
+        self.assertIn("needs-tool", first["prompt"])
+        self.assertEqual(second["env"], {})
+        self.assertNotIn("PREREQ_TOOL", os.environ)
+        # Its scratch space went with it.
+        self.assertFalse(Path(first["env"]["PREREQ_TOOL"]).exists())
+
+
+class TestPrerequisitesInAContainer(unittest.TestCase):
+    """The `claude-code` leg's solver, against a recording stand-in sandbox."""
+
+    class _Box:
+        def __init__(self, present: bool, install_fails=False, mkdir_fails=False) -> None:
+            self.present = present
+            self.install_fails = install_fails
+            self.mkdir_fails = mkdir_fails
+            self.calls: list[tuple] = []
+            self.files: dict[str, bytes] = {}
+
+        async def exec(self, argv, cwd=None, env=None):
+            self.calls.append((list(argv), cwd, dict(env or {})))
+            code = 0
+            if argv[0] == "mkdir" and self.mkdir_fails:
+                code = 1
+            elif argv[0] == _PY and argv[2] == _CHECK_TOOL:
+                code = 0 if self.present else 1
+                if (env or {}).get("PREREQ_TOOL"):
+                    code = 0  # after install
+            elif argv[0] == _PY and self.install_fails:
+                code = 4
+            return types.SimpleNamespace(
+                returncode=code, success=code == 0, stdout="", stderr="denied"
+            )
+
+        async def write_file(self, path, contents):
+            self.files[path] = contents
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.activate()
+
+    def run_solver(self, machine: str, present: bool = False, files=None, box=None):
+        folder = self.repo.skill("boxed", dataset=tier0_dataset("boxed"), machine=machine)
+        for name, text in (files or {}).items():
+            (folder / "evals" / name).write_text(text, encoding="utf-8")
+        box = box or self._Box(present)
+        self.box = box
+        built: list[dict] = []
+
+        def make_agent(env):
+            built.append(env)
+
+            async def agent(state, generate):
+                box.calls.append((["AGENT"], None, {}))
+                return state
+
+            return agent
+
+        with mock.patch("inspect_ai.util.sandbox", lambda *a, **k: box), \
+                mock.patch("inspect_ai.agent.as_solver", lambda a: a):
+            solver = engine_prerequisites.claude_code_agent("boxed", make_agent)
+            asyncio.run(solver(object(), None))
+        return box, built
+
+    def test_a_skill_with_none_gets_the_agent_it_always_had(self) -> None:
+        self.repo.skill("bare", dataset=tier0_dataset("bare"))
+        self.assertIsNone(engine_prerequisites.claude_code_agent("bare", lambda env: None))
+
+    def test_the_log_names_the_branch_in_the_container_too(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_solver(_machine(_tool()))
+        self.assertIn("[prerequisites] boxed: tool installed", out.getvalue())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_solver(_machine(_tool()), present=True)
+        text = out.getvalue()
+        self.assertIn("tool satisfied by the environment", text)
+        self.assertNotIn("installed", text)
+
+    def test_the_same_declaration_prepares_the_container_before_the_agent(self) -> None:
+        box, [env] = self.run_solver(_machine(_tool()))
+        steps = [argv for argv, _, _ in box.calls if argv[0] == _PY]
+        self.assertEqual(len(steps), 3)  # check, install, check
+        self.assertEqual(env, {"PREREQ_TOOL": f"{engine_prerequisites.CONTAINER_CACHE}/tool.txt"})
+        # The steps directory is gone before the agent starts, and it starts.
+        self.assertEqual(box.calls[-2][0][:2], ["rm", "-rf"])
+        self.assertEqual(box.calls[-1][0], ["AGENT"])
+
+    def test_steps_run_where_their_files_were_copied(self) -> None:
+        box, _ = self.run_solver(_machine(_tool()))
+        for argv, cwd, _ in box.calls:
+            if argv[0] == _PY:
+                self.assertEqual(cwd, engine_prerequisites.CONTAINER_STEPS)
+
+    def test_a_failed_install_still_removes_the_copied_steps(self) -> None:
+        # The files copied out of evals/ must not outlive the step, and a case
+        # whose install failed is exactly the one nobody looks at afterwards.
+        with self.assertRaises(engine_prerequisites.PrerequisiteError):
+            self.run_solver(_machine(_tool()), box=self._Box(False, install_fails=True))
+        self.assertEqual(self.box.calls[-1][0][:2], ["rm", "-rf"])
+
+    def test_what_a_failing_container_step_says_on_stderr_is_kept(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool()), box=self._Box(False, install_fails=True))
+        message = str(raised.exception)
+        # The step's own words first, where a summary that keeps only the
+        # start of an error will still show them; no note about an input the
+        # step never mentioned.
+        self.assertTrue(message.startswith("prerequisite `tool`: install exited 4: denied"), message)
+        self.assertNotIn("SKILL_SOURCE_DIR", message)
+
+    def test_what_a_failing_container_step_says_on_stdout_is_kept(self) -> None:
+        class Chatty(self._Box):
+            async def exec(self, argv, cwd=None, env=None):
+                result = await super().exec(argv, cwd, env)
+                if argv[0] == _PY and argv[2] != _CHECK_TOOL:
+                    result.stdout, result.stderr = "make: *** [all] Error 2", ""
+                return result
+
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool()), box=Chatty(False, install_fails=True))
+        self.assertIn("make: *** [all] Error 2", str(raised.exception))
+
+    def test_copied_steps_that_cannot_be_removed_keep_the_agent_from_starting(self) -> None:
+        class Sticky(self._Box):
+            async def exec(self, argv, cwd=None, env=None):
+                result = await super().exec(argv, cwd, env)
+                if argv[:2] == ["rm", "-rf"]:
+                    result.returncode, result.success = 1, False
+                return result
+
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool()), box=Sticky(False))
+        self.assertIn("could not remove", str(raised.exception))
+        self.assertNotIn(["AGENT"], [c[0] for c in self.box.calls])
+
+    def test_a_cancelled_step_still_removes_the_copied_files(self) -> None:
+        class Cancelled(self._Box):
+            async def exec(self, argv, cwd=None, env=None):
+                if argv[0] == _PY and argv[2] != _CHECK_TOOL:
+                    self.calls.append((list(argv), cwd, dict(env or {})))
+                    raise asyncio.CancelledError()
+                return await super().exec(argv, cwd, env)
+
+        with self.assertRaises(asyncio.CancelledError):
+            self.run_solver(_machine(_tool()), box=Cancelled(False))
+        self.assertEqual(self.box.calls[-1][0][:2], ["rm", "-rf"])
+
+    def test_each_kind_of_exec_failure_names_the_prerequisite(self) -> None:
+        for error in (OSError("container gone"),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")):
+            class Failing(self._Box):
+                async def exec(self, argv, cwd=None, env=None, _error=error):
+                    if argv[0] == _PY and argv[2] != _CHECK_TOOL:
+                        raise _error
+                    return await super().exec(argv, cwd, env)
+
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+                    self.run_solver(_machine(_tool()), box=Failing(False))
+                self.assertIn("prerequisite `tool`", str(raised.exception))
+                self.assertIn(type(error).__name__, str(raised.exception))
+
+    def test_the_container_paths_are_the_documented_ones(self) -> None:
+        # Images bake an install in at these paths, so they are a contract.
+        self.assertEqual(engine_prerequisites.CONTAINER_ROOT, "/opt/skillscope")
+        self.assertEqual(engine_prerequisites.CONTAINER_CACHE, "/opt/skillscope/cache")
+        box, _ = self.run_solver(_machine(_tool()))
+        [mkdir] = [argv for argv, _, _ in box.calls if argv[0] == "mkdir"]
+        self.assertIn("/opt/skillscope/cache", mkdir)
+        self.assertIn(engine_prerequisites.CONTAINER_STEPS, mkdir)
+
+    def test_a_container_cannot_supply_the_source_tree(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool(env={"SRC": "${SKILL_SOURCE_DIR}/x"})))
+        self.assertIn("no copy of the skill's source tree", str(raised.exception))
+
+    def test_a_container_that_cannot_hold_the_inputs_says_so(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool()), box=self._Box(False, mkdir_fails=True))
+        self.assertIn(engine_prerequisites.CONTAINER_ROOT, str(raised.exception))
+        self.assertFalse([c for c in self.box.calls if c[0][0] == _PY])
+
+    def test_present_in_the_image_means_no_install_and_no_env(self) -> None:
+        box, [env] = self.run_solver(_machine(_tool()), present=True)
+        self.assertEqual(env, {})
+        self.assertEqual(len([c for c in box.calls if c[0][0] == _PY]), 1)
+
+    def test_files_named_by_either_step_arrive_at_their_relative_paths(self) -> None:
+        # A container counts as linux, so a linux-keyed map is what applies.
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"),
+            machine=_machine(_tool(check={"linux": ["sh", "tools/check.sh"]},
+                                   install={"linux": ["sh", "install.sh"]})),
+        )
+        (folder / "evals" / "tools").mkdir()
+        (folder / "evals" / "tools" / "check.sh").write_text("true\n", encoding="utf-8")
+        (folder / "evals" / "install.sh").write_text("true\n", encoding="utf-8")
+        box, _ = self.run_solver(_machine(_tool(check={"linux": ["sh", "tools/check.sh"]},
+                                                install={"linux": ["sh", "install.sh"]})))
+        steps = engine_prerequisites.CONTAINER_STEPS
+        self.assertEqual(set(box.files), {f"{steps}/tools/check.sh", f"{steps}/install.sh"})
+
+    def test_a_sandbox_error_in_a_step_names_the_prerequisite(self) -> None:
+        from inspect_ai.util import OutputLimitExceededError
+
+        class Flooding(self._Box):
+            async def exec(self, argv, cwd=None, env=None):
+                if argv[0] == _PY and argv[2] != _CHECK_TOOL:
+                    raise OutputLimitExceededError(limit_str="10 MiB", truncated_output=None)
+                return await super().exec(argv, cwd, env)
+
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool()), box=Flooding(False))
+        self.assertIn("prerequisite `tool`", str(raised.exception))
+        self.assertIn("OutputLimitExceededError", str(raised.exception))
+
+    def test_only_the_files_a_step_names_are_copied_in(self) -> None:
+        box, _ = self.run_solver(
+            _machine(_tool(install=["sh", "install.sh"])),
+            files={"install.sh": "echo hi\n", "notes.txt": "private\n"},
+        )
+        self.assertEqual(
+            list(box.files), [f"{engine_prerequisites.CONTAINER_STEPS}/install.sh"]
+        )
+
+    def test_an_inline_script_is_not_mistaken_for_a_file(self) -> None:
+        # The body of `sh -c` is probed as a path like any other argv item, and
+        # one longer than a file name may be must not stop the run.
+        box, [env] = self.run_solver(_machine(_tool(install=["sh", "-c", "x" * 400])))
+        self.assertEqual(box.files, {})
+
+    def test_the_extended_answer_key_is_refused_too(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool(install=["cat", "extended_evals.json"])),
+                            files={"extended_evals.json": "{}"})
+        self.assertIn("answer key", str(raised.exception))
+
+    def test_a_failed_install_in_a_container_is_not_a_provider_outage(self) -> None:
+        # Through a real `eval()`: the failure is raised inside a case, and the
+        # outcome is built from what inspect recorded about it.
+        from inspect_ai import Task, eval as inspect_eval
+        from inspect_ai.dataset import Sample
+        from inspect_ai.solver import solver
+
+        def task(error):
+            @solver
+            def failing():
+                async def solve(state, generate):
+                    raise error
+                return solve
+            return Task(dataset=[Sample(id="c1", input="p")], solver=failing())
+
+        logs_dir = tempfile.mkdtemp(prefix="ss-prereq-log-")
+        self.addCleanup(shutil.rmtree, logs_dir, True)
+        case = datasets.Case(id="c1", skill="boxed", prompt="p", skill_should_trigger=True)
+        results = {}
+        for name, error in [
+            ("prerequisite", engine_prerequisites.PrerequisiteError(
+                "install exited 1.\nupstream 502 gateway timeout")),
+            ("outage", RuntimeError("upstream 502 gateway timeout")),
+        ]:
+            with contextlib.redirect_stdout(io.StringIO()):
+                [log] = inspect_eval(task(error), model="mockllm/model",
+                                     fail_on_error=False, display="none",
+                                     log_dir=logs_dir)
+            [results[name]] = engine_behavioral._outcomes(log, "boxed", [case])
+        self.assertIn("502", results["prerequisite"].error)
+        # Reported as its message, not as `PrerequisiteError('...\\n...')`.
+        self.assertTrue(results["prerequisite"].error.startswith("install exited 1."),
+                        results["prerequisite"].error)
+        self.assertFalse(results["prerequisite"].degraded)
+        self.assertTrue(results["outage"].degraded)  # the heuristic still works
+
+    def test_another_name_for_the_answer_key_is_still_refused(self) -> None:
+        # `resolve()` keeps the case you typed, so path equality misses
+        # `EVALS.JSON` on a case-insensitive volume. A hard link is the same
+        # situation on every filesystem: two paths, one file.
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"),
+            machine=_machine(_tool(install=["cat", "evals-link.json"])),
+        )
+        os.link(folder / "evals" / "evals.json", folder / "evals" / "evals-link.json")
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            engine_prerequisites._named_files(
+                "boxed", datasets.machine_prerequisites("boxed")
+            )
+        self.assertIn("answer key", str(raised.exception))
+
+    def test_a_file_outside_evals_is_not_copied(self) -> None:
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"),
+            machine=_machine(_tool(install=["sh", "../secret.txt"])),
+        )
+        (folder / "secret.txt").write_text("nope\n", encoding="utf-8")
+        named = engine_prerequisites._named_files(
+            "boxed", datasets.machine_prerequisites("boxed")
+        )
+        self.assertEqual(named, {})
+
+    def test_a_step_naming_the_answer_key_is_refused(self) -> None:
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            self.run_solver(_machine(_tool(install=["cat", "evals.json"])))
+        self.assertIn("answer key", str(raised.exception))
+
+    def test_the_sandboxed_task_runs_its_agent_through_the_prerequisites(self) -> None:
+        # The call site in `verify.build_task`: the solver above is only worth
+        # anything if the task it builds is the one that uses it, and the agent
+        # it is handed is the real Claude Code agent built with the env.
+        self.repo.skill("boxed", dataset=tier0_dataset("boxed"), machine=_machine(_tool()))
+        from inspect_ai.solver import solver
+
+        @solver
+        def noop():
+            async def solve(state, generate):
+                return state
+
+            return solve
+
+        seen: dict = {}
+
+        def fake(skill, make_agent):
+            seen["skill"] = skill
+            seen["agent"] = make_agent({"PREREQ_TOOL": "/x"})
+            return noop()
+
+        with mock.patch.object(engine_prerequisites, "claude_code_agent", fake), \
+                _fake_inspect_swe(lambda **kw: kw):
+            engine_verify.build_task(
+                "boxed",
+                [datasets.Case(id="b1", skill="boxed", prompt="p",
+                               skill_should_trigger=True, logs_contain=["x"])],
+                "mockllm/model",
+                effort="high",
+            )
+        self.assertEqual(seen["skill"], "boxed")
+        self.assertEqual(seen["agent"]["env"], {"PREREQ_TOOL": "/x"})
+        self.assertEqual(seen["agent"]["effort"], "high")
+        self.assertEqual(seen["agent"]["skills"], [datasets.skill_path("boxed")])
+        self.assertEqual(seen["agent"]["cwd"], engine_tools.workdir_path())
+
+    def test_a_skill_without_prerequisites_gets_the_agent_as_before(self) -> None:
+        self.repo.skill("bare", dataset=tier0_dataset("bare"))
+        built = []
+
+        def claude_code(**kwargs):
+            built.append(kwargs)
+            return _noop_solver()
+
+        with _fake_inspect_swe(claude_code):
+            engine_verify.build_task(
+                "bare",
+                [datasets.Case(id="b1", skill="bare", prompt="p",
+                               skill_should_trigger=True, logs_contain=["x"])],
+                "mockllm/model",
+            )
+        [kwargs] = built
+        self.assertIsNone(kwargs["env"])
+        self.assertEqual(kwargs["skills"], [datasets.skill_path("bare")])
+        self.assertEqual(kwargs["cwd"], engine_tools.workdir_path())
+
+    def test_the_sandboxed_run_keeps_one_failure_to_its_case_or_skill(self) -> None:
+        # A declaration the engine refuses fails its skill and the next skill
+        # still runs; and inspect is told not to end a task on one case's error.
+        self.repo.skill("bad", dataset=tier0_dataset("bad"))
+        self.repo.skill("good", dataset=tier0_dataset("good"))
+        cases = [datasets.Case(id=f"{s}-1", skill=s, prompt="p",
+                               skill_should_trigger=True, logs_contain=["x"])
+                 for s in ("bad", "good")]
+        calls = []
+
+        def build_task(skill, *a, **k):
+            if skill == "bad":
+                # Words a provider outage is recognised by, as build output has.
+                raise engine_prerequisites.PrerequisiteError(
+                    "names the answer key; upstream 502 gateway timeout")
+            return "task"
+
+        def run_eval(inspect_eval, task, **kwargs):
+            calls.append(kwargs)
+            return []
+
+        with mock.patch.object(engine_verify, "require"), \
+                mock.patch.object(engine_sandbox, "require_provider"), \
+                mock.patch.object(engine_verify, "build_task", build_task), \
+                mock.patch.object(engine_behavioral, "run_eval", run_eval), \
+                contextlib.redirect_stdout(io.StringIO()):
+            outcomes = engine_verify.run(["bad", "good"], cases, "mockllm/model", "high")
+        bad = [o for o in outcomes if o.skill == "bad"]
+        self.assertTrue(bad and bad[0].error.startswith("bad: "), bad)
+        self.assertTrue("answer key" in bad[0].error)
+        self.assertFalse(bad[0].degraded)
+        [good_call] = calls
+        self.assertIs(good_call["fail_on_error"], False)
+
+    def test_a_malformed_declaration_fails_only_its_skill_in_the_sandbox(self) -> None:
+        # Named so its path carries words a provider outage is recognised by.
+        self.repo.skill("upstream-gateway", dataset=tier0_dataset("bad"),
+                        machine=json.dumps({"prerequisites": [5]}))
+        self.repo.skill("good", dataset=tier0_dataset("good"))
+        cases = [datasets.Case(id=f"{s}-1", skill=s, prompt="p",
+                               skill_should_trigger=True, logs_contain=["x"])
+                 for s in ("upstream-gateway", "good")]
+        ran = []
+        with mock.patch.object(engine_verify, "require"), \
+                mock.patch.object(engine_sandbox, "require_provider"), \
+                mock.patch.object(engine_behavioral, "run_eval",
+                                  lambda e, task, **k: (ran.append(task.name), [])[1]), \
+                _fake_inspect_swe(lambda **kw: _noop_solver()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            outcomes = engine_verify.run(
+                ["upstream-gateway", "good"], cases, "mockllm/model", "high")
+        [bad] = [o for o in outcomes if o.skill == "upstream-gateway"]
+        self.assertIn("must be a mapping", bad.error)
+        self.assertFalse(bad.degraded)
+        self.assertEqual(ran, ["claude-code-good"])
 
 
 if __name__ == "__main__":
