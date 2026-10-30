@@ -62,7 +62,7 @@ verify = ["skillscope[inspect]", "inspect-swe>=0.2.71"]
 skillscope = "skillscope.cli:main"
 
 [tool.setuptools]
-packages = ["skillscope", "skillscope.engine"]
+packages = ["skillscope", "skillscope.engine", "skillscope.harness"]
 
 [tool.setuptools.package-data]
 skillscope = ["data/*.json", "schema/*.json"]

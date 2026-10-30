@@ -85,6 +85,8 @@ the repo under test — worth adding to `.gitignore`.
 * [docs/authoring-evals.md](docs/authoring-evals.md): writing a skill's tests.
 * [docs/usage.md](docs/usage.md): every flag, every workflow input, and what
   each check actually asserts.
+* [docs/harnesses.md](docs/harnesses.md): what an agent harness is, and how to
+  add one.
 
 ## Development
 

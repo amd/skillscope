@@ -249,18 +249,39 @@ environment gets one matrix, labels and all.
 
 ## Which engine grades a run
 
-`--engine` chooses what actually runs the cases. The dataset, the CLI and the
-reports are identical whichever you pick; only the thing driving the agent
-changes.
+Two choices decide what runs the cases, and they are separate: `--engine` is
+*where* the agent runs, and `--harness` is *which* agent. The dataset and the
+reports are identical whichever you pick.
 
-| `--engine` | What runs | Runs in | Needs |
-| --- | --- | --- | --- |
-| `claude-code-no-sandbox` (default) | The real CLI, under `inspect_ai` | the host | the CLI on `PATH` |
-| `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
+| `--engine` | Where it runs | Needs |
+| --- | --- | --- |
+| `host` (default) | the host, under `inspect_ai` | the harness's CLI on `PATH` |
+| `sandbox` | a container, via `inspect_swe` | `skillscope[verify]`, Linux only, and a harness with a sandboxed leg |
 
-Both drive the agent a skill is written for, so what differs between them
-is **where the agent runs**, not what it is. That is the axis worth choosing
-along: the host measures the machine as it is, with whatever else is installed
+`claude-code-no-sandbox` and `claude-code` are the older spellings of `host` and
+`sandbox`. They name an agent as well as a place, so they mean Claude Code, and
+combining one with a different `--harness` is refused.
+
+| `--harness` | Agent | Sandboxed leg |
+| --- | --- | --- |
+| `claude-code` (default) | Claude Code | yes |
+| `copilot` | GitHub Copilot CLI | no |
+
+`--harness` and `--engine` can also come from `$SKILLSCOPE_HARNESS` and
+`$SKILLSCOPE_ENGINE`. Each harness names models its own way and has its own
+default; `--model opus`, `sonnet` and `haiku` mean the right thing for every
+harness, and CI holds each harness to one model. A report from one harness is its
+own result and is not comparable with another's. How a harness works, and how to
+add one, is in [harnesses.md](harnesses.md).
+
+**`copilot` today runs routing only.** It authenticates from
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`, needs no model credential,
+and in Actions needs `permissions: copilot-requests: write` in the calling
+workflow. `behavioral` is refused on it until the judge that grades its
+expectations is available through the harness. Its preflight sends one real
+prompt, which is billed like any other.
+
+Where the agent runs is the axis worth choosing along: the host measures the machine as it is, with whatever else is installed
 on it, and the sandbox measures the skill alone. When the two disagree, the
 disagreement is usually a fact about one of those environments rather than
 about the skill -- which is a thing one engine on its own cannot tell you.
