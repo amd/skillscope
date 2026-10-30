@@ -169,7 +169,9 @@ prerequisites:
 - **The order is check, then install, then check again.**
   - `check` runs first, without this prerequisite's `env`. If it exits 0, the
     prerequisite is already there: nothing is installed and its `env` is not
-    applied, because whatever provides it already says where it is.
+    applied, because whatever provides it already says where it is. Write
+    `check` so it exits 0 only when the agent would work without this `env`.
+    The log names which were satisfied by the environment and which were installed.
   - Otherwise `install` runs, then `check` runs again with `env` applied. If it
     still fails, the skill's cases are reported as failed, with the step's
     output.
@@ -209,11 +211,13 @@ prerequisites:
     value naming it fails before anything is installed when it is missing.
   - `SKILL_CACHE_DIR` is scratch space for what `install` builds. On the host
     it is removed after the skill's last case. In a container it is
-    `/opt/skillscope/cache`.
+    `/opt/skillscope/cache`. That path is provisional until a skill's image
+    is built against it.
 - **An `env` value replaces the variable, it does not extend it.** No other
-  `$` is expanded, so `PATH: ${SKILL_CACHE_DIR}/bin` would leave the agent with
-  that one directory. Variables the harness sets for the agent
-  (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`) cannot be set here.
+  `$` is expanded. `PATH` cannot be set here: it would replace the agent's
+  search path, and everything the agent starts would see only that value.
+  Variables the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`,
+  `IS_SANDBOX`) cannot be set here either.
 - **Installing once per image instead of once per case.** Under `claude-code`,
   build your `sandbox:` image so that `check` passes in it without this
   prerequisite's `env`: run the same `install` at `SKILL_CACHE_DIR=/opt/skillscope/cache`
