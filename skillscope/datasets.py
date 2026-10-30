@@ -562,7 +562,9 @@ _ENV_INPUT = re.compile(r"\$\{(?:SKILL_SOURCE_DIR|SKILL_CACHE_DIR)\}")
 _RESERVED_ENV = re.compile(
     r"^(?:ANTHROPIC_|CLAUDE_)|^IS_SANDBOX$|^PATH$", re.IGNORECASE
 )
-# A name a process environment can hold on every platform.
+# A name a process environment can hold on every platform. `fullmatch`,
+# because `$` also matches before a trailing newline: `"FOO\n"` would
+# otherwise pass, and the error next to the check says it cannot.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # `machine.yml`'s `os` labels as `COMMAND_PLATFORMS`.
 _OS_PLATFORM = {"linux": "linux", "windows": "windows", "macos": "macos"}
@@ -680,7 +682,7 @@ def _argv(path: Path, where: str, value: object) -> list[str]:
     if (
         not isinstance(value, list)
         or not value
-        or not all(isinstance(item, str) for item in value)
+        or not all(isinstance(item, str) and item for item in value)
         or not value[0].strip()
     ):
         raise SystemExit(
@@ -721,7 +723,7 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
             f"got {value!r}."
         )
     for name, text in value.items():
-        if not _ENV_NAME.match(name) or "\0" in text:
+        if not _ENV_NAME.fullmatch(name) or "\0" in text:
             raise SystemExit(
                 f"error: {path}: `{where}` has an entry that cannot be set in a "
                 f"process environment: {name!r}. Names are letters, digits and "
@@ -760,11 +762,22 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
 def _prerequisite_gaps(
     skill: str, plan: dict, declared: list[Prerequisite]
 ) -> list[str]:
-    """Each platform the skill runs on that a prerequisite has no command for."""
+    """Each platform the skill runs on that a prerequisite has no command for.
+
+    An `os` label that is not a platform is reported too. Skipping it let
+    `os: [Liunx]` satisfy the check without a command for any real platform.
+    """
     gaps: list[str] = []
+    if not declared:
+        return gaps
     for label in plan["os"]:
         platform = _OS_PLATFORM.get(label.lower())
         if platform is None:
+            gaps.append(
+                f"{machine_path(skill)}: `os` names {label!r}, which is not "
+                "linux, windows, or macos. A prerequisite's command for it "
+                "cannot be checked. Use one of those, or drop the label."
+            )
             continue
         for item in declared:
             missing = [

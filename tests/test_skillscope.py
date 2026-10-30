@@ -1133,6 +1133,19 @@ class TestSelection(unittest.TestCase):
             json.loads(plan["default"][0]["runner"]), ["self-hosted", "gpu", "Linux"]
         )
 
+    def test_one_bad_machine_yml_does_not_drop_the_matrix(self) -> None:
+        self.repo.skill("gamma", dataset=self.graded)
+        (self.repo.root / "gamma" / "evals" / "machine.yml").write_text(
+            "os: [\n", encoding="utf-8"
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+        self.assertIn("alpha", [leg["skill"] for leg in plan["default"]])
+        [broken] = [item for item in plan["skipped"] if item["skill"] == "gamma"]
+        self.assertEqual(broken["gate"], "")
+        self.assertIn("not valid YAML", broken["error"])
+        self.assertNotIn("", plan["gates"])
+
 
 class TestWhatABranchChanged(unittest.TestCase):
     """Selection is planned from the merge base, not from the base branch tip.
@@ -6156,6 +6169,9 @@ class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
             (_machine(_tool(env={"A=B": "x"})), "cannot be set in a process environment"),
             (_machine(_tool(env={"1A": "x"})), "cannot be set in a process environment"),
             (_machine(_tool(env={"A": "x\u0000y"})), "cannot be set in a process environment"),
+            # `$` matches before a trailing newline; the name is still illegal.
+            (_machine(_tool(env={"FOO\n": "x"})), "cannot be set in a process environment"),
+            (_machine(_tool(install=["cmd", ""])), "must be a non-empty list of strings"),
             # Two unknown keys of different types: sorting them must not crash.
             ("os: [Linux]\nprerequisites:\n  - {name: t, check: [a], install: [b], 1: x, z: y}\n",
              "unknown key(s): 1, z"),
@@ -6190,12 +6206,17 @@ class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
                 self.assertTrue(
                     any("must be a non-empty list of strings" in e for e in errors), errors)
 
-    def test_an_os_label_with_no_command_platform_is_not_a_gap(self) -> None:
-        # A runner label like `Plan9` is the workflow's business; there is no
-        # command key for it to be missing.
+    def test_an_unrecognised_os_label_is_not_a_silent_skip(self) -> None:
+        # `Liunx` used to be skipped like a custom runner label, so the
+        # command-for-every-platform check never saw it.
         linux_only = _tool(check={"linux": ["c"]}, install={"linux": ["i"]})
-        machine = json.dumps({"os": ["Linux", "Plan9"], "prerequisites": [linux_only]})
-        self.assertEqual(self.errors_for(machine), [])
+        machine = json.dumps({"os": ["Linux", "Liunx"], "prerequisites": [linux_only]})
+        errors = self.errors_for(machine)
+        self.assertTrue(any("Liunx" in e for e in errors), errors)
+
+    def test_an_os_label_without_prerequisites_stays_a_runner_label(self) -> None:
+        # No command to check, so a label the workflow invented is its business.
+        self.assertEqual(self.errors_for(json.dumps({"os": ["Plan9"]})), [])
 
     def test_a_prerequisite_may_not_override_the_inputs(self) -> None:
         for name in datasets.PREREQUISITE_INPUTS:
@@ -6550,6 +6571,8 @@ class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
             time.sleep(0.1)
         [step] = list(engine_prerequisites._live_steps)
         child = int(pids_file.read_text())
+        # The flag stays set: the process is about to exit. This one is not.
+        self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
         engine_prerequisites._on_expire()
         worker.join(timeout=10)
         for pid in (step, child):
@@ -6558,6 +6581,19 @@ class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.assertFalse(_alive(pid), f"process {pid} outlived the hard exit")
+        self.assertEqual(engine_prerequisites._live_steps, set())
+
+    def test_a_step_that_appears_after_the_snapshot_is_killed_too(self) -> None:
+        # The pid is known only once the process exists. If the watchdog has
+        # already snapped the set, the spawner has to kill it: os._exit will not.
+        self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
+        engine_prerequisites._steps_closed = True
+        run = engine_prerequisites._host_runner(self.scratch)
+        code, _ = asyncio.run(asyncio.wait_for(
+            run([_PY, "-c", "import time; time.sleep(30)"], {}),
+            5,
+        ))
+        self.assertNotEqual(code, 0)
         self.assertEqual(engine_prerequisites._live_steps, set())
 
     def test_steps_run_beside_machine_yml(self) -> None:
@@ -6705,6 +6741,7 @@ class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
                 engine_prerequisites.on_host("needs-tool") as env:
             cache = Path(env["PREREQ_TOOL"]).parent
             self.assertIn(str(cache), engine_prerequisites._created_caches)
+            self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
             engine_prerequisites._on_expire()
             self.assertFalse(cache.exists())
 
@@ -7068,6 +7105,32 @@ class TestPrerequisitesInAContainer(unittest.TestCase):
                         results["prerequisite"].error)
         self.assertFalse(results["prerequisite"].degraded)
         self.assertTrue(results["outage"].degraded)  # the heuristic still works
+
+    def test_another_name_for_the_answer_key_is_still_refused(self) -> None:
+        # `resolve()` keeps the case you typed, so path equality misses
+        # `EVALS.JSON` on a case-insensitive volume. A hard link is the same
+        # situation on every filesystem: two paths, one file.
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"),
+            machine=_machine(_tool(install=["cat", "evals-link.json"])),
+        )
+        os.link(folder / "evals" / "evals.json", folder / "evals" / "evals-link.json")
+        with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+            engine_prerequisites._named_files(
+                "boxed", datasets.machine_prerequisites("boxed")
+            )
+        self.assertIn("answer key", str(raised.exception))
+
+    def test_a_file_outside_evals_is_not_copied(self) -> None:
+        folder = self.repo.skill(
+            "boxed", dataset=tier0_dataset("boxed"),
+            machine=_machine(_tool(install=["sh", "../secret.txt"])),
+        )
+        (folder / "secret.txt").write_text("nope\n", encoding="utf-8")
+        named = engine_prerequisites._named_files(
+            "boxed", datasets.machine_prerequisites("boxed")
+        )
+        self.assertEqual(named, {})
 
     def test_a_step_naming_the_answer_key_is_refused(self) -> None:
         with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
