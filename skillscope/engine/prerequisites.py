@@ -17,7 +17,8 @@ and lives in `provide` so it cannot differ between them:
 
 * ``check`` exits 0: the prerequisite is already there. Nothing is installed
   and its ``env`` is not applied -- the environment that provides it already
-  says where it is.
+  says where it is. An author writes ``check`` so that is true only when the
+  agent would work without the ``env``.
 * Otherwise ``install`` runs, then ``check`` again *with* the ``env`` applied,
   because an installed tool is usually only findable through it. Still failing
   is the prerequisite's failure, reported with the step's own output.
@@ -32,7 +33,8 @@ Steps see two inputs, and ``env`` values may name only these:
 * ``SKILL_CACHE_DIR`` -- scratch space for what ``install`` builds. Per skill
   on the host, removed after its cases; a fixed path in each case's container,
   so an image that bakes the same ``install`` in at that path makes ``check``
-  pass and skips the per-case cost.
+  pass and skips the per-case cost. That path is provisional until a skill's
+  image is built against it.
 
 Where each engine runs it:
 
@@ -54,6 +56,7 @@ import signal
 import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from .. import datasets, deadline, sources
@@ -62,7 +65,8 @@ from ..datasets import Prerequisite
 
 # Where a container keeps the inputs. Fixed rather than random so that an image
 # can bake an `install` in at the same `SKILL_CACHE_DIR` and have `check` find
-# it; documented in docs/authoring-evals.md, so changing it breaks those images.
+# it. Provisional until a skill's image is built against it: documented as such
+# in docs/authoring-evals.md, and nothing pins the path yet.
 CONTAINER_ROOT = "/opt/skillscope"
 CONTAINER_CACHE = f"{CONTAINER_ROOT}/cache"
 # Where the files a step names are copied, and removed again before the agent
@@ -121,14 +125,41 @@ def _tail(output: str) -> str:
     return output if len(output) <= OUTPUT_TAIL else "..." + output[-OUTPUT_TAIL:]
 
 
+@dataclass(frozen=True)
+class Provision:
+    """The env the agent needs, and which prerequisites produced it.
+
+    `satisfied` passed `check`, so nothing was installed and none of their
+    `env` was applied. `installed` are the ones this run provided.
+    """
+
+    env: dict[str, str]
+    satisfied: tuple[str, ...]
+    installed: tuple[str, ...]
+
+
+def _provision_line(skill: str, provision: Provision) -> str:
+    """Name each branch `provide` took. The count alone does not."""
+    parts: list[str] = []
+    if provision.satisfied:
+        parts.append(f"{', '.join(provision.satisfied)} satisfied by the environment")
+    if provision.installed:
+        parts.append(f"{', '.join(provision.installed)} installed")
+    return f"[prerequisites] {skill}: {'; '.join(parts)}"
+
+
 async def provide(
     declared: list[Prerequisite],
     inputs: dict[str, str],
     where: str,
     run: Runner,
     unavailable: dict[str, str] | None = None,
-) -> dict[str, str]:
-    """Apply `declared` in order; return the env the agent needs.
+) -> Provision:
+    """Apply `declared` in order.
+
+    The result's `env` is what the agent needs. `satisfied` and `installed`
+    name which prerequisites were already present and which this run provided,
+    because a count alone is the same either way.
 
     `where` is the platform the steps run on, and `run` runs one argv with
     extra environment, returning its exit code and combined output. Each
@@ -137,6 +168,8 @@ async def provide(
     `inputs`, for the error raised if an `env` value names it.
     """
     applied: dict[str, str] = {}
+    satisfied: list[str] = []
+    installed: list[str] = []
     for item in declared:
         check = item.command("check", where)
         install = item.command("install", where)
@@ -147,6 +180,7 @@ async def provide(
         step_env = {**inputs, **applied}
         code, _ = await run(check, step_env)
         if code == 0:
+            satisfied.append(item.name)
             continue
         # Before the install rather than after it: an `env` this engine cannot
         # fill should not cost a full build to discover.
@@ -173,7 +207,8 @@ async def provide(
                 f"(check exited {code}).\n{_tail(output)}"
             )
         applied.update(env)
-    return applied
+        installed.append(item.name)
+    return Provision(applied, tuple(satisfied), tuple(installed))
 
 
 # What the `--timeout` watchdog's hard exit has to clean up, because `os._exit`
@@ -302,7 +337,7 @@ def on_host(skill: str) -> Iterator[dict[str, str]]:
         except (SystemExit, Exception) as exc:
             unavailable["SKILL_SOURCE_DIR"] = str(exc).removeprefix("error: ")
         print(f"[prerequisites] {skill}: {len(declared)} to provide", flush=True)
-        env = asyncio.run(
+        provision = asyncio.run(
             provide(
                 declared,
                 inputs,
@@ -311,7 +346,8 @@ def on_host(skill: str) -> Iterator[dict[str, str]]:
                 unavailable,
             )
         )
-        yield env
+        print(_provision_line(skill, provision), flush=True)
+        yield provision.env
     finally:
         shutil.rmtree(cache, ignore_errors=True)
         _created_caches.discard(str(cache))
@@ -404,7 +440,11 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
                     await box.write_file(
                         f"{CONTAINER_STEPS}/{relative}", path.read_bytes()
                     )
-                env = await provide(
+                print(
+                    f"[prerequisites] {skill}: {len(declared)} to provide",
+                    flush=True,
+                )
+                provision = await provide(
                     declared,
                     {"SKILL_CACHE_DIR": CONTAINER_CACHE},
                     "linux",
@@ -415,6 +455,7 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
                         "image instead."
                     },
                 )
+                print(_provision_line(skill, provision), flush=True)
             except BaseException:
                 # Best effort, and never in place of the error being raised.
                 with contextlib.suppress(Exception):
@@ -427,7 +468,7 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
                     f"could not remove {CONTAINER_STEPS} before the agent "
                     f"starts: {_tail(removed.stderr)}"
                 )
-            return await as_solver(make_agent(env))(state, generate)
+            return await as_solver(make_agent(provision.env))(state, generate)
 
         return solve
 

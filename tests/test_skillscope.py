@@ -6148,7 +6148,10 @@ class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
             (_machine(_tool(env={"ANTHROPIC_BASE_URL": "x"})), "set by the harness"),
             (_machine(_tool(env={"CLAUDE_CONFIG_DIR": "x"})), "set by the harness"),
             (_machine(_tool(env={"IS_SANDBOX": "0"})), "set by the harness"),
-            # Windows environment names are case-insensitive.
+            (_machine(_tool(env={"PATH": "${SKILL_CACHE_DIR}/bin"})), "replaces PATH"),
+            # Windows environment names are case-insensitive, so `Path` is
+            # `PATH` and `anthropic_api_key` is `ANTHROPIC_API_KEY`.
+            (_machine(_tool(env={"Path": "/usr/bin"})), "replaces PATH"),
             (_machine(_tool(env={"anthropic_api_key": "x"})), "set by the harness"),
             (_machine(_tool(env={"A=B": "x"})), "cannot be set in a process environment"),
             (_machine(_tool(env={"1A": "x"})), "cannot be set in a process environment"),
@@ -6244,12 +6247,12 @@ class TestProvidingAPrerequisite(unittest.TestCase):
                 return (0 if recheck_ok else 1), "still missing"
             return (0, "built") if install_ok else (2, "compiler exploded")
 
-        env = asyncio.run(
+        provision = asyncio.run(
             engine_prerequisites.provide(
                 declared, {"SKILL_CACHE_DIR": "/cache"}, "linux", run
             )
         )
-        return env, calls
+        return provision, calls
 
     def declared(self, **env):
         return [datasets.Prerequisite(
@@ -6258,14 +6261,18 @@ class TestProvidingAPrerequisite(unittest.TestCase):
         )]
 
     def test_present_means_nothing_installed_and_no_env(self) -> None:
-        env, calls = self.run_provide(self.declared(), present=True)
-        self.assertEqual(env, {})
+        provision, calls = self.run_provide(self.declared(), present=True)
+        self.assertEqual(provision.env, {})
+        self.assertEqual(provision.satisfied, ("tool",))
+        self.assertEqual(provision.installed, ())
         self.assertEqual([s for s, _ in calls], ["check"])
 
     def test_missing_means_install_then_check_again_with_the_env(self) -> None:
-        env, calls = self.run_provide(self.declared())
+        provision, calls = self.run_provide(self.declared())
         self.assertEqual([s for s, _ in calls], ["check", "install", "check"])
-        self.assertEqual(env, {"TOOL": "/cache/tool"})
+        self.assertEqual(provision.env, {"TOOL": "/cache/tool"})
+        self.assertEqual(provision.installed, ("tool",))
+        self.assertEqual(provision.satisfied, ())
         # The re-check sees the declared env; the steps before it do not.
         self.assertNotIn("TOOL", calls[1][1])
         self.assertEqual(calls[2][1]["TOOL"], "/cache/tool")
@@ -6368,6 +6375,35 @@ class TestProvidingAPrerequisite(unittest.TestCase):
         second = next(env for step, env in seen if step == "second-check")
         self.assertEqual(second["A"], "/cache/a")
 
+    def test_the_report_names_each_branch(self) -> None:
+        # A check that passes and one that does not must be distinguishable.
+        # The count of prerequisites is the same either way.
+        present = datasets.Prerequisite(
+            "system", {"*": ["present"]}, {"*": ["install-present"]}, {"S": "1"}
+        )
+        missing = datasets.Prerequisite(
+            "built", {"*": ["missing"]}, {"*": ["install-missing"]},
+            {"B": "${SKILL_CACHE_DIR}/b"},
+        )
+
+        async def run(argv, env):
+            # The first `missing` check fails; install succeeds; the re-check
+            # sees the env the install just applied.
+            if argv[0] in ("present", "install-missing") or env.get("B"):
+                return 0, ""
+            return 1, ""
+
+        provision = asyncio.run(engine_prerequisites.provide(
+            [present, missing], {"SKILL_CACHE_DIR": "/cache"}, "linux", run
+        ))
+        self.assertEqual(provision.satisfied, ("system",))
+        self.assertEqual(provision.installed, ("built",))
+        self.assertEqual(provision.env, {"B": "/cache/b"})
+        self.assertEqual(
+            engine_prerequisites._provision_line("demo", provision),
+            "[prerequisites] demo: system satisfied by the environment; built installed",
+        )
+
 
 class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
     """The host leg end to end: real solver, real inspect `eval()`, stub `claude`.
@@ -6433,6 +6469,25 @@ class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
         for agent in seen:
             self.assertTrue(agent["env"].get("PREREQ_TOOL"), agent)
             self.assertTrue(agent["exists"]["PREREQ_TOOL"], agent)
+
+    def test_the_log_names_the_branch_that_provided_it(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), engine_prerequisites.on_host("needs-tool"):
+            pass
+        text = out.getvalue()
+        self.assertIn("[prerequisites] needs-tool: 1 to provide", text)
+        self.assertIn("[prerequisites] needs-tool: tool installed", text)
+
+        existing = self.scratch / "preinstalled.txt"
+        existing.write_text("x")
+        os.environ["PREREQ_TOOL"] = str(existing)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), engine_prerequisites.on_host("needs-tool"):
+            pass
+        text = out.getvalue()
+        self.assertIn("tool satisfied by the environment", text)
+        self.assertNotIn("installed", text)
 
     def test_a_prerequisite_already_present_is_used_as_is(self) -> None:
         existing = self.scratch / "preinstalled.txt"
@@ -6805,6 +6860,19 @@ class TestPrerequisitesInAContainer(unittest.TestCase):
     def test_a_skill_with_none_gets_the_agent_it_always_had(self) -> None:
         self.repo.skill("bare", dataset=tier0_dataset("bare"))
         self.assertIsNone(engine_prerequisites.claude_code_agent("bare", lambda env: None))
+
+    def test_the_log_names_the_branch_in_the_container_too(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_solver(_machine(_tool()))
+        self.assertIn("[prerequisites] boxed: tool installed", out.getvalue())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_solver(_machine(_tool()), present=True)
+        text = out.getvalue()
+        self.assertIn("tool satisfied by the environment", text)
+        self.assertNotIn("installed", text)
 
     def test_the_same_declaration_prepares_the_container_before_the_agent(self) -> None:
         box, [env] = self.run_solver(_machine(_tool()))

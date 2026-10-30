@@ -553,10 +553,15 @@ COMMAND_PLATFORMS = ("linux", "windows", "macos")
 # host and a container -- the same declaration would mean two things.
 PREREQUISITE_INPUTS = ("SKILL_SOURCE_DIR", "SKILL_CACHE_DIR")
 _ENV_INPUT = re.compile(r"\$\{(?:SKILL_SOURCE_DIR|SKILL_CACHE_DIR)\}")
-# Variables the harness sets for the agent itself. A prerequisite overriding
-# one would change which model answers or where its config lives -- and
-# differently per engine, since each sets a different subset.
-_RESERVED_ENV = re.compile(r"^(?:ANTHROPIC_|CLAUDE_)|^IS_SANDBOX$", re.IGNORECASE)
+# Variables a prerequisite may not set. The harness ones decide which model
+# answers and where its config lives, and each engine sets a different subset.
+# `PATH` is replaced rather than extended: the CLI is already resolved by the
+# time the agent starts, so a replacement leaves everything it spawns with
+# only that directory. Windows environment names are case-insensitive, so
+# `path` is the same variable.
+_RESERVED_ENV = re.compile(
+    r"^(?:ANTHROPIC_|CLAUDE_)|^IS_SANDBOX$|^PATH$", re.IGNORECASE
+)
 # A name a process environment can hold on every platform.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # `machine.yml`'s `os` labels as `COMMAND_PLATFORMS`.
@@ -728,10 +733,18 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
                 "supplies to every step; a prerequisite may not override it."
             )
         if _RESERVED_ENV.search(name):
-            raise SystemExit(
-                f"error: {path}: `{where}.{name}` is set by the harness for the "
-                "agent itself, and a prerequisite may not override it."
-            )
+            if name.upper() == "PATH":
+                why = (
+                    "replaces PATH rather than extending it, so the agent and "
+                    "everything it starts would see only that value, and a "
+                    "prerequisite may not set it."
+                )
+            else:
+                why = (
+                    "is set by the harness for the agent itself, and a "
+                    "prerequisite may not override it."
+                )
+            raise SystemExit(f"error: {path}: `{where}.{name}` {why}")
         if "$" in _ENV_INPUT.sub("", text):
             raise SystemExit(
                 f"error: {path}: `{where}.{name}` uses `$` other than in "
