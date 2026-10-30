@@ -55,6 +55,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,7 +218,11 @@ async def provide(
 _created_caches: set[str] = set()
 # Host steps still running, by pid. Each leads a session or process group of
 # its own (see `_host_runner`), so the pid names everything it started too.
+# The lock is shared with the watchdog: the pid is only known once the
+# process exists, and a snapshot that missed it must not be the last look.
 _live_steps: set[int] = set()
+_steps_lock = threading.Lock()
+_steps_closed = False
 
 
 def _discard_all_caches() -> None:
@@ -226,25 +231,54 @@ def _discard_all_caches() -> None:
     _created_caches.clear()
 
 
+def _kill_pid(pid: int) -> None:
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        else:
+            os.killpg(pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _track_step(pid: int) -> bool:
+    """Record `pid` for the watchdog.
+
+    True when the watchdog has already snapped the set. The caller kills
+    `pid` itself: `os._exit` will not look again, and a session leader it
+    missed would be reparented and keep running.
+    """
+    with _steps_lock:
+        if _steps_closed:
+            return True
+        _live_steps.add(pid)
+        return False
+
+
+def _untrack_step(pid: int) -> None:
+    with _steps_lock:
+        _live_steps.discard(pid)
+
+
 def _kill_live_steps() -> None:
     """Kill every running host step and what it started. For the watchdog.
 
     Synchronous, because the watchdog fires from a thread with no event loop.
     """
-    for pid in list(_live_steps):
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                )
-            else:
-                os.killpg(pid, signal.SIGKILL)
-        except (OSError, subprocess.SubprocessError):
-            pass
-        _live_steps.discard(pid)
+    global _steps_closed
+    with _steps_lock:
+        # Stays set. The process is about to exit, and a step that appears
+        # after this snapshot has to be killed by whoever started it.
+        _steps_closed = True
+        pids = list(_live_steps)
+        _live_steps.clear()
+    for pid in pids:
+        _kill_pid(pid)
 
 
 def _on_expire() -> None:
@@ -292,7 +326,10 @@ def _host_runner(cwd: Path) -> Runner:
             )
         except (OSError, ValueError) as exc:
             return 127, f"could not start {argv[0]!r}: {exc}"
-        _live_steps.add(proc.pid)
+        # After the spawn, under the watchdog's lock. If the hard exit already
+        # snapped the set, kill here: nothing else will.
+        if _track_step(proc.pid):
+            _kill_pid(proc.pid)
         try:
             output, _ = await proc.communicate()
         except BaseException:
@@ -301,7 +338,7 @@ def _host_runner(cwd: Path) -> Runner:
             await asyncio.shield(no_sandbox._terminate(proc))
             raise
         finally:
-            _live_steps.discard(proc.pid)
+            _untrack_step(proc.pid)
         return proc.returncode, output.decode(errors="replace")
 
     return run
@@ -353,12 +390,31 @@ def on_host(skill: str) -> Iterator[dict[str, str]]:
         _created_caches.discard(str(cache))
 
 
+def _is_answer_key(candidate: Path, keys: set[Path]) -> bool:
+    """Whether `candidate` is a dataset file, whatever path named it.
+
+    `Path.resolve()` does not canonicalise case, so on a case-insensitive
+    volume `EVALS.JSON` and `evals.json` compare unequal and the answer key
+    would be copied in. `samefile` is the directory entry.
+    """
+    for key in keys:
+        if candidate == key:
+            return True
+        try:
+            if candidate.samefile(key):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _named_files(skill: str, declared: list[Prerequisite]) -> dict[str, Path]:
     """The files beside machine.yml that a container step names, by argv item.
 
     Only these are copied in. The rest of evals/ includes the answer key, and a
     step has no business carrying it into the agent's room -- so naming a
-    dataset file is refused rather than copied.
+    dataset file is refused rather than copied. A path that resolves outside
+    this directory is not copied either.
     """
     evals_dir = datasets.machine_path(skill).parent.resolve()
     keys = {
@@ -377,7 +433,7 @@ def _named_files(skill: str, declared: list[Prerequisite]) -> dict[str, Path]:
                         continue
                 except (OSError, ValueError):
                     continue
-                if candidate in keys:
+                if _is_answer_key(candidate, keys):
                     raise PrerequisiteError(
                         f"prerequisite `{item.name}` names {arg}, which is this "
                         "skill's answer key and is never copied into the agent's "
