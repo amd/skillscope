@@ -29,7 +29,7 @@
     "prerequisites": {
       "type": "array",
       "minItems": 1,
-      "description": "What the behavioral cases need provided before they run, applied by every engine where its agent runs: once per skill on the host under the default engine, in each case's container under `--engine claude-code`. Each runs `check`; if that fails, `install` runs and `check` is retried with `env` applied, and only then is `env` handed to the agent. A prerequisite whose `check` passes is used as is and none of its `env` is applied. On the host, steps run with the directory holding this file as their working directory; in a container, in `/opt/skillscope/steps`, which holds only the files they name. Steps see `SKILL_SOURCE_DIR` (the skill's source tree; host only) and `SKILL_CACHE_DIR` (scratch space, removed after the skill on the host; `/opt/skillscope/cache` in a container, so an image can bake an install in at the same path).",
+      "description": "What the behavioral cases need provided before they run, applied by every engine where its agent runs: once per skill on the host under the default engine, in each case's container under `--engine claude-code`. Each runs `check`; if that fails, `install` runs and `check` is retried with `env` applied, and only then is `env` handed to the agent. A prerequisite whose `check` passes is used as is and none of its `env` is applied, so `check` must exit 0 only when the agent would work without that `env`. On the host, steps run with the directory holding this file as their working directory; in a container, in `/opt/skillscope/steps`, which holds only the files they name. Steps see `SKILL_SOURCE_DIR` (the skill's source tree; host only) and `SKILL_CACHE_DIR` (scratch space, removed after the skill on the host; `/opt/skillscope/cache` in a container, so an image can bake an install in at the same path; provisional until a skill's image is built against it).",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -42,7 +42,7 @@
           },
           "check": {
             "$ref": "#/$defs/command",
-            "description": "Exits 0 when the prerequisite is present. Files it names are copied into a container the same way as for `install`."
+            "description": "Exits 0 only when the agent would work without this prerequisite's `env`. A check that passes while the variable the agent needs is unset skips the install and never applies `env`. Files it names are copied into a container the same way as for `install`."
           },
           "install": {
             "$ref": "#/$defs/command",
@@ -51,7 +51,7 @@
           "env": {
             "type": "object",
             "additionalProperties": { "type": "string" },
-            "description": "Set for the agent once the prerequisite has been installed. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear; names the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`) are refused. The skillscope parser enforces those rules, a command for every platform in `os`, and unique names, none of which this schema expresses.",
+            "description": "Set for the agent once the prerequisite has been installed. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear; `PATH` and the names the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`) are refused. The skillscope parser enforces those rules, a command for every platform in `os`, and unique names, none of which this schema expresses.",
             "examples": [{ "PYTHONPATH": "${SKILL_CACHE_DIR}/decoder/python" }]
           }
         }
