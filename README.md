@@ -39,6 +39,10 @@ skillscope behavioral --skill my-skill       # needs an authenticated `claude` C
 skillscope routing --routing-room my-skill,its-neighbour  # also needs a key in the environment
 ```
 
+That install is from the repository rather than from PyPI, so the machine needs
+`git` on `PATH`. Install by URL and not by bare name: `skillscope` on PyPI is an
+unrelated project, so `pip install skillscope` does not get you this tool.
+
 `routing` needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, and refuses
 to start without one — a `claude login` on its own is not enough. The key is
 what lets the run point the CLI at its own config directory; without that, the
