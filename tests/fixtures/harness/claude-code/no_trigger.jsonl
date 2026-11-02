@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","skills":["alpha"]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"That is not something a skill is needed for."}]}}
+{"type":"result","subtype":"success","result":"That is not something a skill is needed for."}

@@ -1,0 +1,6 @@
+{
+  "note": "Synthetic: hand-written to the stream-json shape, not a recording.",
+  "skills": ["alpha"],
+  "trigger": {"activation": "alpha", "completed": true, "final": "done"},
+  "no_trigger": {"activation": null, "completed": true, "final": "That is not something a skill is needed for."}
+}
