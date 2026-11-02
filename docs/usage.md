@@ -304,8 +304,11 @@ the same numbers with none of the isolation.
 
 Podman needs three things, and each was discovered by the next one failing:
 
-* `pip install 'skillscope[podman]'`. The provider is registered by a separate
-  package through an entry point, so the podman binary alone is not enough.
+* `uv tool install 'skillscope[podman] @ git+https://github.com/amd/skillscope'`.
+  The provider is registered by a separate package through an entry point, so the
+  podman binary alone is not enough. The extra has to be asked for against the
+  repository URL: the `skillscope` name on PyPI belongs to an unrelated project,
+  so a bare-name install gets neither this tool nor its extras.
 * `podman-compose`, and `INSPECT_PODMAN_COMPOSE=podman-compose`. Bare
   `podman compose` is a shim that delegates to whichever compose provider it
   finds, which on a host that also has Docker is Docker's -- and that then
