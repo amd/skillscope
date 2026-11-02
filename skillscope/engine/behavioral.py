@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import agent, config, deadline, routing as routing_core
+from .. import agent, config, deadline, harness as harnesses, routing as routing_core
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
 from . import convert, hooks, models, sandbox as sandbox_spec, scorers, stats
@@ -171,9 +171,18 @@ def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | N
     """The paths that reading makes a room dirty, lowercased and separator-flat.
 
     Two of them. The skill's own directory, absolute, which is where an agent
-    that went looking would find it. And `.claude/skills/<name>`, the staged
-    copy `no_sandbox.install_skill` writes under a workspace that changes per
-    sample, so only its tail is knowable here.
+    that went looking would find it. And `<skills_dir>/<name>`, the staged copy
+    `no_sandbox.install_skill` writes under a workspace that changes per
+    sample, so only its tail is knowable here. The harness names that
+    directory -- `.claude/skills` for Claude Code, its own for anything else --
+    so this asks it rather than spelling one harness's answer in, which would
+    read every other harness's staged copy as untouched.
+
+    It asks the *default* harness, which is right while that is the only one
+    registered. Once a run can name another, the staged mark has to come off
+    the log beside `recorded`, for the reason `recorded` exists: a reader
+    standing on a different harness than the run is not evidence about the
+    run.
 
     `recorded` is `SKILL_DIR_KEY` off the log: where the skill was on the
     machine that ran the agent. Preferred over resolving it here, because
@@ -201,7 +210,8 @@ def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | N
             # catching `Exception` alone let a rebuild of someone else's logs
             # take the whole command down.
             return None
-    return (_normalise(home), _normalise(f".claude/skills/{skill}"))
+    staged = f"{harnesses.get().skills_dir}/{skill}"
+    return (_normalise(home), _normalise(staged))
 
 
 # Characters that continue a path component. A mark followed or preceded by
