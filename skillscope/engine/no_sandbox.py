@@ -511,6 +511,8 @@ def harness_solver(
             # runner's environment goes under what the harness sets. The
             # skill's prerequisites go between the two: over the runner's
             # environment, under the harness's own settings and isolation.
+            # `host_env` already holds `env(spec)`; it is applied again last
+            # so that it wins over `extra_env`, not because it was missing.
             cmd = harness.host_command(spec)
             env = {
                 **harness.host_env(spec),
