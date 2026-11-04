@@ -21,8 +21,36 @@ definition such as an `inspect_swe` one. Otherwise every agent would exist twice
 this repo, with its own command line, environment, skill staging and event handling,
 free to drift apart.
 
-Today one harness is registered, `claude-code`. The contract exists so that a
-second one is an adapter and a set of tests rather than a change to the engines.
+Two harnesses are registered, `claude-code` and `copilot`, and the contract exists
+so that another is an adapter and a set of tests rather than a change to the
+engines. `--harness` chooses one; see [usage.md](usage.md#which-engine-grades-a-run).
+
+## The harnesses
+
+| | `claude-code` | `copilot` |
+| --- | --- | --- |
+| Binary | `claude` | `copilot` |
+| Skills directory | `.claude/skills` | `.claude/skills` |
+| A skill activates by | a `Skill` tool call | a `skill` tool call |
+| Session lists its skills | yes (`system/init`) | no; `copilot skill list --json` does, without a model call |
+| Authenticates with | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` |
+| Config isolated by | `CLAUDE_CONFIG_DIR` | `COPILOT_HOME` |
+| Prompt | stdin | stdin |
+| A run is billed in | dollars | premium requests |
+
+Things to know about `copilot` before reading its numbers:
+
+* **Its room always contains built-in skills.** Copilot ships a few of its own,
+  so they are present beside the skills a run stages and can win a case.
+* **It reports its answer separately from its closing event.** The harness
+  remembers the last assistant message and attaches it to the end of the run.
+* **It reports tokens once, at the end,** and no dollar cost, so a spend cap in
+  dollars cannot bind.
+* **It runs unsandboxed with every permission granted** (`--allow-all`), as the
+  host engine's Claude Code does, because a non-interactive run cannot answer a
+  prompt. Use a throwaway runner.
+* **It uses its own model names** (`claude-sonnet-5.5`, not `sonnet`), and
+  models differ greatly in how many premium requests one run costs.
 
 ## What a harness provides
 
@@ -37,6 +65,13 @@ A harness is a subclass of `skillscope.harness.Harness`, registered in
 | `has_skill_tool` | Whether activating a skill is a tool call in the stream. A harness that activates a skill by reading its `SKILL.md` sets this `False`, and routing reads activation from the file access instead. |
 | `prompt_on_stdin` | Whether the prompt is written to stdin. A harness that takes it as an argument builds it into `command` and sets this `False`; stdin is closed either way, because some CLIs wait on it. |
 | `require()` | Refuse to start **on the host** when the harness is not installed there. The default checks `binary` is on the runner's `PATH`. A leg that starts the agent in a container checks the image instead. |
+| `default_model`, `resolve_model(model)` | The model used when the caller names none, and how the harness names the one they did. A harness with its own names maps the generic aliases (`opus`, `sonnet`, `haiku`) onto them. |
+| `pin_model(model)` | The model a CI run is held to, so results stay comparable run to run. The default pins nothing. |
+| `credentials`, `can_isolate_room(environ)` | The environment variables a credential can come from. A routing run keeps the runner's own config and skills out of the session only when the harness authenticates from one of them. |
+| `supports_sandbox` | Whether a container leg exists (`--engine sandbox`). |
+| `cost_flags(max_budget_usd)` | The CLI's own spend controls for a case. Empty when it has none, which the report then says rather than implying a cap. |
+| `version()` | What `<binary> --version` prints, for the report. |
+| `preflight(model)` | One trivial prompt through the harness's own command, to prove before any case runs that the credential, the model name and the network work. The default is enough for most harnesses. |
 | `command(spec)` | The argv that runs one case, headless, streaming JSON events. The executable is named (`binary`), never an absolute path on this machine, so the same command can be started on the host or in a container. |
 | `env(spec)` | What the harness sets in the process's environment, and nothing else: its own settings, and whatever points it at `spec.config_dir` so the runner's own settings and skills stay out of the session. Not the runner's environment (`PATH`, `HOME`, every key on the machine), which a container must not inherit. Whoever starts the process puts this on top of the environment it has. |
 | `host_command(spec)`, `host_env(spec)` | What a run started on the host executes: `command(spec)` with its executable found by `shutil.which` (on Windows an npm-installed CLI is a `.cmd` shim that only that finds), and `os.environ` with `env(spec)` on top. A sandbox leg uses `command` and `env` directly. |
@@ -94,19 +129,20 @@ from one is not comparable with a score from another.
 
 ## What is not yet behind the contract
 
-The contract covers staging, the command, the environment and the events. These
-still assume Claude Code, and a second harness will need to move them behind it:
+The contract covers staging, the command, the environment, the events, the model,
+the credential check, the spend controls and the preflight. These still assume
+Claude Code, and a harness other than it cannot yet use them:
 
-* choosing a harness from the command line (there is no `--harness` flag yet);
-* the reachability preflight and the credential check that decides whether the
-  runner's own config can be kept out of a routing run (`ANTHROPIC_*`);
-* the spend-limit flags, which are probed from `claude --help`;
-* the CI model pin, which forces `opus`;
-* the judge, which uses an Anthropic model through `inspect_ai`;
+* **the judge** that grades `behavioral` expectations goes through an Anthropic
+  model whatever agent produced the run, so `behavioral` is refused on any other
+  harness;
+* **the room check**: Claude Code reports at session start which skills it
+  loaded, and the engine compares that with what was staged. A harness with no
+  such event leaves the check not run;
 * **the sandbox leg**: `--engine claude-code` still runs Claude Code through
   `inspect_swe`, with its own command line, environment, skill staging and event
   handling. It should start the harness's `command(spec)` in the container, so that
   each agent is defined once. Until it does, a harness other than Claude Code has no
   sandboxed leg;
-* `.claude/skills` as the path routing treats as a skills inspection, rather than
-  a harness's own `skills_dir`.
+* **`.claude/skills`** as the path routing treats as a skills inspection, rather
+  than a harness's own `skills_dir`.
