@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/amd/skillscope/skillscope/schema/machine.schema.json",
   "title": "skillscope skill machine requirements",
-  "description": "Optional file at <skill>/evals/machine.yml, present ONLY for a skill whose behavioral cases cannot run on the everyday runners on every platform. Absent means exactly that, which is the common case. Say which platforms to use and which runner labels the work needs; what follows from asking for hardware -- the base runs-on labels, the pull-request label rationing that pool, the environment holding its credentials -- belongs to the repo and is passed to skillscope by the workflow, not restated here.",
+  "description": "Optional file at <skill>/evals/machine.yml, present ONLY for a skill whose behavioral cases need something the everyday runners do not give them: fewer platforms, particular hardware, a sandbox of its own, or prerequisites to provide. Absent means none of those, which is the common case. Say which platforms to use and which runner labels the work needs; what follows from asking for hardware -- the base runs-on labels, the pull-request label rationing that pool, the environment holding its credentials -- belongs to the repo and is passed to skillscope by the workflow, not restated here.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -25,6 +25,60 @@
       "minLength": 1,
       "description": "Compose file, resolved beside this machine.yml in evals/, describing the sandbox the behavioral cases need under `--engine claude-code`. Absent means the default container with no network, which is what a skill that only reads and writes files should want. Name one to opt into network egress -- a skill that installs a server or pulls a model cannot run without it -- or to bind a device in. Ignored on Windows, where inspect's sandbox layer assumes a POSIX guest and cases run unsandboxed on the host instead.",
       "examples": ["compose.yaml"]
+    },
+    "prerequisites": {
+      "type": "array",
+      "minItems": 1,
+      "description": "What the behavioral cases need provided before they run, applied by every engine where its agent runs: once per skill on the host under the default engine, in each case's container under `--engine claude-code`. Each runs `check`; if that fails, `install` runs and `check` is retried with `env` applied, and only then is `env` handed to the agent. A prerequisite whose `check` passes is used as is and none of its `env` is applied, so `check` must exit 0 only when the agent would work without that `env`. On the host, steps run with the directory holding this file as their working directory; in a container, in `/opt/skillscope/steps`, which holds only the files they name. Steps see `SKILL_SOURCE_DIR` (the skill's source tree; host only) and `SKILL_CACHE_DIR` (scratch space, removed after the skill on the host; `/opt/skillscope/cache` in a container, so an image can bake an install in at the same path; provisional until a skill's image is built against it).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "check", "install"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What this provides, as reports should name it. Unique within the file."
+          },
+          "check": {
+            "$ref": "#/$defs/command",
+            "description": "Exits 0 only when the agent would work without this prerequisite's `env`. A check that passes while the variable the agent needs is unset skips the install and never applies `env`. Files it names are copied into a container the same way as for `install`."
+          },
+          "install": {
+            "$ref": "#/$defs/command",
+            "description": "Provides the prerequisite. Under `--engine claude-code`, an argv item that is a path to a file in the directory holding this machine.yml, or below it, is copied into the container at the same relative path for the step and removed before the agent starts; a file mentioned only inside a string is not, and a step naming an eval dataset is refused."
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Set for the agent once the prerequisite has been installed. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear; `PATH` and the names the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`) are refused. The skillscope parser enforces those rules, a command for every platform in `os`, and unique names, none of which this schema expresses.",
+            "examples": [{ "PYTHONPATH": "${SKILL_CACHE_DIR}/decoder/python" }]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "command": {
+      "description": "An argv, or a mapping from platform (`linux`, `windows`, `macos`) to argv. A container is always `linux`.",
+      "oneOf": [
+        { "$ref": "#/$defs/argv" },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "linux": { "$ref": "#/$defs/argv" },
+            "windows": { "$ref": "#/$defs/argv" },
+            "macos": { "$ref": "#/$defs/argv" }
+          }
+        }
+      ]
+    },
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
     }
   }
 }

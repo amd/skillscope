@@ -141,7 +141,7 @@ def _frontmatter(text: str) -> tuple[dict | None, str, str]:
             "to match a prompt against, so the skill is never loaded."
         )
 
-    import yaml  # noqa: PLC0415 -- keeps the run path stdlib-only
+    import yaml  # noqa: PLC0415 -- importing this module stays cheap
 
     try:
         declared = yaml.safe_load(match.group("frontmatter"))

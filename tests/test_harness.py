@@ -355,7 +355,10 @@ if "silent" not in sys.argv[1]:
 emit(evt="skill", name="alpha")
 emit(
     evt="command",
-    command="echo foreign-marker staged=%s stdin=%r arg=%r" % (staged, stdin_seen, sys.argv[1]),
+    command="echo foreign-marker staged=%s stdin=%r arg=%r config=%r prereq=%r" % (
+        staged, stdin_seen, sys.argv[1],
+        os.environ.get("FOREIGN_CONFIG"), os.environ.get("FOREIGN_PREREQ"),
+    ),
 )
 emit(evt="finished")
 """
@@ -386,7 +389,11 @@ class ForeignHarness(harness.Harness):
         return [sys.executable, "-u", str(self.script), spec.prompt]
 
     def env(self, spec: harness.RunSpec) -> dict[str, str]:
-        return {}
+        # Its own isolation, under a name of its own, so a test can see whether
+        # anything put in the agent's environment later overrides it.
+        if spec.config_dir is None:
+            return {}
+        return {"FOREIGN_CONFIG": spec.config_dir}
 
     def normalizer(self):
         # Its closing event does not repeat the answer, so it is remembered from
@@ -499,7 +506,7 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
             "---\nname: alpha\ndescription: does alpha things\n---\n", encoding="utf-8"
         )
 
-    def run_case(self, *, stop_when_factory=None, config_dir=None):
+    def run_case(self, *, stop_when_factory=None, config_dir=None, extra_env=None):
         import contextlib
         import io
 
@@ -512,6 +519,7 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
             solver=no_sandbox.harness_solver(
                 self.foreign, "mockllm/model", None, self.skill,
                 config_dir=config_dir, stop_when_factory=stop_when_factory,
+                extra_env=extra_env,
             ),
             sandbox="local",
         )
@@ -574,6 +582,20 @@ class TestTheEngineRunsACaseWithAnotherHarness(unittest.TestCase):
         self.assertIsInstance(spec.config_dir, str)
         self.assertEqual(spec.config_dir, str(Path(self.tmp) / "cfg"))
         self.assertIsInstance(spec.workspace, str)
+
+    def test_a_skills_prerequisites_reach_the_agent_under_what_the_harness_sets(self) -> None:
+        # `extra_env` is what a skill's prerequisites hand its agent. It goes
+        # over the runner's environment but under the harness's own settings,
+        # so a prerequisite cannot undo the harness's config isolation -- for
+        # any harness, not only for the names the dataset parser refuses.
+        config_dir = Path(self.tmp) / "cfg"
+        sample = self.run_case(
+            config_dir=config_dir,
+            extra_env={"FOREIGN_PREREQ": "/opt/tool", "FOREIGN_CONFIG": "from-a-prerequisite"},
+        )
+        [(_, command)] = [call for call in self.calls(sample) if call[0] == "Bash"]
+        self.assertIn("prereq='/opt/tool'", command["command"])
+        self.assertIn("config=%r" % str(config_dir), command["command"])
 
     def test_the_skill_is_staged_where_that_harness_looks(self) -> None:
         # The agent script checks for the file itself, in the workspace it was

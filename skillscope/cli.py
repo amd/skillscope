@@ -466,10 +466,11 @@ def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
         "    They would be skipped silently, and the cases graded as though "
         "they had run.\n"
         "    `setup` and `teardown` are supported. `check` needs the legacy "
-        "engine's Run object, and `setup_session` returns template variables "
-        "that are substituted before any hook runs -- neither has an "
-        "equivalent here.\n"
-        "    Move what they do into the dataset, or into setup/teardown."
+        "engine's Run object, which has no equivalent here; move what it "
+        "asserts into the dataset.\n"
+        "    `setup_session` is replaced by `prerequisites:` in "
+        "evals/machine.yml: a check, an install and the env the agent needs, "
+        "applied the same way on every engine. See docs/authoring-evals.md."
     )
 
 
@@ -713,8 +714,8 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
             gradable,
             engine_models.resolve(args.model),
             args.effort,
-            solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
-                args.model, args.effort, d
+            solver_factory=no_sandbox.behavioral_solver_factory(
+                args.model, args.effort
             ),
         )
     else:
