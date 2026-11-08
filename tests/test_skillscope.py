@@ -1007,6 +1007,73 @@ class TestActionLauncher(unittest.TestCase):
             with mock.patch.dict(os.environ, {"SKILLSCOPE_ACTION_PATH": str(root)}):
                 self.assertEqual(self.module.action_root(), root)
 
+    def test_a_cp1252_console_can_relay_the_replacement_character(self) -> None:
+        # Child stdout is decoded with errors="replace", so U+FFFD reaches
+        # sys.stdout.write. A cp1252 console raises UnicodeEncodeError there
+        # unless startup reconfigured the stream to UTF-8.
+        buffer = io.BytesIO()
+        stdout = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict")
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        child = io.StringIO("hot kernel \ufffd\n")
+
+        class FakeProc:
+            def __init__(self) -> None:
+                self.stdout = child
+
+            def wait(self) -> int:
+                return 0
+
+        repo_root = Path(__file__).resolve().parent.parent
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with (
+                    mock.patch.object(self.module.sys, "stdout", stdout),
+                    mock.patch.object(self.module.sys, "stderr", stderr),
+                    mock.patch.object(self.module.subprocess, "Popen", return_value=FakeProc()),
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "SKILLSCOPE_COMMAND": "behavioral",
+                            "SKILLSCOPE_ARGS": "",
+                            "SKILLSCOPE_STDIN": "",
+                            "SKILLSCOPE_REPO": tmp,
+                            "SKILLSCOPE_ACTION_PATH": str(repo_root),
+                            "GITHUB_OUTPUT": "",
+                            "GITHUB_STEP_SUMMARY": "",
+                        },
+                    ),
+                ):
+                    code = self.module.main()
+            self.assertEqual(code, 0)
+            self.assertEqual(stdout.encoding, "utf-8")
+            self.assertEqual(stdout.errors, "replace")
+            self.assertEqual(stderr.encoding, "utf-8")
+            self.assertIn("\ufffd".encode("utf-8"), buffer.getvalue())
+        finally:
+            stdout.close()
+            stderr.close()
+
+    def test_stdio_setup_survives_a_stream_that_cannot_be_reconfigured(self) -> None:
+        class RaisesOSError:
+            def reconfigure(self, **_kwargs: object) -> None:
+                raise OSError("console code page is locked")
+
+        closed = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        closed.close()
+        cases = (
+            (None, None),
+            (io.StringIO(), io.StringIO()),
+            (RaisesOSError(), RaisesOSError()),
+            (closed, closed),
+        )
+        for stdout, stderr in cases:
+            with self.subTest(stdout=type(stdout).__name__):
+                with (
+                    mock.patch.object(self.module.sys, "stdout", stdout),
+                    mock.patch.object(self.module.sys, "stderr", stderr),
+                ):
+                    self.module._configure_stdio()
+
 
 class TestSelection(unittest.TestCase):
     """What CI runs for a change, and what it is right to skip."""

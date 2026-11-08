@@ -39,6 +39,28 @@ from pathlib import Path
 VERSION_PATTERN = re.compile(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
 
 
+def _configure_stdio() -> None:
+    """Let a cp1252 Windows console print every character the child emits.
+
+    Hosted Windows runners start Python with the console code page, usually
+    cp1252. Child output is decoded with ``errors="replace"``, so a relayed
+    line can contain U+FFFD. Writing that character through a cp1252
+    ``sys.stdout`` raises ``UnicodeEncodeError`` and aborts the action.
+    UTF-8 encodes it.
+
+    A missing stream, a redirect that has no ``reconfigure``, or an
+    ``OSError`` / ``ValueError`` from the stream must not abort startup.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
@@ -82,6 +104,9 @@ def packaged_version(checkout: Path) -> str:
 
 
 def main() -> int:
+    # Before any print or relayed child line. The crash is a cp1252 stdout
+    # refusing U+FFFD; every later write goes through these two streams.
+    _configure_stdio()
     repo = Path(_env("SKILLSCOPE_REPO", ".") or ".").expanduser().resolve()
     command = _env("SKILLSCOPE_COMMAND")
     if not command:
