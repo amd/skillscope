@@ -7096,6 +7096,47 @@ class TestPrerequisitesInAContainer(unittest.TestCase):
         self.assertIn("/opt/skillscope/cache", mkdir)
         self.assertIn(engine_prerequisites.CONTAINER_STEPS, mkdir)
 
+    def sandbox_errors(self):
+        from inspect_ai.util import OutputLimitExceededError
+
+        return (
+            OSError("container gone"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+            OutputLimitExceededError(limit_str="10 MiB", truncated_output=None),
+        )
+
+    def test_a_sandbox_error_making_the_directories_is_reported_as_such(self) -> None:
+        # The same failures a step's own exec is reported under, so the case
+        # fails as a prerequisite rather than as a bare sandbox error.
+        for error in self.sandbox_errors():
+            class Broken(self._Box):
+                async def exec(self, argv, cwd=None, env=None, _error=error):
+                    if argv[0] == "mkdir":
+                        raise _error
+                    return await super().exec(argv, cwd, env)
+
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+                    self.run_solver(_machine(_tool()), box=Broken(False))
+                self.assertIn(engine_prerequisites.CONTAINER_ROOT, str(raised.exception))
+                self.assertIn(type(error).__name__, str(raised.exception))
+                self.assertFalse([c for c in self.box.calls if c[0][0] == _PY])
+
+    def test_a_sandbox_error_removing_the_steps_keeps_the_agent_from_starting(self) -> None:
+        for error in self.sandbox_errors():
+            class Broken(self._Box):
+                async def exec(self, argv, cwd=None, env=None, _error=error):
+                    if argv[:2] == ["rm", "-rf"]:
+                        raise _error
+                    return await super().exec(argv, cwd, env)
+
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+                    self.run_solver(_machine(_tool()), box=Broken(False))
+                self.assertIn("could not remove", str(raised.exception))
+                self.assertIn(type(error).__name__, str(raised.exception))
+                self.assertNotIn(["AGENT"], [c[0] for c in self.box.calls])
+
     def test_a_container_cannot_supply_the_source_tree(self) -> None:
         with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
             self.run_solver(_machine(_tool(env={"SRC": "${SKILL_SOURCE_DIR}/x"})))
