@@ -1155,6 +1155,87 @@ class TestSelection(unittest.TestCase):
         self.assertEqual([item["skill"] for item in plan["skipped"]], ["alpha", "gamma"])
         self.assertEqual(plan["gates"], ["enable_gpu_ci"])
 
+    def unreadable_machine_yml(self) -> None:
+        """Give gamma a machine.yml that exists and is not UTF-8."""
+        self.repo.skill("gamma", dataset=self.graded)
+        (self.repo.root / "gamma" / "evals" / "machine.yml").write_bytes(
+            b"labels: [\xff\xfe]\n"
+        )
+
+    def test_a_machine_yml_that_is_not_utf8_does_not_drop_the_matrix(self) -> None:
+        self.unreadable_machine_yml()
+        with contextlib.redirect_stderr(io.StringIO()):
+            plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+        self.assertIn("alpha", [leg["skill"] for leg in plan["default"]])
+        [broken] = [item for item in plan["skipped"] if item["skill"] == "gamma"]
+        self.assertIn("could not be read", broken["error"])
+        self.assertIn("machine.yml", broken["error"])
+
+    @unittest.skipIf(
+        os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        "file modes do not stop this process reading the file",
+    )
+    def test_a_machine_yml_that_cannot_be_opened_does_not_drop_the_matrix(self) -> None:
+        self.repo.skill("gamma", dataset=self.graded)
+        path = self.repo.root / "gamma" / "evals" / "machine.yml"
+        path.write_text("labels: [gpu]\n", encoding="utf-8")
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o600)
+        with contextlib.redirect_stderr(io.StringIO()):
+            plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+        self.assertIn("alpha", [leg["skill"] for leg in plan["default"]])
+        [broken] = [item for item in plan["skipped"] if item["skill"] == "gamma"]
+        self.assertIn("could not be read", broken["error"])
+
+    def test_a_machine_yml_the_runner_may_not_open_does_not_drop_the_matrix(self) -> None:
+        # The same OSError as the file-mode test above, on every platform and
+        # as root, where file modes do not stop the read.
+        self.repo.skill("gamma", dataset=self.graded)
+        machine = self.repo.root / "gamma" / "evals" / "machine.yml"
+        machine.write_text("labels: [gpu]\n", encoding="utf-8")
+        read_text = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == machine:
+                raise PermissionError(13, "Permission denied", str(path))
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", denied), \
+                contextlib.redirect_stderr(io.StringIO()):
+            plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+        self.assertIn("alpha", [leg["skill"] for leg in plan["default"]])
+        [broken] = [item for item in plan["skipped"] if item["skill"] == "gamma"]
+        self.assertIn("could not be read", broken["error"])
+        self.assertIn("Permission denied", broken["error"])
+
+    def test_yaml_the_parser_rejects_without_a_yaml_error_does_not_drop_the_matrix(self) -> None:
+        # PyYAML raises ValueError for a timestamp that is not a date, and
+        # RecursionError for nesting deeper than the interpreter allows.
+        for name, text in (("date", "labels: 2001-13-45\n"),
+                           ("nesting", "labels: " + "[" * 100_000 + "\n")):
+            with self.subTest(name):
+                self.repo.skill("gamma", dataset=self.graded)
+                (self.repo.root / "gamma" / "evals" / "machine.yml").write_text(
+                    text, encoding="utf-8"
+                )
+                with contextlib.redirect_stderr(io.StringIO()):
+                    plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+                self.assertIn("alpha", [leg["skill"] for leg in plan["default"]])
+                [broken] = [item for item in plan["skipped"] if item["skill"] == "gamma"]
+                self.assertIn("not valid YAML", broken["error"])
+
+    def test_a_machine_yml_that_cannot_be_read_is_a_structural_error(self) -> None:
+        # Reported against its skill, and the skill checked after it is still
+        # checked: zeta's broken file is reported as well.
+        self.unreadable_machine_yml()
+        self.repo.skill("zeta", dataset=tier0_dataset("zeta"))
+        (self.repo.root / "zeta" / "evals" / "machine.yml").write_text(
+            "os: [\n", encoding="utf-8"
+        )
+        errors = datasets.structural_errors(["gamma", "zeta"])
+        self.assertTrue(any("gamma" in e and "could not be read" in e for e in errors), errors)
+        self.assertTrue(any("zeta" in e and "not valid YAML" in e for e in errors), errors)
+
 
 class TestWhatABranchChanged(unittest.TestCase):
     """Selection is planned from the merge base, not from the base branch tip.

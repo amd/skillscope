@@ -604,8 +604,15 @@ def _read_machine(skill: str) -> dict:
     import yaml  # noqa: PLC0415 -- importing this module stays cheap
 
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Same treatment as bad YAML: the file is there and says nothing usable.
+        raise SystemExit(f"error: {path} could not be read: {exc}") from None
+    try:
+        data = yaml.safe_load(text) or {}
+    # Not every rejection is a YAMLError: PyYAML raises ValueError for a
+    # timestamp that is no date, and nesting can exhaust the recursion limit.
+    except (yaml.YAMLError, ValueError, RecursionError) as exc:
         # As SystemExit, which every per-skill handler turns into that skill's
         # failure; a parser exception would end the whole command instead.
         raise SystemExit(f"error: {path} is not valid YAML: {exc}") from None
