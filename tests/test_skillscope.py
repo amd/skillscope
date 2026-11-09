@@ -6399,7 +6399,7 @@ class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
         for name in datasets.PREREQUISITE_INPUTS:
             with self.subTest(name=name):
                 errors = self.errors_for(_machine(_tool(env={name: "/elsewhere"})))
-                self.assertTrue(any("supplies to every step" in e for e in errors), errors)
+                self.assertTrue(any("skillscope sets for the steps itself" in e for e in errors), errors)
 
     def test_mixed_type_top_level_keys_are_named_not_crashed_on(self) -> None:
         errors = self.errors_for("os: [Linux]\n1: x\nz: y\n")

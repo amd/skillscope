@@ -738,8 +738,8 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
             )
         if name in PREREQUISITE_INPUTS:
             raise SystemExit(
-                f"error: {path}: `{where}.{name}` names an input skillscope "
-                "supplies to every step; a prerequisite may not override it."
+                f"error: {path}: `{where}.{name}` names an input skillscope sets "
+                "for the steps itself; a prerequisite may not override it."
             )
         if _RESERVED_ENV.search(name):
             if name.upper() == "PATH":

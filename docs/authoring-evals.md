@@ -219,7 +219,8 @@ prerequisites:
   `$` is expanded. `PATH` cannot be set here: it would replace the agent's
   search path, and everything the agent starts would see only that value.
   Variables the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`,
-  `IS_SANDBOX`) cannot be set here either.
+  `IS_SANDBOX`) cannot be set here either, and nor can `SKILL_SOURCE_DIR` or
+  `SKILL_CACHE_DIR`, which skillscope sets for the steps itself.
 - **Installing once per image instead of once per case.** Under `claude-code`,
   build your `sandbox:` image so that `check` passes in it without this
   prerequisite's `env`: run the same `install` at `SKILL_CACHE_DIR=/opt/skillscope/cache`
