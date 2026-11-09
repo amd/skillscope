@@ -218,17 +218,44 @@ async def provide(
 _created_caches: set[str] = set()
 # Host steps still running, by pid. Each leads a session or process group of
 # its own (see `_host_runner`), so the pid names everything it started too.
-# The lock is shared with the watchdog: the pid is only known once the
-# process exists, and a snapshot that missed it must not be the last look.
+# The lock is shared with the watchdog, for both sets: a pid is only known
+# once the process exists, and a cache only once the directory does, and a
+# snapshot that missed either must not be the last look.
 _live_steps: set[int] = set()
 _steps_lock = threading.Lock()
 _steps_closed = False
 
 
+def _make_cache(skill: str) -> Path:
+    """A new host cache for `skill`, recorded where the watchdog looks.
+
+    Made under the watchdog's lock, so its snapshot either includes the
+    directory or was taken before it existed, in which case it is not made.
+    """
+    with _steps_lock:
+        if _steps_closed:
+            raise PrerequisiteError(
+                f"prerequisites for {skill} were not provided: the run is "
+                "stopping (--timeout)."
+            )
+        path = tempfile.mkdtemp(prefix=f"skillscope-prerequisites-{skill}-")
+        _created_caches.add(path)
+    return Path(path)
+
+
+def _forget_cache(path: Path) -> None:
+    with _steps_lock:
+        _created_caches.discard(str(path))
+
+
 def _discard_all_caches() -> None:
-    for path in list(_created_caches):
+    # After `_kill_live_steps` has closed the sets, so no cache is made
+    # after this snapshot.
+    with _steps_lock:
+        paths = list(_created_caches)
+        _created_caches.clear()
+    for path in paths:
         shutil.rmtree(path, ignore_errors=True)
-    _created_caches.clear()
 
 
 def _kill_pid(pid: int) -> None:
@@ -359,8 +386,7 @@ def on_host(skill: str) -> Iterator[dict[str, str]]:
         yield {}
         return
 
-    cache = Path(tempfile.mkdtemp(prefix=f"skillscope-prerequisites-{skill}-"))
-    _created_caches.add(str(cache))
+    cache = _make_cache(skill)
     try:
         inputs = {"SKILL_CACHE_DIR": str(cache)}
         unavailable: dict[str, str] = {}
@@ -387,7 +413,7 @@ def on_host(skill: str) -> Iterator[dict[str, str]]:
         yield provision.env
     finally:
         shutil.rmtree(cache, ignore_errors=True)
-        _created_caches.discard(str(cache))
+        _forget_cache(cache)
 
 
 def _is_answer_key(candidate: Path, keys: set[Path]) -> bool:
