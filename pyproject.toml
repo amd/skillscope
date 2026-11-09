@@ -30,9 +30,15 @@ authors = [{ name = "Advanced Micro Devices, Inc." }]
 # `anthropic` is listed explicitly: inspect-ai treats every model provider as
 # optional, so installing it alone gets you a harness that cannot reach a model.
 # PyYAML reads the optional evals/machine.yml, which only CI planning touches.
+#
+# `agent-client-protocol` is inspect-ai's own dependency, bounded here because its
+# 1.0.0 dropped `acp.helpers`, which inspect-ai imports whenever `eval()` runs
+# (https://github.com/UKGovernmentBEIS/inspect_ai/issues/6417). Remove the bound
+# once an inspect-ai release supports 1.0.
 dependencies = [
     "pyyaml>=6.0",
     "inspect-ai>=0.3.263",
+    "agent-client-protocol<1",
     "anthropic>=0.40",
 ]
 
