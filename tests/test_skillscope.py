@@ -288,6 +288,91 @@ class TestEveryRunStepIsPortable(unittest.TestCase):
                 )
 
 
+class TestTheResultsJobReadsWhyALegWasHeldBack(unittest.TestCase):
+    """skill-evals.yml's `results` step, run on the plan's `skipped` list.
+
+    A leg is held back for a missing gate label, which is deliberate and only
+    warned about, or because its machine.yml could not be planned, which is
+    not and must not be reported as a missing label.
+    """
+
+    def run_results(self, skipped: list[dict]) -> subprocess.CompletedProcess:
+        import yaml
+
+        workflow = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "skill-evals.yml").read_text(encoding="utf-8")
+        )
+        [step] = [s for s in workflow["jobs"]["results"]["steps"] if s.get("shell") == "python"]
+        env = {
+            **os.environ,
+            "DISCOVER": "success",
+            "ROUTING_WANTED": "false",
+            "BEHAVIOR_WANTED": "false",
+            "SCOPED_WANTED": "false",
+            "SKIPPED": json.dumps(skipped),
+        }
+        return subprocess.run(
+            [sys.executable, "-c", step["run"]], env=env,
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+
+    def test_a_missing_gate_label_is_a_warning(self) -> None:
+        result = self.run_results([{"skill": "alpha", "gate": "enable_gpu_ci"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::warning::", result.stdout)
+        self.assertIn("missing gate label", result.stdout)
+        self.assertIn("alpha", result.stdout)
+
+    def test_a_machine_yml_that_could_not_be_planned_fails_with_its_error(self) -> None:
+        result = self.run_results([
+            {"skill": "alpha", "gate": "enable_gpu_ci"},
+            {"skill": "gamma", "gate": "", "error": "gamma/evals/machine.yml is not valid YAML"},
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        output = result.stdout + result.stderr
+        self.assertIn("::error::gamma: gamma/evals/machine.yml is not valid YAML", output)
+        [warning] = [line for line in output.splitlines() if "missing gate label" in line]
+        self.assertIn("alpha", warning)
+        self.assertNotIn("gamma", warning)
+
+    def test_an_error_over_several_lines_stays_one_annotation(self) -> None:
+        # A workflow command ends at the first newline, and a YAML error has
+        # several; `%` is the escape character, so it is escaped too.
+        result = self.run_results([
+            {"skill": "gamma", "gate": "", "error": "line one\r\nline two at 100%"},
+        ])
+        self.assertIn(
+            "::error::gamma: line one%0D%0Aline two at 100%25",
+            result.stdout.splitlines(),
+        )
+
+    def test_an_empty_error_is_still_not_a_missing_label(self) -> None:
+        result = self.run_results([{"skill": "gamma", "gate": "", "error": ""}])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("missing gate label", result.stdout)
+
+    def test_what_select_holds_back_is_read_as_select_wrote_it(self) -> None:
+        repo = Repo(self)
+        graded = tier0_dataset("gamma")
+        graded[EVALUATIONS_KEY].append(
+            {"id": "gamma-graded", TRIGGER_KEY: True, "prompt": "do it",
+             "logs_contain": ["gamma.py"]}
+        )
+        folder = repo.skill("gamma", dataset=graded)
+        repo.activate()
+        (folder / "evals" / "machine.yml").write_text("os: [\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            skipped = select_module.plan(["gamma"], routing=False, labels=set())["skipped"]
+
+        result = self.run_results(skipped)
+        self.assertNotEqual(result.returncode, 0)
+        [line] = [line for line in result.stdout.splitlines() if line.startswith("::error::")]
+        self.assertTrue(line.startswith("::error::gamma: "), line)
+        self.assertIn("machine.yml is not valid YAML", line)
+        self.assertNotIn("error: ", line)
+        self.assertIn("gamma's behavioral cases could not be planned", result.stderr)
+
+
 class TestSchemaStaysInSyncWithParser(unittest.TestCase):
     """The schema is documentation; these tests stop it becoming fiction."""
 

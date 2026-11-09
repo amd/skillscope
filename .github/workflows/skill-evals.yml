@@ -697,7 +697,9 @@ jobs:
   #   * testable change          -> pass iff every leg that ran passed.
   #
   # A leg held back by a missing gate label is warned about, not failed: a pull
-  # request should not be blocked by a test it deliberately did not request.
+  # request should not be blocked by a test it deliberately did not request. A
+  # skill held back because its machine.yml could not be planned is failed:
+  # nobody chose not to run it.
   results:
     name: results
     needs: [discover, routing, behavior, behavior-scoped]
@@ -719,11 +721,16 @@ jobs:
           SKIPPED: ${{ needs.discover.outputs.skipped }}
           HARNESS: ${{ job.workflow_ref }}
         run: |
+          import json
           import os
           import sys
 
           def value(name: str) -> str:
               return os.environ.get(name, "")
+
+          def annotation(text: str) -> str:
+              # A workflow command ends at the first newline.
+              return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
           print(f"harness:           {value('HARNESS')}")
           print(f"discover:          {value('DISCOVER')}")
@@ -740,12 +747,19 @@ jobs:
               sys.exit(f"The discover job did not succeed ({value('DISCOVER')}).")
 
           # Say loudly when a change went out without running on real hardware.
-          skipped = value("SKIPPED").strip()
-          if skipped and skipped != "[]":
+          held = json.loads(value("SKIPPED").strip() or "[]")
+          gated = [item for item in held if "error" not in item]
+          if gated:
               print(
                   "::warning::These skills' behavioral cases were held back for a "
-                  f"missing gate label and did not run: {skipped}"
+                  f"missing gate label and did not run: {json.dumps(gated)}"
               )
+          # `select` holds back a skill whose machine.yml it could not plan, and
+          # plans the rest. Usually the structural step has already failed the
+          # discover job on the same file; this is for when it has not.
+          unplanned = [item for item in held if "error" in item]
+          for item in unplanned:
+              print(f"::error::{annotation(item['skill'] + ': ' + item['error'])}")
 
           legs = (
               ("Routing", "ROUTING_WANTED", "ROUTING"),
@@ -758,6 +772,10 @@ jobs:
               f"{label} did not pass ({value(result)})."
               for label, _, result in requested
               if value(result) != "success"
+          ]
+          failures += [
+              f"{item['skill']}'s behavioral cases could not be planned and did not run."
+              for item in unplanned
           ]
           if failures:
               sys.exit("\n".join(failures))
