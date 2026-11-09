@@ -1294,10 +1294,13 @@ class TestSelection(unittest.TestCase):
         self.assertIn("Permission denied", broken["error"])
 
     def test_yaml_the_parser_rejects_without_a_yaml_error_does_not_drop_the_matrix(self) -> None:
-        # PyYAML raises ValueError for a timestamp that is not a date, and
-        # RecursionError for nesting deeper than the interpreter allows.
+        # Each of these is rejected with something other than a YAMLError:
+        # ValueError, AttributeError, KeyError, and RecursionError for nesting
+        # deeper than the interpreter allows.
         for name, text in (("date", "labels: 2001-13-45\n"),
-                           ("nesting", "labels: " + "[" * 100_000 + "\n")):
+                           ("timestamp tag", "labels: !!timestamp x\n"),
+                           ("bool tag", "labels: !!bool x\n"),
+                           ("nesting", "labels: " + "[" * 2_000 + "\n")):
             with self.subTest(name):
                 self.repo.skill("gamma", dataset=self.graded)
                 (self.repo.root / "gamma" / "evals" / "machine.yml").write_text(

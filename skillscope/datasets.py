@@ -608,11 +608,13 @@ def _read_machine(skill: str) -> dict:
     except (OSError, UnicodeDecodeError) as exc:
         # Same treatment as bad YAML: the file is there and says nothing usable.
         raise SystemExit(f"error: {path} could not be read: {exc}") from None
+    # Any exception, not only YAMLError: PyYAML rejects some input with
+    # ValueError, AttributeError or KeyError (a tag whose value it cannot
+    # construct, such as `!!timestamp x`), and deep nesting raises
+    # RecursionError. `safe_load` of a string does nothing else that can fail.
     try:
         data = yaml.safe_load(text) or {}
-    # Not every rejection is a YAMLError: PyYAML raises ValueError for a
-    # timestamp that is no date, and nesting can exhaust the recursion limit.
-    except (yaml.YAMLError, ValueError, RecursionError) as exc:
+    except Exception as exc:  # noqa: BLE001 -- every rejection is the file's
         # As SystemExit, which every per-skill handler turns into that skill's
         # failure; a parser exception would end the whole command instead.
         raise SystemExit(f"error: {path} is not valid YAML: {exc}") from None
