@@ -143,9 +143,13 @@ def _frontmatter(text: str) -> tuple[dict | None, str, str]:
 
     import yaml  # noqa: PLC0415 -- keeps the run path stdlib-only
 
+    # Any exception, not only YAMLError: PyYAML rejects some input with
+    # ValueError, AttributeError or KeyError (a tag whose value it cannot
+    # construct, such as `!!timestamp x`), and deep nesting raises
+    # RecursionError. `safe_load` of a string does nothing else that can fail.
     try:
         declared = yaml.safe_load(match.group("frontmatter"))
-    except yaml.YAMLError as exc:
+    except Exception as exc:  # noqa: BLE001 -- every rejection is the file's
         return None, "", f"frontmatter is not valid YAML: {exc}"
     if not isinstance(declared, dict):
         return None, "", (
