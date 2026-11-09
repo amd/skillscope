@@ -51,7 +51,7 @@
           "env": {
             "type": "object",
             "additionalProperties": { "type": "string" },
-            "description": "Set for the agent once the prerequisite has been installed. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear; `PATH` and the names the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`) are refused. The skillscope parser enforces those rules, a command for every platform in `os`, and unique names, none of which this schema expresses.",
+            "description": "Set for the agent once the prerequisite has been installed. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear; `PATH`, the names the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`), and the two inputs themselves are refused. The skillscope parser enforces those rules, a command for every platform in `os`, and unique names, none of which this schema expresses.",
             "examples": [{ "PYTHONPATH": "${SKILL_CACHE_DIR}/decoder/python" }]
           }
         }
