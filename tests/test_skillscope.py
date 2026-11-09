@@ -6837,6 +6837,53 @@ class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
             engine_prerequisites._on_expire()
             self.assertFalse(cache.exists())
 
+    def test_a_cache_made_as_the_watchdog_fires_is_not_left_behind(self) -> None:
+        # The watchdog's hard exit can land between the directory being made
+        # and being recorded. Whatever is on disk once its callback returns
+        # stays there: `os._exit` follows, and no `finally` runs.
+        self.skill("needs-tool", _machine(_tool()))
+        self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
+        real_mkdtemp = tempfile.mkdtemp
+        seen: dict = {}
+        watchdog: list[threading.Thread] = []
+
+        def mkdtemp_as_the_watchdog_fires(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            if watchdog:
+                return path
+            self.addCleanup(shutil.rmtree, path, True)
+
+            def expire() -> None:
+                engine_prerequisites._on_expire()
+                seen["left"] = Path(path).exists()
+
+            watchdog.append(threading.Thread(target=expire, daemon=True))
+            watchdog[0].start()
+            # Gives the watchdog the window; with the directory recorded under
+            # its lock, it waits for the record instead.
+            watchdog[0].join(timeout=0.5)
+            return path
+
+        with mock.patch.object(engine_prerequisites.tempfile, "mkdtemp",
+                               mkdtemp_as_the_watchdog_fires), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.suppress(engine_prerequisites.PrerequisiteError), \
+                engine_prerequisites.on_host("needs-tool"):
+            pass
+        watchdog[0].join(timeout=10)
+        self.assertFalse(watchdog[0].is_alive())
+        self.assertFalse(seen["left"], "the cache outlived the watchdog's hard exit")
+
+    def test_no_cache_is_made_once_the_watchdog_has_fired(self) -> None:
+        self.skill("needs-tool", _machine(_tool()))
+        self.addCleanup(setattr, engine_prerequisites, "_steps_closed", False)
+        engine_prerequisites._steps_closed = True
+        with mock.patch.object(engine_prerequisites.tempfile, "mkdtemp") as mkdtemp, \
+                self.assertRaises(engine_prerequisites.PrerequisiteError), \
+                engine_prerequisites.on_host("needs-tool"):
+            pass
+        mkdtemp.assert_not_called()
+
     def test_a_finished_skill_leaves_nothing_for_the_watchdog(self) -> None:
         self.skill("needs-tool", _machine(_tool()))
         with contextlib.redirect_stdout(io.StringIO()), \
