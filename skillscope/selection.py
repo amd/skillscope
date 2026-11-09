@@ -284,5 +284,5 @@ def plan(
         "default": [leg for leg in include if "environment" not in leg],
         "scoped": [leg for leg in include if "environment" in leg],
         "skipped": skipped,
-        "gates": sorted(leg["gate"] for leg in skipped if leg["gate"]),
+        "gates": sorted({leg["gate"] for leg in skipped if leg["gate"]}),
     }

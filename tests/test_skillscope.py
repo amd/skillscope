@@ -1146,6 +1146,15 @@ class TestSelection(unittest.TestCase):
         self.assertIn("not valid YAML", broken["error"])
         self.assertNotIn("", plan["gates"])
 
+    def test_a_gate_shared_by_two_held_skills_is_named_once(self) -> None:
+        # `gates` is what a person has to add, and one label releases both.
+        self.repo.skill("gamma", dataset=self.graded)
+        self.gpu("alpha")
+        self.gpu("gamma")
+        plan = select_module.plan(["alpha", "gamma"], routing=False, labels=set())
+        self.assertEqual([item["skill"] for item in plan["skipped"]], ["alpha", "gamma"])
+        self.assertEqual(plan["gates"], ["enable_gpu_ci"])
+
 
 class TestWhatABranchChanged(unittest.TestCase):
     """Selection is planned from the merge base, not from the base branch tip.
