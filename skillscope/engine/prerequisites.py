@@ -473,21 +473,35 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
         async def solve(state, generate):
             box = sandbox()
 
+            # What inspect raises for output too large to return or not text,
+            # or a container it cannot reach.
+            exec_errors = (OutputLimitExceededError, OSError, UnicodeDecodeError)
+
             async def run(argv: list[str], extra: dict[str, str]) -> tuple[int, str]:
-                # inspect raises for output too large to return or not text;
-                # as a failed step, `provide` reports it under the
+                # As a failed step, `provide` reports it under the
                 # prerequisite's name rather than as a bare sandbox error.
                 try:
                     result = await box.exec(argv, cwd=CONTAINER_STEPS, env=extra)
-                except (OutputLimitExceededError, OSError, UnicodeDecodeError) as exc:
+                except exec_errors as exc:
                     return 126, f"{type(exc).__name__}: {exc}"
                 return result.returncode, result.stdout + result.stderr
 
-            made = await box.exec(["mkdir", "-p", CONTAINER_STEPS, CONTAINER_CACHE])
-            if not made.success:
+            async def housekeeping(argv: list[str]) -> str | None:
+                """None if `argv` succeeded, else why it did not.
+
+                For the directories around the steps, which belong to no
+                prerequisite but fail the same ways.
+                """
+                try:
+                    result = await box.exec(argv)
+                except exec_errors as exc:
+                    return f"{type(exc).__name__}: {exc}"
+                return None if result.success else _tail(result.stderr)
+
+            failed = await housekeeping(["mkdir", "-p", CONTAINER_STEPS, CONTAINER_CACHE])
+            if failed is not None:
                 raise PrerequisiteError(
-                    f"could not create {CONTAINER_ROOT} in the container: "
-                    f"{_tail(made.stderr)}"
+                    f"could not create {CONTAINER_ROOT} in the container: {failed}"
                 )
             try:
                 # Inside the `try`, so a copy that fails partway still has the
@@ -517,12 +531,12 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
                 with contextlib.suppress(Exception):
                     await box.exec(["rm", "-rf", CONTAINER_STEPS])
                 raise
-            removed = await box.exec(["rm", "-rf", CONTAINER_STEPS])
-            if not removed.success:
+            failed = await housekeeping(["rm", "-rf", CONTAINER_STEPS])
+            if failed is not None:
                 # The agent must not start with copied evals/ files in reach.
                 raise PrerequisiteError(
                     f"could not remove {CONTAINER_STEPS} before the agent "
-                    f"starts: {_tail(removed.stderr)}"
+                    f"starts: {failed}"
                 )
             return await as_solver(make_agent(provision.env))(state, generate)
 
