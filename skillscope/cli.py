@@ -83,7 +83,8 @@ from . import (
     usage,
 )
 from . import selection as select_module
-from .agent import check_api_reachable, enforce_model_policy
+from . import harness as harnesses
+from .agent import check_api_reachable
 
 # The engines a graded run can be driven by.
 #   claude-code             -- the real CLI in a sandbox, via inspect_swe (Linux only)
@@ -114,6 +115,81 @@ ROUTING_ENGINES = tuple(ENGINES)
 # it runs on every platform, where `claude-code` needs a POSIX guest and a
 # container runtime, and a default that refuses on Windows is not a default.
 DEFAULT_ENGINE = "claude-code-no-sandbox"
+
+# The neutral names for where an agent runs. `host` and `sandbox` say only that.
+# The older names also say which agent, and still work, meaning Claude Code.
+NEUTRAL_ENGINES = {"host": "claude-code-no-sandbox", "sandbox": "claude-code"}
+
+
+def resolve_leg(
+    engine: str | None, harness_name: str | None
+) -> tuple[str, harnesses.Harness]:
+    """Settle which agent runs, and where, from whatever was said about each.
+
+    The two are separate questions. `--engine` is where (on the host, or in a
+    container) and `--harness` is what. The older engine names, which carry the
+    agent in them, keep working and mean Claude Code; naming a different
+    harness beside one is a contradiction and is refused rather than guessed.
+    What comes back is the engine in the spelling the rest of the code branches
+    on, and the harness itself.
+    """
+    explicit = harness_name or os.environ.get("SKILLSCOPE_HARNESS") or None
+    subject = harnesses.get(explicit)
+    # Unnamed means `host`, the neutral spelling of DEFAULT_ENGINE: the older
+    # spelling names Claude Code, which would contradict any other harness.
+    engine = engine or os.environ.get("SKILLSCOPE_ENGINE") or "host"
+
+    if engine in NEUTRAL_ENGINES:
+        leg = NEUTRAL_ENGINES[engine]
+    elif engine in ENGINES:
+        if explicit and subject.name != harnesses.DEFAULT:
+            neutral = {v: k for k, v in NEUTRAL_ENGINES.items()}[engine]
+            raise SystemExit(
+                f"error: --engine {engine} runs Claude Code, which contradicts "
+                f"--harness {subject.name}. Use --engine {neutral} to say where "
+                "the agent runs without saying which one."
+            )
+        subject = harnesses.get(harnesses.DEFAULT)
+        leg = engine
+    else:
+        raise SystemExit(
+            f"error: unknown engine {engine!r}. Known engines: "
+            f"{', '.join([*NEUTRAL_ENGINES, *ENGINES])}."
+        )
+
+    if leg == "claude-code" and not subject.supports_sandbox:
+        raise SystemExit(
+            f"error: the {subject.name} harness has no sandboxed leg. Use "
+            "--engine host, which runs it on the host."
+        )
+    return leg, subject
+
+
+def _engine_label(engine: str, subject: harnesses.Harness) -> str:
+    """The engine as a report and the console spell it for this harness.
+
+    Claude Code keeps the older name, so reports from before there was a choice
+    stay comparable. Any other harness gets the neutral name: the old ones name
+    an agent that did not run.
+    """
+    if subject.name == harnesses.DEFAULT:
+        return engine
+    return {v: k for k, v in NEUTRAL_ENGINES.items()}.get(engine, engine)
+
+
+def _leg_meta(args: argparse.Namespace) -> dict:
+    """Which agent graded, where it ran, and which build of it, for a report.
+
+    The engine keeps its older spelling for Claude Code, so reports from before
+    there was a choice stay comparable; any other harness is reported in the
+    neutral names, because the old ones would name an agent that did not run.
+    """
+    subject = harnesses.get(getattr(args, "harness", None))
+    return {
+        "engine": _engine_label(args.engine, subject),
+        "harness": subject.name,
+        "harness_version": subject.version(),
+    }
 
 # Where JSON reports land inside the repo under test. One gitignored directory
 # rather than a path per repo, so a report is always in the same place.
@@ -378,7 +454,22 @@ def _prepare_graded_run(
         raise SystemExit(code)
     selected = _selected_skills(args.skill)
     _structural_or_exit(selected if scope is None else sorted(set(scope)))
-    args.model = enforce_model_policy(args.model) or args.model
+    args.engine, subject = resolve_leg(
+        getattr(args, "engine", None), getattr(args, "harness", None)
+    )
+    args.harness = subject.name
+    if subject.name != harnesses.DEFAULT and getattr(args, "command", "") == "behavioral":
+        # Behavioral cases are graded by an LLM judge, and that judge still goes
+        # through an Anthropic model whatever agent produced the run. Saying so
+        # beats running the agent and then failing every judged expectation.
+        raise SystemExit(
+            f"error: --harness {subject.name} cannot run behavioral yet: the "
+            "judge that grades its expectations is not available through this "
+            "harness. Routing runs on it."
+        )
+    # The model is the harness's to name and to pin: Claude Code keeps `opus`
+    # and the CI pin it always had.
+    args.model = subject.pin_model(subject.resolve_model(args.model))
     if getattr(args, "engine", DEFAULT_ENGINE) in INSPECT_ENGINES:
         # The CLI-based reachability probe tests something these engines do not
         # use, but they still need one of their own: a graded run starts
@@ -399,7 +490,13 @@ def _prepare_graded_run(
         from .engine import pricing as engine_pricing
 
         args.pricing_note = engine_pricing.apply()
-        if not args.skip_preflight:
+        if not args.skip_preflight and subject.name != harnesses.DEFAULT:
+            # The harness's own CLI is all a routing run reaches: its agent is a
+            # subprocess and there is no judge, so no provider is probed.
+            ok, detail = subject.preflight(args.model)
+            if not ok:
+                raise SystemExit(f"error: {subject.binary} not reachable -- {detail}")
+        elif not args.skip_preflight:
             from .engine import models as engine_models
 
             ok, detail = engine_models.check_reachable(engine_models.resolve(args.model))
@@ -512,7 +609,7 @@ def _finish_routing(
         list(routing_set),
         {
             "model": args.model,
-            "engine": args.engine,
+            **_leg_meta(args),
             "effort": args.effort,
             "skills": list(routing_set),
             "extended": args.extended,
@@ -546,6 +643,7 @@ def cmd_routing(args: argparse.Namespace) -> int:
         _empty_room(args)
 
     _prepare_graded_run(args, list(routing_set))
+    subject = harnesses.get(args.harness)
     started = time.time()
 
     # Pool the routing set's cases: skill Y's positives are skill X's
@@ -565,7 +663,10 @@ def cmd_routing(args: argparse.Namespace) -> int:
     # run does not honour described a parallelism nobody chose. `--jobs` still
     # means what it always did for `structural --external`, which is the one
     # command that reads it.
-    print(f"[routing] {len(cases)} cases, model={args.model}, engine={args.engine}")
+    where = f"engine={_engine_label(args.engine, subject)}"
+    if subject.name != harnesses.DEFAULT:
+        where = f"harness={subject.name}, {where}"
+    print(f"[routing] {len(cases)} cases, model={args.model}, {where}")
 
     from .engine import models as engine_models
     from .engine import routing as inspect_routing
@@ -583,6 +684,7 @@ def cmd_routing(args: argparse.Namespace) -> int:
         max_budget_usd=args.max_budget_usd,
         jobs=args.jobs,
         log_dir=args.keep_logs or None,
+        harness=subject,
     )
     if args.engine == "claude-code":
         # A container really was started: `verify.require()` refuses every
@@ -653,11 +755,21 @@ def cmd_routing(args: argparse.Namespace) -> int:
         # the list also carries `--no-session-persistence`, which says nothing
         # about spend, so `if flags:` would claim an enforced budget for a run
         # that passed none.
-        flags = inspect_routing.host_cost_flags(args.max_budget_usd)
+        flags = subject.cost_flags(args.max_budget_usd)
         if "--max-budget-usd" in flags:
             extra["max_budget_usd"] = args.max_budget_usd
-            extra["max_budget_enforced_by"] = "claude --max-budget-usd"
+            extra["max_budget_enforced_by"] = f"{subject.binary} --max-budget-usd"
             extra["max_budget_can_bind"] = True
+        elif (
+            subject.name != harnesses.DEFAULT
+            and args.max_budget_usd
+            and args.max_budget_usd > 0
+        ):
+            # Asked for and not available. Saying so is the difference between a
+            # run that stayed under a cap and a run whose cap could never fire.
+            extra["max_budget_usd"] = args.max_budget_usd
+            extra["max_budget_enforced_by"] = None
+            extra["max_budget_can_bind"] = False
         extra["optional_cli_flags_used"] = sorted(f for f in flags if f.startswith("--"))
 
     return _finish_routing(
@@ -674,6 +786,7 @@ def cmd_routing(args: argparse.Namespace) -> int:
 
 def cmd_behavioral(args: argparse.Namespace) -> int:
     skills = _prepare_graded_run(args)
+    subject = harnesses.get(args.harness)
     started = time.time()
 
     cases = []
@@ -707,14 +820,14 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         # through an inspect model provider.
         from .engine import no_sandbox
 
-        no_sandbox.require_local()
+        no_sandbox.require_local(subject)
         outcomes = inspect_behavioral.run(
             skills,
             gradable,
             engine_models.resolve(args.model),
             args.effort,
-            solver_factory=lambda d: no_sandbox.claude_code_no_sandbox(
-                args.model, args.effort, d
+            solver_factory=lambda d: no_sandbox.harness_solver(
+                subject, args.model, args.effort, d
             ),
         )
     else:
@@ -731,7 +844,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         outcomes,
         {
             "model": args.model,
-            "engine": args.engine,
+            **_leg_meta(args),
             "effort": args.effort,
             "skills": skills,
             "extended": args.extended,
@@ -828,7 +941,13 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--model", default="opus", help="Model alias. CI pins this to opus. Default: opus."
+        "--model",
+        default=None,
+        help=(
+            "Model to run. Each harness has its own default and its own names "
+            "(`opus`, `sonnet` and `haiku` are understood by all of them). CI "
+            "pins each harness to one model. Default: opus for claude-code."
+        ),
     )
     parser.add_argument(
         "--effort",
@@ -854,16 +973,28 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--engine",
-        default=os.environ.get("SKILLSCOPE_ENGINE", DEFAULT_ENGINE),
-        choices=ENGINES,
+        default=None,
+        choices=[*NEUTRAL_ENGINES, *ENGINES],
         help=(
-            "Which eval engine runs the cases. Both drive the real claude "
-            "CLI, under inspect_ai; what differs is where it runs. "
-            "`claude-code-no-sandbox` runs it on the host, on any platform. "
-            "`claude-code` runs it inside a container via inspect_swe, which "
-            "needs a POSIX guest and so is Linux only, and additionally "
-            "needs `pip install 'skillscope[verify]'`. Both run both graded "
-            "commands. Default: claude-code-no-sandbox, or $SKILLSCOPE_ENGINE."
+            "Where the agent runs, under inspect_ai. `host` runs it on the "
+            "host, on any platform. `sandbox` runs it inside a container via "
+            "inspect_swe, which needs a POSIX guest and so is Linux only, and "
+            "additionally needs `pip install 'skillscope[verify]'`; only a "
+            "harness with a sandboxed leg can use it. `claude-code-no-sandbox` "
+            "and `claude-code` are the older names for those two and mean "
+            "Claude Code. Default: host, or $SKILLSCOPE_ENGINE."
+        ),
+    )
+    parser.add_argument(
+        "--harness",
+        default=None,
+        metavar="NAME",
+        help=(
+            "The agent that runs the cases: "
+            + ", ".join(harnesses.names())
+            + ". Each is reported as its own result; harnesses send different "
+            "prompts and offer different tools, so their scores are not "
+            "comparable. Default: claude-code, or $SKILLSCOPE_HARNESS."
         ),
     )
     _add_timeout_argument(parser)

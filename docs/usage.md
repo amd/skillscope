@@ -227,7 +227,9 @@ Two failure modes are worth knowing before reading a report. A routing case that
 ends without the agent either activating a skill or answering is reported as an
 **error** rather than a missed trigger. And if the runner has its own skills
 installed (usually `~/.claude/skills`), they join the room for every case and
-the report says so — set `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` so the
+the report says so — set one of the harness's own credential variables
+(`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` for Claude Code,
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` for Copilot CLI) so the
 run can use an isolated config dir.
 
 ## Hardware a skill needs
@@ -249,19 +251,39 @@ environment gets one matrix, labels and all.
 
 ## Which engine grades a run
 
-`--engine` chooses what actually runs the cases. The dataset, the CLI and the
-reports are identical whichever you pick; only the thing driving the agent
-changes.
+Two choices decide what runs the cases, and they are separate: `--engine` is
+*where* the agent runs, and `--harness` is *which* agent. The dataset and the
+reports are identical whichever you pick.
 
-| `--engine` | What runs | Runs in | Needs |
-| --- | --- | --- | --- |
-| `claude-code-no-sandbox` (default) | The real CLI, under `inspect_ai` | the host | the CLI on `PATH` |
-| `claude-code` | The real CLI, via `inspect_swe` | a sandbox | `skillscope[verify]`, Linux only |
+| `--engine` | Where it runs | Needs |
+| --- | --- | --- |
+| `host` (default) | the host, under `inspect_ai` | the harness's CLI on `PATH` |
+| `sandbox` | a container, via `inspect_swe` | `skillscope[verify]`, Linux only, and a harness with a sandboxed leg |
 
-Both drive the agent a skill is written for, so what differs between them
-is **where the agent runs**, not what it is. What it is -- the harness -- is a
-separate question, answered in [harnesses.md](harnesses.md). That is the axis worth choosing
-along: the host measures the machine as it is, with whatever else is installed
+`claude-code-no-sandbox` and `claude-code` are the older spellings of `host` and
+`sandbox`. They name an agent as well as a place, so they mean Claude Code, and
+combining one with a different `--harness` is refused.
+
+| `--harness` | Agent | Sandboxed leg |
+| --- | --- | --- |
+| `claude-code` (default) | Claude Code | yes |
+| `copilot` | GitHub Copilot CLI | no |
+
+`--harness` and `--engine` can also come from `$SKILLSCOPE_HARNESS` and
+`$SKILLSCOPE_ENGINE`. Each harness names models its own way and has its own
+default; `--model opus`, `sonnet` and `haiku` mean the right thing for every
+harness, and CI holds each harness to one model. A report from one harness is its
+own result and is not comparable with another's. How a harness works, and how to
+add one, is in [harnesses.md](harnesses.md).
+
+**`copilot` today runs routing only.** It authenticates from
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`, needs no model credential,
+and in Actions needs `permissions: copilot-requests: write` in the calling
+workflow. `behavioral` is refused on it until the judge that grades its
+expectations is available through the harness. Its preflight sends one real
+prompt, which is billed like any other.
+
+Where the agent runs is the axis worth choosing along: the host measures the machine as it is, with whatever else is installed
 on it, and the sandbox measures the skill alone. When the two disagree, the
 disagreement is usually a fact about one of those environments rather than
 about the skill -- which is a thing one engine on its own cannot tell you.
@@ -278,9 +300,11 @@ leg immune by construction: its guest has no `~/.claude` to contribute.
 
 The host leg cannot read the CLI's session-init event, so it has no way to
 notice such contamination or report it -- and therefore refuses to run a
-routing leg at all unless `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
-set, which is what lets it redirect the CLI's config dir away from the
-runner's own. Refusing beats being
+routing leg at all unless one of the harness's credential variables is set
+(see [harnesses.md](harnesses.md): `ANTHROPIC_API_KEY` or
+`ANTHROPIC_AUTH_TOKEN` for Claude Code, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or
+`GITHUB_TOKEN` for Copilot CLI), which is what lets it redirect the CLI's
+config dir away from the runner's own. Refusing beats being
 quietly wrong about every case.
 
 Both legs stop at the decision, by different routes. `claude-code`'s calls
