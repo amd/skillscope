@@ -8,7 +8,8 @@ SPDX-License-Identifier: MIT
 
 Everything the [README](../README.md) leaves out: what each check asserts, every
 CLI flag, and every workflow input. For writing a skill's dataset, see
-[authoring-evals.md](authoring-evals.md).
+[authoring-evals.md](authoring-evals.md); for the same requirements as a list
+to tick through, see [checklist.md](checklist.md).
 
 ## Contents
 
