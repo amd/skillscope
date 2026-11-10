@@ -121,7 +121,7 @@ def skill_errors(skill: str) -> list[str]:
             *_body_errors(body),
         )
     ]
-    return found + _required_errors(skill, folder, cfg)
+    return found + _required_errors(skill, folder, cfg) + _path_errors(skill, folder)
 
 
 def _frontmatter(text: str) -> tuple[dict | None, str, str]:
@@ -231,6 +231,96 @@ def _body_errors(body: str) -> list[str]:
             "an agent reads it when it needs it rather than on every load."
         )
     ]
+
+
+EVALS_DIR = "evals"
+
+
+def _shipped_files(folder: Path) -> dict[str, str]:
+    """Files the skill ships in a subdirectory, keyed by their name.
+
+    Subdirectories only. A bare `SKILL.md` or `skill-card.md` name turns up in
+    install instructions for unrelated trees, so matching on it says nothing.
+    `evals/` is test data and is never the agent's to read.
+    """
+    shipped: dict[str, str] = {}
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(folder)
+        if len(relative.parts) < 2 or relative.parts[0] == EVALS_DIR:
+            continue
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        shipped.setdefault(path.name, relative.as_posix())
+    return shipped
+
+
+def _resolves(base: Path, mention: str, folder: Path) -> bool:
+    """Whether `mention` names a file that exists inside the skill, read from `base`."""
+    candidate = (base / mention).resolve()
+    try:
+        candidate.relative_to(folder.resolve())
+    except ValueError:
+        return False  # climbed out of the skill, so it is not the skill's file
+    return candidate.is_file()
+
+
+def _path_errors(skill: str, folder: Path) -> list[str]:
+    """Paths the skill's markdown points at that are not in the skill.
+
+    A skill that names its own files by where they sit in its source repo is
+    right there and wrong everywhere else: nothing rewrites paths in the body
+    when the folder is vendored or renamed, so an agent follows the path, finds
+    nothing, and improvises. The skill keeps passing its evals, because
+    improvising often works.
+
+    Reported only when the mention ends with exactly where the file ships, so
+    what was meant is not in doubt.
+    """
+    shipped = _shipped_files(folder)
+    if not shipped:
+        return []
+
+    found: list[str] = []
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in references.MARKDOWN_SUFFIXES:
+            continue
+        relative = path.relative_to(folder)
+        if relative.parts[0] == EVALS_DIR:
+            continue
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue  # the reader that owns this file reports why
+        for mention in sorted(references.path_mentions(text)):
+            actual = shipped.get(mention.rsplit("/", 1)[-1])
+            if actual is None or mention == actual:
+                continue
+            # The tail has to be where the file really is, or this is a path to
+            # something else that happens to share a name.
+            if not mention.endswith("/" + actual):
+                continue
+            # An absolute path is somewhere else entirely: a container mount, a
+            # host layout. Not the skill's to resolve.
+            if mention.startswith("/"):
+                continue
+            # Resolved against the file it is written in, the way a markdown
+            # link is, or against the skill root, the way an agent handed a
+            # skill folder reads it. Either is a real way to reach the file, so
+            # only a path that answers to neither is unreachable.
+            if _resolves(path.parent, mention, folder) or _resolves(folder, mention, folder):
+                continue
+            found.append(
+                f"{skill}/{relative.as_posix()}: `{mention}` is not in the "
+                f"skill; that file ships at `{actual}`. A path written for the "
+                "source repo's layout does not survive being vendored."
+            )
+    return found
 
 
 def _required_errors(skill: str, folder: Path, cfg: config.Config) -> list[str]:
