@@ -326,68 +326,16 @@ without it explores. Three flags decide what a run costs.
 | `--max-cases N` | every case | Grade only the first N cases of each selected skill, after `--only` and `--extended` have chosen them. Both sides run the same N, and the report says the run did not cover the whole suite. |
 | `--concurrency N` | inspect's default | How many cases may be in flight at once. Where the wall clock goes on the baseline half. Raise it as far as the engine's sandboxes and the model's rate limits allow. |
 
-None of the three reaches a `--from-logs` rebuild, which runs no agent, and
-passing one with it is refused rather than ignored. `--no-extended` is refused
-with it for the same reason: which evals were graded is a property of the run
-that wrote the logs. `--skill` and `--only` do work on a rebuild, where they
-narrow what is reported rather than what is run.
+Both halves write which side they were, whose skill they were about, and where
+that skill was on disk into their inspect log metadata (`skillscope_baseline`,
+`skillscope_skill`, `skillscope_skill_dir`).
 
-Both halves write which side they were, whose skill they were about, where that
-skill was on disk, and which invocation wrote them into their inspect log
-metadata (`skillscope_baseline`, `skillscope_skill`, `skillscope_skill_dir`,
-`skillscope_staleness_run`). So a finished run can be looked at again without
-paying for it twice:
-
-```bash
-skillscope staleness --from-logs .skillscope/logs
-```
-
-That reaches no model and runs no preflight, having nothing to spend.
-
-A rebuild reads **one run per skill, the most recent**. Nothing prunes
-`.skillscope/logs`, so after your second staleness run the directory holds two
-of everything, and reading both would report every case once per run and count
-it that many times in the totals: a one-case skill would come back as a
-two-case suite with the same row printed twice. The report names the run it
-read and lists the ids it passed over. `--run-id` reads one of those instead:
-
-```bash
-skillscope staleness --from-logs .skillscope/logs --run-id 7f3a9c21
-```
-
-Every key is load-bearing. `skillscope_skill_dir` is what lets a rebuild judge
-whether the baseline was really empty: the check recognises a tool call that
-reached the skill by comparing against the skill's absolute path, so a reader
-that worked that path out for itself would be working out its own rather than
-the run's, and would report a baseline the run had voided as a clean one. A log
-written without the key is read as an unknown room rather than an empty one.
-
-The run id is the key that makes this safe to point at `.skillscope/logs`. That directory is shared with `behavioral`
-and `routing`, is gitignored wholesale, and nothing prunes it — and every
-ordinary `behavioral` run writes the same `skillscope_baseline: false` a graded
-half does, with no run id. A plain `behavioral` log is therefore shaped exactly
-like a graded half, and always will be, since only `staleness` mints an id.
-Pairing on the skill alone would splice an unrelated run from last month in as
-this comparison's "with skill" side, under a table that reads exactly as
-confidently as a real one.
-
-So logs carrying no run id are passed over, and a directory of plain
-`behavioral` logs rebuilds as nothing rather than as a comparison. Logs written
-before the id existed are passed over for the same reason; `--unlabelled-logs`
-reads them:
-
-```bash
-skillscope staleness --from-logs .skillscope/logs --unlabelled-logs
-```
-
-That asserts the directory holds nothing else for the skills in it. Even then,
-a group of unlabelled logs needs a baseline half, which nothing but `staleness`
-ever writes, so ordinary `behavioral` logs stay out whatever flags you pass.
-Where one side holds several unlabelled logs there is a choice to make and
-nothing to make it with, so every case in that group is reported `ungraded`.
-
-The model and effort are not reported for a rebuild: nothing reads them off
-the logs, and the logs need not agree on them.
+`skillscope_skill_dir` is the load-bearing one. It is what lets the baseline be
+judged empty: the check recognises a tool call that reached the skill by
+comparing against the skill's absolute path, so a reader working that path out
+for itself would be working out its own rather than the run's, and would report
+a baseline the run had voided as a clean one. A log written without the key is
+read as an unknown room rather than an empty one.
 
 Budget more wall clock than a `behavioral` run of the same cases, and more
 than double it. `--timeout` defaults to twice what the single-pass commands

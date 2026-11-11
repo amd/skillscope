@@ -86,7 +86,6 @@ def build_task(
     *,
     solver_factory,
     baseline: bool = False,
-    run_key: str | None = None,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
@@ -123,7 +122,6 @@ def build_task(
             SKILL_KEY: skill,
             # Resolved here, where it is known to be right. See `SKILL_DIR_KEY`.
             SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
-            **({STALENESS_RUN_KEY: run_key} if run_key else {}),
         },
         tags=["skillscope", "baseline" if baseline else "graded"],
         dataset=samples,
@@ -482,19 +480,6 @@ CALL_TOKEN = "skillscope_call"
 BASELINE_KEY = "skillscope_baseline"
 SKILL_KEY = "skillscope_skill"
 
-# Which staleness invocation wrote this log. Only `cmd_staleness` sets it, and
-# it mints one value per invocation, so two logs carrying the same value are
-# the two halves of one comparison and nothing else is.
-#
-# `--from-logs` needs this and cannot be built without it. The log directory is
-# shared by `behavioral`, `verify` and `routing`, is gitignored wholesale and
-# is never pruned, and every ordinary `behavioral` run stamps
-# `BASELINE_KEY: False` -- so grouping on `(skill, baseline)` alone splices an
-# unrelated month-old run in as the "with skill" half, under a table that reads
-# as confidently as a real one. `run_eval` reached the same conclusion for the
-# same directory and solved it the same way, with `CALL_TOKEN`.
-STALENESS_RUN_KEY = "skillscope_staleness_run"
-
 # Where the skill was on the machine that ran the agent.
 #
 # `_skill_marks` needs an absolute directory to recognise a tool call that
@@ -596,7 +581,6 @@ def run(
     solver_factory,
     log_dir: str | None = None,
     baseline: bool = False,
-    run_key: str | None = None,
     attempts: int = 1,
     concurrency: int = 0,
 ) -> list[BehaviorOutcome]:
@@ -605,10 +589,6 @@ def run(
     `baseline` is passed through to the task and used in the progress lines.
     It does not itself remove the skill: the caller's `solver_factory` does
     that, and this says so in the output.
-
-    `run_key` is passed through to the task's metadata. See
-    `STALENESS_RUN_KEY`: only a staleness run sets one, and it is what lets
-    `--from-logs` pair two halves without pairing two unrelated runs.
 
     `attempts` runs every case that many times, as inspect epochs, and the
     epoch comes back on each sample as `BehaviorOutcome.attempt`. One attempt
@@ -649,7 +629,6 @@ def run(
                     model,
                     solver_factory=solver_factory,
                     baseline=baseline,
-                    run_key=run_key,
                 ),
                 model=model,
                 model_args=models.model_args(model),

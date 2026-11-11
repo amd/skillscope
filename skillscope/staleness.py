@@ -69,7 +69,7 @@ they are not a licence for this command to start failing builds.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 
 from .behavior import BehaviorOutcome
 
@@ -112,12 +112,6 @@ class Comparison:
     id: str
     skill: str
     verdict: str
-    # Which staleness run produced this comparison. Empty on a live run,
-    # where there is only one and the report is about it. A rebuild sets it,
-    # because a log directory holds every run anyone has ever done in it and
-    # a report that does not say which one it read is not a measurement of
-    # anything in particular. See `from_logs`.
-    run: str = ""
     # Attempts that produced a grade, and how many of them met every positive
     # claim. One attempt each is the default; `passes_with` is then 0 or 1 and
     # the verdict rules read exactly as they did before repeats existed.
@@ -460,286 +454,6 @@ def pair(
     return comparisons
 
 
-def outcomes_from_log(log) -> tuple[str, bool, str | None, list[BehaviorOutcome]]:
-    """`(skill, was_baseline, run_key, outcomes)` for one inspect log.
-
-    Rebuilt from the samples rather than from a dataset, because an offline
-    reader has no `Case` list: the log is all there is. Prompts are left empty
-    for the same reason -- the comparison is about verdicts, and inventing a
-    prompt field nobody wrote would be worse than an honest blank.
-    """
-    from . import routing as routing_core
-    from .engine import behavioral, scorers
-    from .engine import routing as routing_engine
-
-    eval_meta = log.eval.metadata or {}
-    skill = eval_meta.get(behavioral.SKILL_KEY) or log.eval.task
-    # Where the skill was when the agent ran, not where it is now. Absent from
-    # logs written before the key existed, which makes the room unknown rather
-    # than clean unless this machine happens to have the skill. See
-    # `behavioral.SKILL_DIR_KEY`.
-    skill_dir = eval_meta.get(behavioral.SKILL_DIR_KEY)
-    outcomes: list[BehaviorOutcome] = []
-    for sample in log.samples or []:
-        checks: list[dict] = []
-        for score in (sample.scores or {}).values():
-            checks.extend((score.metadata or {}).get(scorers.CHECKS, []))
-        error = sample.error.message if sample.error is not None else None
-        if error is None and not checks:
-            # Exactly what the live path sets (`behavioral._outcomes`), and it
-            # has to be the same string for the same reason the detector is
-            # shared: a sample whose checks could not be read rebuilds as
-            # `checks=[]`, which makes `_met()` False, which makes the case
-            # `earns_it` off the back of a harness failure. Without this the
-            # rebuild is *more permissive than the run it rebuilds*, quietly
-            # restoring a verdict the live run had voided as `ungraded`.
-            error = "case has no behavioral assertions to grade"
-        outcomes.append(
-            BehaviorOutcome(
-                id=str(sample.id),
-                skill=skill,
-                prompt="",
-                passed=error is None and bool(checks) and all(c["passed"] for c in checks),
-                elapsed_s=round(getattr(sample, "total_time", None) or 0.0, 2),
-                checks=checks,
-                error=error,
-                # inspect's own repeat counter. A run that asked for one
-                # attempt writes 1 on every sample, so this is the identity
-                # on everything but an `--attempts` run.
-                attempt=int(getattr(sample, "epoch", 1) or 1),
-                # Exactly what the live path sets, for the same reason as the
-                # error string above: a rebuild that left this False would
-                # report a provider outage as a skill that failed, which is
-                # the rebuild being more permissive than the run it rebuilds.
-                degraded=routing_core.is_provider_error(error),
-                # Both detected here too. Without the first, a rebuilt
-                # comparison reports every `earns_it` as never having fired;
-                # without the second it is *more permissive than the run it
-                # rebuilds*, quietly restoring verdicts the live run voided.
-                #
-                # `skill_dir` is what keeps the second true off this machine:
-                # the detector needs an absolute path to recognise, and left
-                # to work one out it works out this reader's rather than the
-                # run's. See `behavioral.SKILL_DIR_KEY`.
-                **dict(
-                    zip(
-                        ("activated", "contaminated"),
-                        behavioral._inspect_room(
-                            routing_engine, sample, skill, skill_dir
-                        ),
-                    )
-                ),
-            )
-        )
-    return (
-        skill,
-        bool(eval_meta.get(behavioral.BASELINE_KEY)),
-        eval_meta.get(behavioral.STALENESS_RUN_KEY),
-        outcomes,
-    )
-
-
-@dataclass
-class Rebuild:
-    """The comparisons a log directory yielded, and the runs behind them.
-
-    `runs` holds every staleness run the directory had for each skill, newest
-    first, whether or not it was used. Nothing prunes `.skillscope/logs`, so a
-    directory accumulates runs and "which one is this" stops being a detail:
-    the caller needs it to name the run in the report, and to say what a
-    `--run-id` could have asked for instead.
-    """
-
-    comparisons: list[Comparison]
-    runs: dict[str, list[str]] = field(default_factory=dict)
-
-
-def from_logs(
-    log_dir: str, *, unlabelled: bool = False, run_id: str | None = None
-) -> Rebuild:
-    """Rebuild the comparison from logs already on disk.
-
-    Two runs become a pair because they carry the same skill, the same
-    `STALENESS_RUN_KEY`, and opposite `BASELINE_KEY` -- which is why all three
-    are written as metadata rather than inferred from a task name.
-
-    Grouping on the run id is what makes this safe to point at
-    `.skillscope/logs`, which is the documented thing to do with it. That
-    directory is shared by `behavioral`, `verify` and `routing`, is gitignored
-    wholesale, and nothing prunes it; and every ordinary `behavioral` run
-    stamps `BASELINE_KEY: False`, so a run id is the only thing separating
-    this run's graded half from an unrelated run of the same skill last month.
-
-    One run per skill, the newest, unless `run_id` names another. The run id
-    stops two runs being *spliced* into one comparison; it does not stop them
-    being *pooled*, and pooling is what a directory of accumulated runs
-    produces. Every run of a one-case skill used to add another copy of that
-    case to the report, so the second staleness run anybody did turned a
-    one-case suite into a two-case one and the headline counted it twice --
-    under exactly the invocation the docs give for this. The runs passed over
-    are returned alongside, because a report that drops evidence silently is
-    the other half of the same fault.
-
-    Newest is read off each log's own `created` stamp rather than the file's
-    mtime, which says when the directory was last copied about as often as it
-    says when the run happened.
-
-    Logs with no run id are skipped unless `unlabelled` asks for them. See
-    `LEGACY_RUN` for what that costs and what it is for. They compete for
-    "newest" like any other run once asked for, and stay subject to the
-    ambiguity guard if they win.
-
-    A directory holding only one side of a run is reported as a comparison
-    against nothing, the same way a case missing from one side is: silently
-    dropping it would read as a smaller, cleaner run.
-
-    Logs that are not skillscope's own are passed over. A shared log directory
-    is normal, and failing on a neighbour's file would make this unusable in
-    exactly the directories it is meant for.
-    """
-    from inspect_ai.log import list_eval_logs, read_eval_log
-
-    from .engine import behavioral
-
-    sides: dict[tuple[str, str], dict[bool, list[BehaviorOutcome]]] = {}
-    logs_per_side: dict[tuple[str, str], dict[bool, int]] = {}
-    written: dict[tuple[str, str], str] = {}
-    for info in list_eval_logs(log_dir):
-        log = read_eval_log(info.name)
-        if behavioral.BASELINE_KEY not in (log.eval.metadata or {}):
-            continue
-        skill, baseline, run_key, outcomes = outcomes_from_log(log)
-        key = (skill, run_key or LEGACY_RUN)
-        sides.setdefault(key, {}).setdefault(baseline, []).extend(outcomes)
-        tally = logs_per_side.setdefault(key, {})
-        tally[baseline] = tally.get(baseline, 0) + 1
-        written[key] = max(written.get(key, ""), str(log.eval.created or ""))
-
-    candidates = [
-        key
-        for key in sorted(sides)
-        if key[1] != LEGACY_RUN or (unlabelled and logs_per_side[key].get(True))
-    ]
-    # Newest first, with a labelled run always ahead of the unlabelled
-    # bucket. `LEGACY_RUN` is a bucket and not a run -- it is every log that
-    # carried no id -- so letting it win on a timestamp would pick a pile over
-    # a measurement. The run id breaks the remaining ties, so two runs written
-    # in the same second order the same way on every machine.
-    runs: dict[str, list[str]] = {}
-    for key in sorted(
-        candidates,
-        key=lambda k: (k[1] != LEGACY_RUN, written.get(k, ""), k[1]),
-        reverse=True,
-    ):
-        runs.setdefault(key[0], []).append(key[1])
-    chosen = [
-        key
-        for key in candidates
-        if key[1] == (runs[key[0]][0] if run_id is None else run_id)
-    ]
-
-    comparisons: list[Comparison] = []
-    for key in sorted(chosen):
-        half = sides[key]
-        counts = logs_per_side[key]
-        ambiguous = key[1] == LEGACY_RUN and any(n > 1 for n in counts.values())
-        comparisons.extend(
-            replace(comparison, run=key[1])
-            for comparison in pair(
-                _no_duplicates(half.get(False, []), ambiguous),
-                _no_duplicates(half.get(True, []), ambiguous),
-            )
-        )
-    return Rebuild(comparisons=comparisons, runs=runs)
-
-
-# The bucket for logs written before a run id was stamped on them.
-#
-# Skipped by default, and taken only when the caller asks with
-# `--unlabelled-logs`. Both halves of that rule are load-bearing.
-#
-# Taking them by default was wrong, and not only for old directories. A plain
-# `skillscope behavioral` run stamps `BASELINE_KEY: False` and never stamps a
-# run id, because only `cmd_staleness` mints one -- so an ordinary behavioral
-# log is shaped exactly like a pre-key graded half and always will be. Pooling
-# them inflated `cases` and `ungraded` with every skill the user had ever run
-# `behavioral` against, and could silently supply the "with skill" side of a
-# comparison it was never part of. That is the splicing bug this module's run
-# id exists to prevent, arriving through the back door.
-#
-# Refusing them outright was wrong too, and the reason outlives the migration
-# that prompted it. A log directory is a record somebody already paid an agent
-# run for; a reader that cannot open one because of a metadata key added after
-# it was written has made that run worthless to settle a question it holds the
-# answer to. The population is small and does not grow -- every run since the
-# key arrived labels itself -- but "small" is the argument for a flag rather
-# than for a refusal.
-#
-# So the caller asserts it. Even then a group needs a baseline side, which
-# nothing but `cmd_staleness` ever writes, so a directory of ordinary
-# `behavioral` logs stays out whatever flags it is given. And where a side
-# holds more than one log there is a choice to make and no way to make it, so
-# every case in that group is `ungraded` rather than guessed at.
-#
-# A labelled run never falls in here, so none of this can weaken a run written
-# by this version.
-LEGACY_RUN = "unlabelled"
-
-
-def _no_duplicates(
-    outcomes: list[BehaviorOutcome], ambiguous: bool = False
-) -> list[BehaviorOutcome]:
-    """`outcomes`, with every case this side cannot answer for errored.
-
-    `ambiguous` errors all of them: see `LEGACY_RUN`, where unlabelled logs
-    leave several candidates for a side and no way to tell which run each
-    belongs to. Otherwise only a case this side answers twice *for the same
-    attempt* is errored.
-
-    One run key and one side can still span several logs -- a run grades one
-    skill per task, and a run key covers the whole invocation -- and nothing
-    stops two of them carrying the same case id. `pair` groups a side's
-    attempts by case id, so without this two logs answering the same case
-    would read as one case attempted twice, and a collision between runs would
-    arrive disguised as the evidence `--attempts` exists to produce.
-
-    The attempt number is what tells a repeat from a collision. A side that
-    ran three attempts answers each case three times by design, once per
-    attempt; two logs answering the same case *and* the same attempt is the
-    ambiguity, and no legitimate run produces one.
-
-    Both copies are errored, not just the later one: which of them is this
-    side's answer is exactly what cannot be told, so keeping either would be
-    the guess. `classify` reads an errored attempt as one that measured
-    nothing, consistent with how this module reports every other ambiguity it
-    cannot resolve.
-    """
-    if ambiguous:
-        return [
-            replace(
-                outcome,
-                error="these logs carry no run id and there is more than one "
-                "of them on a side, so which run this case belongs to cannot "
-                "be told apart",
-            )
-            for outcome in outcomes
-        ]
-    tally: dict[tuple[str, int], int] = {}
-    for outcome in outcomes:
-        key = (outcome.id, outcome.attempt)
-        tally[key] = tally.get(key, 0) + 1
-    return [
-        outcome if tally[(outcome.id, outcome.attempt)] == 1
-        else replace(
-            outcome,
-            error="this run has more than one log reporting this case on the "
-            "same attempt, and which of them is its answer cannot be told "
-            "apart",
-        )
-        for outcome in outcomes
-    ]
-
-
 def summarize(comparisons: list[Comparison], meta: dict) -> dict:
     from .engine.behavioral import UNKNOWN_ROOM
 
@@ -921,11 +635,9 @@ def render_markdown(summary: dict) -> str:
         else "**Nothing was graded both ways**"
     )
 
-    # Said only when it is known. A `--from-logs` rebuild runs no model, and
-    # the invocation's own `--model`/`--effort` defaults describe the command
-    # that read the logs rather than the runs that wrote them -- rebuilding a
-    # `sonnet`/`low` run with a bare `--from-logs` printed "on `opus` (effort
-    # `high`)", which is not a hedge but a false statement about a measurement.
+    # Still conditional rather than assumed: `summarize` is given whatever
+    # meta its caller built, and a report that names a model it was not told
+    # about states a measurement that was never taken.
     ran_on = (
         f" on `{meta['model']}` (effort `{meta['effort']}`)"
         if meta.get("model") and meta.get("effort")
@@ -935,7 +647,7 @@ def render_markdown(summary: dict) -> str:
     # `0/3` and `1/1` against `0/1` are the same verdict and not the same
     # evidence, and a reader who does not know which they are holding cannot
     # tell them apart. Read off the cases rather than the invocation's own
-    # `--attempts`, so a `--from-logs` rebuild describes the runs it read.
+    # `--attempts`, so the report describes the run rather than the request.
     per_side = {c["attempts_with"] for c in summary["cases"]} | {
         c["attempts_without"] for c in summary["cases"]
     }
@@ -985,63 +697,6 @@ def render_markdown(summary: dict) -> str:
             "the cases it did not run.",
             "",
         ]
-    if meta.get("from_logs"):
-        lines += [
-            f"Rebuilt offline from the logs in `{meta['from_logs']}`; nothing "
-            "was run. The model and effort are whatever wrote them, which the "
-            "logs do not have to agree on, so they are not claimed here.",
-            "",
-        ]
-        # Which run this is a report about. A log directory accumulates every
-        # staleness run anybody has done in it, so naming the one read is the
-        # difference between a measurement and a pile of them -- see
-        # `from_logs` on what reading the pile used to do to the totals.
-        used = {c["skill"]: c["run"] for c in summary["cases"] if c["run"]}
-        if used:
-            lines += [
-                "Read from "
-                + ", ".join(
-                    f"run `{run}` for `{skill}`"
-                    for skill, run in sorted(used.items())
-                )
-                + ".",
-                "",
-            ]
-        # A run id belongs to an invocation and not to a skill: a staleness
-        # run mints one id and stamps it on every skill it covers. So "was
-        # this run read" is a question about the whole report rather than
-        # about one skill's row -- asked per skill, a run read for `beta` was
-        # announced as unread by `alpha`, two lines under the sentence naming
-        # it as read.
-        #
-        # Listed per skill even so, because that is the only form in which
-        # the ids are actionable: `--run-id` is global, and which skills an
-        # id covers is whichever its own invocation was asked for.
-        read = set(used.values())
-        unread = {
-            skill: [run for run in ids if run not in read]
-            for skill, ids in (meta.get("runs") or {}).items()
-        }
-        unread = {skill: ids for skill, ids in unread.items() if ids}
-        spare = {run for ids in unread.values() for run in ids}
-        if used and spare:
-            shown = "; ".join(
-                ", ".join(f"`{run}`" for run in ids[:3])
-                + (f" and {len(ids) - 3} more" if len(ids) > 3 else "")
-                + f" for `{skill}`"
-                for skill, ids in sorted(unread.items())
-            )
-            lines += [
-                f"> **{len(spare)} other staleness run(s) in this directory "
-                "were not read.** One run per skill is read"
-                + ("" if meta.get("run_id") else ", the most recent")
-                + ", because reading several reports the same case once per "
-                f"run: {shown}. `--run-id` reads one of them instead. An id "
-                "covers whichever skills its own run was asked for, which "
-                "need not be every skill here.",
-                "",
-            ]
-
     # Nothing moved at all. The row `earns_it | 0` is true and says nothing,
     # and this is the one result the command exists to surface, so it is said
     # rather than left to be noticed in a table.
