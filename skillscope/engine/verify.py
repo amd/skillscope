@@ -219,7 +219,6 @@ def build_task(
     ctx: dict | None = None,
     effort: str | None = None,
     install: bool = True,
-    run_key: str | None = None,
 ):
     """One task per skill, solved by real Claude Code rather than our agent.
 
@@ -257,11 +256,6 @@ def build_task(
             # See `behavioral.SKILL_DIR_KEY`: resolved on the machine that ran
             # the agent, because a reader cannot work it out afterwards.
             behavioral.SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
-            # See `behavioral.STALENESS_RUN_KEY`: set only by a staleness run,
-            # and only there because only there are two logs meant to pair.
-            **(
-                {behavioral.STALENESS_RUN_KEY: run_key} if run_key else {}
-            ),
         },
         tags=["skillscope", "graded" if install else "baseline"],
         setup=hooks.setup_solver(hook, skill, cases),
@@ -300,14 +294,10 @@ def run(
     effort: str,
     *,
     install: bool = True,
-    run_key: str | None = None,
     attempts: int = 1,
     concurrency: int = 0,
 ) -> list[BehaviorOutcome]:
     """Mirrors `behavior.run`, so the CLI and the benchmark treat it the same.
-
-    `run_key` is stamped on the task, same as the other engine's. See
-    `behavioral.STALENESS_RUN_KEY`.
 
     `attempts` and `concurrency` are inspect's epochs and sample limit, as in
     `behavioral.run`. Both legs take them, so a staleness run measures the
@@ -341,7 +331,7 @@ def run(
             inspect_eval,
             build_task(
                 skill, skill_cases, model, effort=effort,
-                install=install, run_key=run_key,
+                install=install,
             ),
             model=model,
             model_args=models.model_args(model),

@@ -60,9 +60,6 @@ Usage::
     # without it, twice the agent passes of a behavioral run
     skillscope staleness --skill serving-llms-on-epyc
 
-    # the same comparison again, read back off the logs it already wrote
-    skillscope staleness --from-logs .skillscope/logs
-
     # what CI should run for a change
     skillscope select --since BASE HEAD
 
@@ -81,7 +78,6 @@ import os
 import sys
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 from . import (
@@ -849,7 +845,6 @@ def _run_behavioral(
     *,
     install: bool = True,
     config_dir: Path | None = None,
-    run_key: str | None = None,
 ) -> list:
     """Run the behavioral cases on the selected engine.
 
@@ -857,10 +852,6 @@ def _run_behavioral(
     of `cmd_staleness`. Both halves go through here rather than through two
     similar call sites, so the only difference between the run being measured
     and the run it is measured against is the flag.
-
-    `run_key` is stamped on the logs both halves write, so `--from-logs` can
-    find this run's two halves and only this run's. Set by `cmd_staleness`
-    alone -- see `engine/behavioral.py:STALENESS_RUN_KEY`.
 
     `attempts` and `concurrency` are read off `args` rather than passed, so
     the two halves cannot be given different ones. A baseline attempted fewer
@@ -882,7 +873,6 @@ def _run_behavioral(
             engine_models.resolve(args.model),
             args.effort,
             install=install,
-            run_key=run_key,
             attempts=attempts,
             concurrency=concurrency,
         )
@@ -907,7 +897,6 @@ def _run_behavioral(
                 subject, args.model, args.effort, d, config_dir, install=install
             ),
             baseline=not install,
-            run_key=run_key,
             attempts=attempts,
             concurrency=concurrency,
         )
@@ -988,7 +977,7 @@ def cmd_staleness(args: argparse.Namespace) -> int:
     started = time.time()
 
     asked = getattr(args, "harness", None) or os.environ.get("SKILLSCOPE_HARNESS")
-    if not args.from_logs and asked and asked != harnesses.DEFAULT:
+    if asked and asked != harnesses.DEFAULT:
         # The one place this command cannot be harness-neutral yet. Its
         # baseline half is only a measurement if the room is empty, and the
         # check that establishes that -- `routing.can_isolate_config` below --
@@ -1006,26 +995,6 @@ def cmd_staleness(args: argparse.Namespace) -> int:
             "`routing` and `behavioral`, which are harness-neutral."
         )
 
-    if args.run_id and not args.from_logs:
-        # Same habit as `--unlabelled-logs` below. A live run mints its own
-        # run id and stamps it on both halves, so there is no run here for a
-        # reader to choose between.
-        raise SystemExit(
-            "error: --run-id only means something with --from-logs. A run "
-            "started now mints its own id, and there is nothing to pick "
-            "between."
-        )
-
-    if args.unlabelled_logs and not args.from_logs:
-        # The repo's habit: refuse an argument that cannot do anything rather
-        # than accept and ignore it. A live run writes its own run id on both
-        # halves, so there is nothing unlabelled for this to reach.
-        raise SystemExit(
-            "error: --unlabelled-logs only means something with --from-logs. "
-            "A run started now stamps a run id on both halves, so it has no "
-            "unlabelled logs to read."
-        )
-
     if args.attempts < 1:
         raise SystemExit(
             f"error: --attempts {args.attempts} would run nothing. The "
@@ -1037,162 +1006,6 @@ def cmd_staleness(args: argparse.Namespace) -> int:
             "error: --max-cases and --concurrency count things, so they "
             "cannot be negative. 0 means no cap on either."
         )
-
-    # Same habit again. None of these reaches a rebuild: `--from-logs` starts
-    # no agent, and the attempts, the cap, the concurrency and which evals
-    # were graded are all properties of the run that wrote the logs rather
-    # than of the reader. Accepting them silently would let somebody believe
-    # they had re-measured something at three attempts when they had reread
-    # one attempt.
-    #
-    # `--skill` and `--only` are not on this list, and used to be ignored like
-    # it. They name a subset of what is already there, which a reader of a
-    # shared log directory has every reason to want, so the rebuild filters on
-    # them below instead.
-    spent = [
-        name
-        for name, value in (
-            ("--attempts", args.attempts > 1),
-            ("--max-cases", args.max_cases),
-            ("--concurrency", args.concurrency),
-            ("--no-extended", not args.extended),
-            # The flag, not `asked`: an ambient `SKILLSCOPE_HARNESS` is not an
-            # argument to this invocation, and refusing a free rebuild over a
-            # variable the shell happens to export would be a refusal nobody
-            # asked for.
-            ("--harness", args.harness),
-        )
-        if value
-    ]
-    if args.from_logs and spent:
-        raise SystemExit(
-            f"error: {', '.join(spent)} cannot change a --from-logs rebuild. "
-            "It runs no agent: the attempts, the cases, the concurrency, the "
-            "agent and which evals were graded are whatever the logs were "
-            "written with. "
-            "The report reads them back off the logs. Use --skill or --only "
-            "to narrow what is reported."
-        )
-
-    if args.from_logs:
-        # Nothing is run, so nothing is prepared: no structural gate, no model
-        # pin, no reachability probe. Those guard a spend that is not about to
-        # happen, and demanding them would make a free command fail for
-        # reasons that cannot affect its answer.
-        rebuild = staleness.from_logs(
-            args.from_logs,
-            unlabelled=args.unlabelled_logs,
-            run_id=args.run_id or None,
-        )
-        comparisons = rebuild.comparisons
-        known = sorted({run for ids in rebuild.runs.values() for run in ids})
-        if args.run_id and not comparisons and known:
-            # Told apart from "no staleness logs here at all", because they
-            # are different mistakes: this one is a typo in an id, and the
-            # answer to it is the list of ids that would have worked.
-            raise SystemExit(
-                f"error: no staleness run `{args.run_id}` in "
-                f"{args.from_logs}. The runs there are: "
-                + ", ".join(f"`{run}`" for run in known)
-                + "."
-            )
-        if args.run_id:
-            # `--run-id` is global and a run id is not. One invocation mints
-            # one id and stamps it on whichever skills it was asked for, so
-            # naming an id silently drops every skill that invocation did not
-            # cover -- and the guard above cannot catch it, because it only
-            # fires when *nothing* matched. Asking for one run and getting one
-            # run is legitimate; losing a skill without being told is not.
-            covered = {c.skill for c in comparisons}
-            missing = sorted(set(rebuild.runs) - covered)
-            if missing:
-                print(
-                    f"[staleness] run {args.run_id} covers "
-                    f"{len(covered)} of the {len(rebuild.runs)} skill(s) in "
-                    f"{args.from_logs}. Nothing is reported for "
-                    + ", ".join(missing)
-                    + ": that run did not cover them. Each has runs of its "
-                    "own; drop --run-id to read the most recent of each.",
-                    flush=True,
-                )
-
-        # `--skill` and `--only` narrow what is reported rather than what is
-        # read. A log directory is shared and accumulates, so a reader asking
-        # about one skill in it is the ordinary case; ignoring the flags, as
-        # this used to, answered a question nobody asked.
-        wanted = {s.strip() for s in args.skill.split(",") if s.strip()}
-        cases = {c.strip() for c in args.only.split(",") if c.strip()}
-        if wanted or cases:
-            comparisons = [
-                c
-                for c in comparisons
-                if (not wanted or c.skill in wanted)
-                and (not cases or c.id in cases)
-            ]
-            if not comparisons:
-                raise SystemExit(
-                    "error: nothing in "
-                    f"{args.from_logs} matches "
-                    + " and ".join(
-                        part
-                        for part in (
-                            f"--skill {args.skill}" if wanted else "",
-                            f"--only {args.only}" if cases else "",
-                        )
-                        if part
-                    )
-                    + "."
-                )
-        if not comparisons:
-            from .engine import behavioral as engine_behavioral
-
-            raise SystemExit(
-                f"error: no skillscope staleness logs in {args.from_logs}. "
-                f"Both halves of a comparison carry `{engine_behavioral.SKILL_KEY}`, "
-                f"`{engine_behavioral.BASELINE_KEY}` and "
-                f"`{engine_behavioral.STALENESS_RUN_KEY}` in their eval "
-                "metadata; logs written by another tool, or by a plain "
-                "`behavioral` run, cannot be paired."
-                + (
-                    ""
-                    if args.unlabelled_logs
-                    else "\n    Logs written before the run id existed carry "
-                    "none, and are passed over. `--unlabelled-logs` reads "
-                    "them, where a baseline half is there to pair with."
-                )
-            )
-        # No `model`, `engine` or `effort`. Nothing here read them off the
-        # logs, and `args` holds this invocation's defaults -- which describe
-        # the command that did the rebuilding, not the runs being rebuilt. The
-        # report prints what it is given, so passing them through made it
-        # assert a model the measurement was never taken on.
-        summary = staleness.summarize(
-            comparisons,
-            {
-                "skills": sorted({c.skill for c in comparisons}),
-                "from_logs": args.from_logs,
-                # The runs behind what is being reported, so the report can
-                # name the one it read and say what it passed over. Narrowed
-                # to the skills that survived the filters above: a skill the
-                # reader excluded has runs that were not read, and counting
-                # those as passed over would answer a question nobody asked
-                # with a number nobody wanted. See `staleness.Rebuild`.
-                "runs": {
-                    skill: ids
-                    for skill, ids in rebuild.runs.items()
-                    if skill in {c.skill for c in comparisons}
-                },
-                "run_id": args.run_id or None,
-                "wall_time_s": round(time.time() - started, 1),
-                "github_run_id": os.environ.get("GITHUB_RUN_ID"),
-            },
-        )
-        _write_report(summary, staleness.render_markdown(summary), args, "staleness")
-        # The docstring says a deadline that expired still fails, and said it
-        # of this branch too while this branch alone returned without asking.
-        # Reading a large directory is not free, and a command that overran
-        # the bound it was given should say so whatever it spent the time on.
-        return _fail_if_expired() or 0
 
     skills = _prepare_graded_run(args)
     gradable = _gradable_cases(args, skills)
@@ -1224,12 +1037,6 @@ def cmd_staleness(args: argparse.Namespace) -> int:
             "guest has no user-level skills at all."
         )
 
-    # One token for this invocation, stamped on every log both halves write.
-    # `--from-logs` has nothing else to pair on: the log directory is shared
-    # and never pruned, and a plain `behavioral` run stamps the same
-    # `BASELINE_KEY: False` the graded half does, so without this an unrelated
-    # old run is a candidate for this comparison's "with skill" side.
-    run_key = uuid.uuid4().hex
 
     passes = (
         "run twice" if args.attempts <= 1
@@ -1250,11 +1057,11 @@ def cmd_staleness(args: argparse.Namespace) -> int:
         host = args.engine == "claude-code-no-sandbox"
         with_skill = _run_behavioral(
             args, skills, gradable,
-            config_dir=Path(graded_dir) if host else None, run_key=run_key,
+            config_dir=Path(graded_dir) if host else None,
         )
         without = _run_behavioral(
             args, skills, gradable, install=False,
-            config_dir=Path(bare_dir) if host else None, run_key=run_key,
+            config_dir=Path(bare_dir) if host else None,
         )
 
     comparisons = staleness.pair(with_skill, without)
@@ -1701,51 +1508,6 @@ def build_parser() -> argparse.ArgumentParser:
             "running its cases one after another is where the wall clock "
             "goes. Raise it as far as the engine's sandboxes and the model's "
             "rate limits will take. Default: 0, inspect's own default."
-        ),
-    )
-    staleness_parser.add_argument(
-        "--from-logs",
-        metavar="DIR",
-        help=(
-            "Rebuild the comparison from logs already on disk instead of "
-            "running anything. Both halves carry the skill, which side they "
-            "were, and the run that wrote them in their eval metadata, so a "
-            "log directory is enough to pair them -- and to tell this run's "
-            "halves from a neighbouring run of the same skill. Costs nothing "
-            "and reaches no model. Logs carrying no run id are passed over; "
-            "see --unlabelled-logs."
-        ),
-    )
-    staleness_parser.add_argument(
-        "--unlabelled-logs",
-        action="store_true",
-        help=(
-            "With --from-logs, also read logs that carry no run id, which "
-            "means logs written before this command stamped one. Off by "
-            "default: an ordinary `behavioral` log is shaped exactly like a "
-            "pre-id graded half, so reading them unasked inflates the counts "
-            "with skills the run never covered, and can hand a comparison a "
-            "'with skill' half from a different run. Passing this asserts the "
-            "directory holds nothing else for these skills. A group still "
-            "needs a baseline side, and a side holding several logs is "
-            "reported `ungraded` rather than guessed at."
-        ),
-    )
-    staleness_parser.add_argument(
-        "--run-id",
-        default="",
-        metavar="ID",
-        help=(
-            "With --from-logs, rebuild a named run rather than the most "
-            "recent. A log directory accumulates every staleness run done in "
-            "it, and a rebuild reads one per skill: reading all of them would "
-            "report the same case once per run and count it that many times "
-            "in the totals. The report names the run it read and lists the "
-            "ids it passed over, which is where this value comes from. An id "
-            "belongs to the invocation that minted it and covers whichever "
-            "skills that invocation was asked for, so naming one can leave a "
-            "skill in the directory unreported; when it does, the command "
-            "says which."
         ),
     )
     staleness_parser.set_defaults(handler=cmd_staleness)
