@@ -215,12 +215,21 @@ prerequisites:
     it is removed after the skill's last case. In a container it is
     `/opt/skillscope/cache`. That path is provisional until a skill's image
     is built against it.
-- **An `env` value replaces the variable, it does not extend it.** No other
-  `$` is expanded. `PATH` cannot be set here: it would replace the agent's
-  search path, and everything the agent starts would see only that value.
-  Variables the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`,
-  `IS_SANDBOX`) cannot be set here either, and nor can `SKILL_SOURCE_DIR` or
-  `SKILL_CACHE_DIR`, which skillscope sets for the steps itself.
+- **An `env` value replaces the variable, it does not extend it.** Any
+  other `$` in a value is refused. `PATH` cannot be set here: it would
+  replace the agent's search path, and everything the agent starts would see
+  only that value. Nor can `ANTHROPIC_*`, `CLAUDE_*`, `COPILOT_*` or
+  `IS_SANDBOX`, which the agent's harness and model client read for their
+  own configuration, or `SKILL_SOURCE_DIR` and `SKILL_CACHE_DIR`, which
+  skillscope sets for the steps itself. Those are the only reserved names.
+  `GH_TOKEN` and `GITHUB_TOKEN` can be set, for a skill whose own tools need
+  them, but Copilot logs in with them too: on the host, a value set here
+  replaces the runner's for that skill's agent. Two prerequisites cannot
+  set the same variable, and one cannot set two names that differ only in
+  case. The reserved names and the duplicate rule ignore case, as Windows
+  does: `path` is refused like `PATH`, and `X` and `x` count as the same
+  variable. A name is ASCII letters, digits and underscores, not starting
+  with a digit, and a value holds no NUL.
 - **Installing once per image instead of once per case.** Under `claude-code`,
   build your `sandbox:` image so that `check` passes in it without this
   prerequisite's `env`: run the same `install` at `SKILL_CACHE_DIR=/opt/skillscope/cache`
