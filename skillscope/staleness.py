@@ -200,6 +200,13 @@ def answered(attempts: list[BehaviorOutcome]) -> list[BehaviorOutcome]:
     denominator would report a provider that dropped the connection as a side
     that failed, which is the most flattering possible reading of an error on
     the graded side and the least flattering on the baseline.
+
+    A grader that could not reach a verdict sets `error` too, from
+    `engine/behavioral._outcomes`. That is the same category and the one most
+    likely to be mistaken for a result: a sandbox that would not list, or a
+    judge that answered in prose, used to arrive here as a check that simply
+    failed, which manufactured `earns_it` out of a broken baseline and
+    `harmful` out of a broken graded run.
     """
     return [a for a in attempts if not a.error]
 
