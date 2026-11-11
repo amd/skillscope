@@ -6338,20 +6338,35 @@ class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
             (_machine(_tool(env={"": "x"})), "map variable names to strings"),
             (_machine(_tool(env={"X": "$HOME/x"})), "`prerequisites[0].env.X` uses `$`"),
             (_machine(_tool(env={"X": "${SKILL_CACHE_DIR"})), "uses `$`"),
-            (_machine(_tool(env={"ANTHROPIC_BASE_URL": "x"})), "set by the harness"),
-            (_machine(_tool(env={"CLAUDE_CONFIG_DIR": "x"})), "set by the harness"),
-            (_machine(_tool(env={"IS_SANDBOX": "0"})), "set by the harness"),
+            (_machine(_tool(env={"ANTHROPIC_BASE_URL": "x"})), "is reserved for the agent's harness"),
+            (_machine(_tool(env={"CLAUDE_CONFIG_DIR": "x"})), "is reserved for the agent's harness"),
+            (_machine(_tool(env={"IS_SANDBOX": "0"})), "is reserved for the agent's harness"),
+            (_machine(_tool(env={"COPILOT_HOME": "x"})), "is reserved for the agent's harness"),
             (_machine(_tool(env={"PATH": "${SKILL_CACHE_DIR}/bin"})), "replaces PATH"),
             # Windows environment names are case-insensitive, so `Path` is
             # `PATH` and `anthropic_api_key` is `ANTHROPIC_API_KEY`.
             (_machine(_tool(env={"Path": "/usr/bin"})), "replaces PATH"),
-            (_machine(_tool(env={"anthropic_api_key": "x"})), "set by the harness"),
+            (_machine(_tool(env={"anthropic_api_key": "x"})), "is reserved for the agent's harness"),
             (_machine(_tool(env={"A=B": "x"})), "cannot be set in a process environment"),
             (_machine(_tool(env={"1A": "x"})), "cannot be set in a process environment"),
             (_machine(_tool(env={"A": "x\u0000y"})), "cannot be set in a process environment"),
             # `$` matches before a trailing newline; the name is still illegal.
             (_machine(_tool(env={"FOO\n": "x"})), "cannot be set in a process environment"),
             (_machine(_tool(install=["cmd", ""])), "must be a non-empty list of strings"),
+            # A program name of only whitespace; later items keep theirs.
+            (_machine(_tool(install=["  ", "x"])), "must be a non-empty list of strings"),
+            # The two inputs, in any case: on Windows that is the same variable.
+            (_machine(_tool(env={"SKILL_CACHE_DIR": "x"})), "names an input"),
+            (_machine(_tool(env={"skill_source_dir": "x"})), "names an input"),
+            # Which value the agent got would depend on what the machine had.
+            (_machine(_tool(env={"X": "a"}), _tool(name="b", env={"x": "b"})),
+             "`prerequisites[1].env.x` is also set by prerequisite `tool`"),
+            (_machine(_tool(env={"X": "a", "x": "b"})), "sets 'x' twice, in different case"),
+            (_machine(_tool(env={"x": "a"}), _tool(name="b", env={"x": "b"})),
+             "`prerequisites[1].env.x` is also set by prerequisite `tool`"),
+            # Not ASCII, so never folded into a false duplicate of `SS`.
+            (_machine(_tool(env={"SS": "a", "\u00df": "b"})),
+             "cannot be set in a process environment"),
             # Two unknown keys of different types: sorting them must not crash.
             ("os: [Linux]\nprerequisites:\n  - {name: t, check: [a], install: [b], 1: x, z: y}\n",
              "unknown key(s): 1, z"),
@@ -6367,6 +6382,10 @@ class TestAPrerequisiteDeclarationIsCheckedUpFront(unittest.TestCase):
             with self.subTest(expected=expected):
                 errors = self.errors_for(machine)
                 self.assertTrue(any(expected in e for e in errors), errors)
+
+    def test_a_token_a_skills_own_tools_need_is_not_reserved(self) -> None:
+        # Copilot reads it too; the docs say what setting it does.
+        self.assertEqual(self.errors_for(_machine(_tool(env={"GH_TOKEN": "x"}))), [])
 
     def test_an_argv_is_kept_as_written(self) -> None:
         # An inline script's newline and an argument's leading spaces are part

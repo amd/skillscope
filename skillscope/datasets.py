@@ -552,15 +552,24 @@ COMMAND_PLATFORMS = ("linux", "windows", "macos")
 # whichever process applied the prerequisite, and that differs between the
 # host and a container -- the same declaration would mean two things.
 PREREQUISITE_INPUTS = ("SKILL_SOURCE_DIR", "SKILL_CACHE_DIR")
-_ENV_INPUT = re.compile(r"\$\{(?:SKILL_SOURCE_DIR|SKILL_CACHE_DIR)\}")
-# Variables a prerequisite may not set. The harness ones decide which model
-# answers and where its config lives, and each engine sets a different subset.
+_ENV_INPUT = re.compile(
+    r"\$\{(?:" + "|".join(map(re.escape, PREREQUISITE_INPUTS)) + r")\}"
+)
+# Variables a prerequisite may not set, by prefix or name, and no others: the
+# ones the agent's harness and its model client read for their own
+# configuration (`IS_SANDBOX` is the Claude CLI's). A harness sets some of
+# them itself, and on the host its value wins over a prerequisite's, so a
+# declared one would be dropped; the rest come from the runner, and a
+# declared one would replace the runner's. Copilot's other credentials,
+# `GH_TOKEN` and `GITHUB_TOKEN`, are not reserved, though the same holds for
+# them: a skill's own tools may need them, and the docs say what setting one
+# does.
 # `PATH` is replaced rather than extended: the CLI is already resolved by the
 # time the agent starts, so a replacement leaves everything it spawns with
 # only that directory. Windows environment names are case-insensitive, so
 # `path` is the same variable.
 _RESERVED_ENV = re.compile(
-    r"^(?:ANTHROPIC_|CLAUDE_)|^IS_SANDBOX$|^PATH$", re.IGNORECASE
+    r"^(?:ANTHROPIC_|CLAUDE_|COPILOT_)|^IS_SANDBOX$|^PATH$", re.IGNORECASE
 )
 # A name a process environment can hold on every platform. `fullmatch`,
 # because `$` also matches before a trailing newline: `"FOO\n"` would
@@ -731,6 +740,7 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
             f"error: {path}: `{where}` must map variable names to strings; "
             f"got {value!r}."
         )
+    seen: set[str] = set()
     for name, text in value.items():
         if not _ENV_NAME.fullmatch(name) or "\0" in text:
             raise SystemExit(
@@ -738,7 +748,18 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
                 f"process environment: {name!r}. Names are letters, digits and "
                 "underscores, not starting with a digit; values hold no NUL."
             )
-        if name in PREREQUISITE_INPUTS:
+        # Distinct to YAML and to Linux, one variable on Windows: which value
+        # the agent got would depend on the host. After the name check, so
+        # only ASCII names are folded.
+        if name.upper() in seen:
+            raise SystemExit(
+                f"error: {path}: `{where}` sets {name!r} twice, in different "
+                "case. Each variable is set once."
+            )
+        seen.add(name.upper())
+        # Upper-cased for the same reason `_RESERVED_ENV` ignores case: on
+        # Windows `skill_cache_dir` is the same variable.
+        if name.upper() in PREREQUISITE_INPUTS:
             raise SystemExit(
                 f"error: {path}: `{where}.{name}` names an input skillscope sets "
                 "for the steps itself; a prerequisite may not override it."
@@ -752,8 +773,8 @@ def _prerequisite_env(path: Path, where: str, value: object) -> dict[str, str]:
                 )
             else:
                 why = (
-                    "is set by the harness for the agent itself, and a "
-                    "prerequisite may not override it."
+                    "is reserved for the agent's harness and model client, "
+                    "and a prerequisite may not set it."
                 )
             raise SystemExit(f"error: {path}: `{where}.{name}` {why}")
         if "$" in _ENV_INPUT.sub("", text):
@@ -851,12 +872,29 @@ def machine_prerequisites(skill: str) -> list[Prerequisite]:
             raise SystemExit(f"error: {path}: `{where}.name` must be a non-empty string.")
         if any(p.name == name.strip() for p in found):
             raise SystemExit(f"error: {path}: prerequisite `{name}` is declared twice.")
+        check = _command(path, f"{where}.check", entry["check"])
+        install = _command(path, f"{where}.install", entry["install"])
+        env = _prerequisite_env(path, f"{where}.env", entry.get("env", {}))
+        # Which of two values the agent got would depend on which
+        # prerequisites the environment already had, and the log would not
+        # say. Compared case-insensitively, as Windows names are.
+        for variable in env:
+            earlier = next(
+                (p.name for p in found if variable.upper() in map(str.upper, p.env)),
+                None,
+            )
+            if earlier is not None:
+                raise SystemExit(
+                    f"error: {path}: `{where}.env.{variable}` is also set by "
+                    f"prerequisite `{earlier}`. Each variable is set by one "
+                    "prerequisite."
+                )
         found.append(
             Prerequisite(
                 name=name.strip(),
-                check=_command(path, f"{where}.check", entry["check"]),
-                install=_command(path, f"{where}.install", entry["install"]),
-                env=_prerequisite_env(path, f"{where}.env", entry.get("env", {})),
+                check=check,
+                install=install,
+                env=env,
             )
         )
     return found

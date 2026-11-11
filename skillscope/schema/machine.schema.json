@@ -51,7 +51,7 @@
           "env": {
             "type": "object",
             "additionalProperties": { "type": "string" },
-            "description": "Set for the agent once the prerequisite has been installed. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear; `PATH`, the names the harness sets for the agent (`ANTHROPIC_*`, `CLAUDE_*`, `IS_SANDBOX`), and the two inputs themselves are refused. The skillscope parser enforces those rules, a command for every platform in `os`, and unique names, none of which this schema expresses.",
+            "description": "Set for the agent when the prerequisite had to be installed; not applied when `check` already passes. A value replaces the variable rather than extending it. Values may refer to `${SKILL_SOURCE_DIR}` and `${SKILL_CACHE_DIR}`, and no other `$` may appear. `PATH`, the two inputs themselves, and `ANTHROPIC_*`, `CLAUDE_*`, `COPILOT_*` and `IS_SANDBOX` (read by the agent's harness and model client) are refused, whatever their case, and no other name is reserved. A variable name is ASCII letters, digits and underscores, not starting with a digit; a value holds no NUL; no two prerequisites set the same variable, and one does not set two names that differ only in case; both compare names case-insensitively. The skillscope parser enforces those rules, a command for every platform in `os`, unique prerequisite names, and that a prerequisite's name and the first item of every argv are not only whitespace, none of which this schema expresses.",
             "examples": [{ "PYTHONPATH": "${SKILL_CACHE_DIR}/decoder/python" }]
           }
         }
