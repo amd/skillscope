@@ -238,7 +238,16 @@ def _make_cache(skill: str) -> Path:
                 f"prerequisites for {skill} were not provided: the run is "
                 "stopping (--timeout)."
             )
-        path = tempfile.mkdtemp(prefix=f"skillscope-prerequisites-{skill}-")
+        try:
+            path = tempfile.mkdtemp(prefix=f"skillscope-prerequisites-{skill}-")
+        except OSError as exc:
+            # A full disk or an unwritable temp directory fails this skill,
+            # like any other prerequisite that cannot be provided, rather
+            # than ending the run for every skill after it.
+            raise PrerequisiteError(
+                f"prerequisites for {skill} were not provided: could not create "
+                f"its SKILL_CACHE_DIR: {type(exc).__name__}: {exc}"
+            ) from exc
         _created_caches.add(path)
     return Path(path)
 
@@ -533,9 +542,15 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
                 # Inside the `try`, so a copy that fails partway still has the
                 # files already copied removed before anything else runs.
                 for relative, path in named.items():
-                    await box.write_file(
-                        f"{CONTAINER_STEPS}/{relative}", path.read_bytes()
-                    )
+                    try:
+                        await box.write_file(
+                            f"{CONTAINER_STEPS}/{relative}", path.read_bytes()
+                        )
+                    except exec_errors as exc:
+                        raise PrerequisiteError(
+                            f"could not copy {relative} into the container for "
+                            f"the prerequisite steps: {type(exc).__name__}: {exc}"
+                        ) from exc
                 print(
                     f"[prerequisites] {skill}: {len(declared)} to provide",
                     flush=True,
@@ -553,7 +568,9 @@ def claude_code_agent(skill: str, make_agent: Callable[[dict[str, str]], object]
                 )
                 print(_provision_line(skill, provision), flush=True)
             except BaseException:
-                # Best effort, and never in place of the error being raised.
+                # Best effort, and never in place of the error being raised --
+                # except a cancellation of the removal itself, which is left to
+                # propagate: swallowing it would leave the task uncancelled.
                 with contextlib.suppress(Exception):
                     await box.exec(["rm", "-rf", CONTAINER_STEPS])
                 raise
