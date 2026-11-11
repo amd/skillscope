@@ -6797,6 +6797,23 @@ class TestPrerequisitesOnTheDefaultEngine(unittest.TestCase):
         [outcome] = self.run_cases("noisy")
         self.assertIn("STDERR-MARK", outcome.error)
 
+    def test_a_cache_that_cannot_be_made_fails_only_its_skill(self) -> None:
+        # A full disk fails the skill it happened to, and the run goes on.
+        self.skill("first", _machine(_tool()))
+        self.skill("second", _machine(_tool()))
+        real = tempfile.mkdtemp
+
+        def full_for_first(*args, **kwargs):
+            if "-first-" in str(kwargs.get("prefix")):
+                raise OSError(28, "No space left on device")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(engine_prerequisites.tempfile, "mkdtemp", full_for_first):
+            first, second = self.run_cases("first", "second")
+        self.assertIn("No space left on device", first.error)
+        self.assertFalse(first.degraded)
+        self.assertFalse(second.error)
+
     def test_a_skill_without_prerequisites_resolves_and_creates_nothing(self) -> None:
         self.skill("plain")
         before = set(engine_prerequisites._created_caches)
@@ -7271,6 +7288,31 @@ class TestPrerequisitesInAContainer(unittest.TestCase):
                 self.assertIn("could not remove", str(raised.exception))
                 self.assertIn(type(error).__name__, str(raised.exception))
                 self.assertNotIn(["AGENT"], [c[0] for c in self.box.calls])
+
+    def test_a_file_that_cannot_be_copied_in_is_reported_as_a_prerequisite(self) -> None:
+        # Reported as such, so the case fails as this skill's prerequisite
+        # rather than as a bare sandbox error the outage heuristic reads.
+        for error in self.sandbox_errors():
+            class Broken(self._Box):
+                async def write_file(self, path, contents, _error=error):
+                    raise _error
+
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+                    self.run_solver(_machine(_tool(install=["sh", "install.sh"])),
+                                    files={"install.sh": "true\n"}, box=Broken(False))
+                self.assertIn("could not copy install.sh", str(raised.exception))
+                self.assertIn(type(error).__name__, str(raised.exception))
+                self.assertFalse([c for c in self.box.calls if c[0][0] in (_PY, "sh")])
+                self.assertEqual(self.box.calls[-1][0][:2], ["rm", "-rf"])
+
+    def test_a_file_that_cannot_be_read_is_reported_as_a_prerequisite(self) -> None:
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+            with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
+                self.run_solver(_machine(_tool(install=["sh", "install.sh"])),
+                                files={"install.sh": "true\n"})
+        self.assertIn("could not copy install.sh", str(raised.exception))
+        self.assertIn("PermissionError", str(raised.exception))
 
     def test_a_container_cannot_supply_the_source_tree(self) -> None:
         with self.assertRaises(engine_prerequisites.PrerequisiteError) as raised:
