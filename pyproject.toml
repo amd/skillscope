@@ -19,7 +19,7 @@ authors = [{ name = "Advanced Micro Devices, Inc." }]
 #
 # It was an extra while `legacy` existed: that engine was standard library only,
 # so a repo that had not migrated installed nothing new. `legacy` is gone, and
-# keeping the extra would ship a tool whose two graded commands both fail on a
+# keeping the extra would ship a tool whose graded commands all fail on a
 # plain `pip install` -- which is what CI found, by running the suite without
 # extras and getting `ModuleNotFoundError: inspect_ai` from the default engine.
 #

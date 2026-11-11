@@ -218,8 +218,17 @@ def build_task(
     model: str,
     ctx: dict | None = None,
     effort: str | None = None,
+    install: bool = True,
+    run_key: str | None = None,
 ):
-    """One task per skill, solved by real Claude Code rather than our agent."""
+    """One task per skill, solved by real Claude Code rather than our agent.
+
+    `install` False stages no skill, which is the baseline half of
+    `skillscope staleness`: the same cases, graded the same way, against an
+    agent that was never given the thing under test. The restore solver and
+    the agent's own skills argument have to agree about it, or the agent finds
+    a skill the report says it did not have.
+    """
     from inspect_ai import Task
     from inspect_ai.solver import chain
     from inspect_swe import claude_code
@@ -240,7 +249,21 @@ def build_task(
 
     bound = deadline.active()
     return Task(
-        name=f"claude-code-{skill}",
+        name=f"claude-code-{skill}" + ("" if install else "-baseline"),
+        # See `behavioral.build_task`: the same keys whichever engine ran.
+        metadata={
+            behavioral.BASELINE_KEY: not install,
+            behavioral.SKILL_KEY: skill,
+            # See `behavioral.SKILL_DIR_KEY`: resolved on the machine that ran
+            # the agent, because a reader cannot work it out afterwards.
+            behavioral.SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
+            # See `behavioral.STALENESS_RUN_KEY`: set only by a staleness run,
+            # and only there because only there are two logs meant to pair.
+            **(
+                {behavioral.STALENESS_RUN_KEY: run_key} if run_key else {}
+            ),
+        },
+        tags=["skillscope", "graded" if install else "baseline"],
         setup=hooks.setup_solver(hook, skill, cases),
         cleanup=hooks.cleanup_fn(hook, skill, cases),
         dataset=samples,
@@ -256,9 +279,11 @@ def build_task(
         # skill failed to do.
         solver=chain(
             _ensure_workdir(),
-            complete_skills_solver({skill_dir.name: skill_dir}),
+            complete_skills_solver({skill_dir.name: skill_dir} if install else {}),
             claude_code(
-                skills=[skill_dir], cwd=tools.workdir_path(), effort=effort or None
+                skills=[skill_dir] if install else [],
+                cwd=tools.workdir_path(),
+                effort=effort or None,
             ),
         ),
         scorer=scorers.expectations(),
@@ -269,9 +294,27 @@ def build_task(
 
 
 def run(
-    skills: list[str], cases: list[Case], model: str, effort: str
+    skills: list[str],
+    cases: list[Case],
+    model: str,
+    effort: str,
+    *,
+    install: bool = True,
+    run_key: str | None = None,
+    attempts: int = 1,
+    concurrency: int = 0,
 ) -> list[BehaviorOutcome]:
-    """Mirrors `behavior.run`, so the CLI and the benchmark treat it the same."""
+    """Mirrors `behavior.run`, so the CLI and the benchmark treat it the same.
+
+    `run_key` is stamped on the task, same as the other engine's. See
+    `behavioral.STALENESS_RUN_KEY`.
+
+    `attempts` and `concurrency` are inspect's epochs and sample limit, as in
+    `behavioral.run`. Both legs take them, so a staleness run measures the
+    same way whichever engine it asked for -- an option that worked on one
+    engine and was silently dropped on the other would make two runs of the
+    same command incomparable without saying so.
+    """
     from inspect_ai import eval as inspect_eval
 
     require()
@@ -291,15 +334,22 @@ def run(
             )
             continue
 
-        print(f"[claude-code] {skill}: {len(skill_cases)} case(s)", flush=True)
+        label = "claude-code" if install else "claude-code/baseline"
+        each = "" if attempts <= 1 else f", {attempts} attempts each"
+        print(f"[{label}] {skill}: {len(skill_cases)} case(s){each}", flush=True)
         logs = behavioral.run_eval(
             inspect_eval,
-            build_task(skill, skill_cases, model, effort=effort),
+            build_task(
+                skill, skill_cases, model, effort=effort,
+                install=install, run_key=run_key,
+            ),
             model=model,
             model_args=models.model_args(model),
             log_dir=str(Path(".skillscope") / "logs"),
             log_realtime=behavioral.realtime_logging(),
             display="plain",
+            epochs=attempts,
+            **({"max_samples": concurrency} if concurrency else {}),
         )
         if not logs and behavioral.stop_requested():
             # See `behavioral.run`.
