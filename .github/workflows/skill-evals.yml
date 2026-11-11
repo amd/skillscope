@@ -755,8 +755,12 @@ jobs:
                   f"missing gate label and did not run: {json.dumps(gated)}"
               )
           # `select` holds back a skill whose machine.yml it could not plan, and
-          # plans the rest. Usually the structural step has already failed the
-          # discover job on the same file; this is for when it has not.
+          # plans the rest. In this workflow that cannot reach here: discover's
+          # structural step checks every skill's machine.yml first, more
+          # strictly than `select`, and a failure there stops the job before
+          # `select` runs, so the check above has already exited. This is a
+          # backstop for if the two ever check different skills, so that an
+          # error entry still fails the run instead of passing silently.
           unplanned = [item for item in held if "error" in item]
           for item in unplanned:
               print(f"::error::{annotation(item['skill'] + ': ' + item['error'])}")

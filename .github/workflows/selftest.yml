@@ -128,14 +128,16 @@ jobs:
           description: Needs a tool its container does not ship, for a test that provides it.
           ---
           EOF
-          cat > fixture/prereq-skill/evals/install.sh <<'EOF'
+          # Below evals/, so the copy has to create the directory too.
+          mkdir -p fixture/prereq-skill/evals/tools
+          cat > fixture/prereq-skill/evals/tools/install.sh <<'EOF'
           echo built > "$SKILL_CACHE_DIR/tool.txt"
           EOF
           cat > fixture/prereq-skill/evals/machine.yml <<'EOF'
           prerequisites:
             - name: tool
               check: [sh, -c, 'test -f "${PREREQ_TOOL:-/nonexistent}"']
-              install: [sh, install.sh]
+              install: [sh, tools/install.sh]
               env:
                 PREREQ_TOOL: "${SKILL_CACHE_DIR}/tool.txt"
           EOF

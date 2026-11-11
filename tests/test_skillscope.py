@@ -1233,6 +1233,10 @@ class TestSelection(unittest.TestCase):
 
     def test_a_gate_shared_by_two_held_skills_is_named_once(self) -> None:
         # `gates` is what a person has to add, and one label releases both.
+        # This pins the set: an earlier revision of this change built `gates`
+        # as a list and named the label once per skill. That the empty gate
+        # of an unplanned leg is left out is
+        # `test_one_bad_machine_yml_does_not_drop_the_matrix`'s.
         self.repo.skill("gamma", dataset=self.graded)
         self.gpu("alpha")
         self.gpu("gamma")
@@ -2555,6 +2559,13 @@ class TestEngineSkillFailureIsContained(unittest.TestCase):
         # Not silence: an unreported skill would let a run that graded nothing
         # call itself green.
         self.assertTrue(all(o.checks == [] for o in outcomes))
+
+    def test_a_failed_skill_is_an_outage_only_when_its_detail_reads_as_one(self) -> None:
+        case = datasets.Case(id="c", skill="s", prompt="p", skill_should_trigger=True)
+        [outage] = engine_behavioral._failed("s", [case], "upstream 502 gateway timeout")
+        [plain] = engine_behavioral._failed("s", [case], "no such file")
+        self.assertTrue(outage.degraded)
+        self.assertFalse(plain.degraded)
 
 
 class TestBehavioralEngineDispatch(unittest.TestCase):
@@ -6525,13 +6536,6 @@ class TestProvidingAPrerequisite(unittest.TestCase):
         self.assertIn("${SKILL_SOURCE_DIR}", str(raised.exception))
         self.assertIn("no tree here", str(raised.exception))
         self.assertEqual(steps, ["check"])  # no build was spent finding out
-
-    def test_a_failed_skill_is_an_outage_only_when_its_detail_reads_as_one(self) -> None:
-        case = datasets.Case(id="c", skill="s", prompt="p", skill_should_trigger=True)
-        [outage] = engine_behavioral._failed("s", [case], "upstream 502 gateway timeout")
-        [plain] = engine_behavioral._failed("s", [case], "no such file")
-        self.assertTrue(outage.degraded)
-        self.assertFalse(plain.degraded)
 
     def test_only_this_engines_prerequisite_error_is_excused_as_an_outage(self) -> None:
         def error(traceback):

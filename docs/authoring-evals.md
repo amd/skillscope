@@ -184,6 +184,9 @@ prerequisites:
     starts, so the container needs whatever `install` uses: network access for
     a download, which the default sandbox does not have, and a user that can
     write to `/opt/skillscope`.
+  - So the same `check` and `install` may run once or many times, and on a
+    machine that already has the prerequisite or one that does not. Write
+    them to give the same result either way.
 - **Commands are argv lists.** A command may also be a mapping per platform,
   for example `{linux: [sh, x.sh], windows: [pwsh, x.ps1]}`. A container
   always counts as `linux`, and the structural check wants a command for every

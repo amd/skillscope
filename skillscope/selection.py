@@ -49,8 +49,8 @@ nothing to do.
 are reported so the gate job can warn that a change shipped without ever
 running on real hardware, rather than failing a pull request for a test it
 deliberately did not request. A leg whose ``machine.yml`` could not be read
-is held back the same way, with ``error`` set and ``gate`` empty, so one
-broken file does not drop the matrix for every other skill.
+or planned is held back the same way, with ``error`` set and ``gate``
+empty, so one broken file does not drop the matrix for every other skill.
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ def matrix_entries(
     """Split `skills` into matrix legs to run and legs held back.
 
     A missing gate holds a leg back, and so does a ``machine.yml`` that
-    cannot be read. Either way the other skills are still planned.
+    cannot be read or planned. Either way the other skills are still planned.
     """
     cfg = config.active()
     include: list[dict] = []
