@@ -420,6 +420,18 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
             error = f"{sample.error.message}"
         elif not checks:
             error = "case has no behavioral assertions to grade"
+        elif ungraded := [c for c in checks if not scorers.graded(c)]:
+            # One check nobody could grade makes the whole attempt
+            # unanswerable rather than partly answered: a side passes only by
+            # meeting *every* positive claim, so a claim with no verdict
+            # leaves the result undecidable, not negative. Reported as an
+            # error so it lands in the errors column and gets triaged as
+            # infrastructure, which is what it is -- and so that
+            # `staleness.answered` drops the attempt instead of reading a
+            # grader that never answered as evidence about a skill.
+            error = "could not be graded: " + "; ".join(
+                c["detail"] for c in ungraded[:3]
+            )
 
         activated, contaminated = _inspect_room(routing_engine, sample, skill)
 

@@ -5067,6 +5067,193 @@ class TestKeepLogsKeepsLogs(unittest.TestCase):
         self.assertIsNone(self.seen.get("max_samples"))
 
 
+class TestAJudgeThatNeverAnsweredIsNotASkillThatEarnedIt(
+    unittest.IsolatedAsyncioTestCase
+):
+    """A grader that could not answer used to be reported as the agent failing.
+
+    `judge.grade` returned `(False, "judge skipped: ...")` when the sandbox
+    would not list, and `(False, "judge gave no JSON verdict: ...")` when the
+    grader answered in prose. Both are statements about the run, and both
+    arrived as a check that simply failed.
+
+    In `behavioral` that is merely a red case. In `staleness` it is the
+    headline: `answered()` keeps any attempt without an `error`, so a baseline
+    whose judge broke counted as a baseline that genuinely failed, which is
+    `earns_it`, and a graded run whose judge broke counted as a skill doing
+    harm. The two verdicts the command exists to produce were the two a
+    grader hiccup manufactured.
+    """
+
+    async def test_a_sandbox_that_will_not_list_is_not_a_verdict(self) -> None:
+        async def _boom():
+            raise engine_tools.ListingFailed("no container")
+
+        with mock.patch.object(engine_judge, "tools_list_paths", _boom):
+            with self.assertRaises(engine_judge.Ungradable):
+                await engine_judge.grade("it wrote a file", object(), must_happen=True)
+
+    async def test_a_grader_answering_in_prose_is_not_a_verdict(self) -> None:
+        # The polarity is why this one matters most. On `must_happen=False` a
+        # `False` asserts the forbidden thing *happened*, so a grader that
+        # rambled used to be reported as the agent having done it.
+        async def _none():
+            return []
+
+        class _Model:
+            async def generate(self, _messages):
+                return types.SimpleNamespace(completion="I could not decide.")
+
+        with mock.patch.object(engine_judge, "tools_list_paths", _none), \
+             mock.patch("inspect_ai.model.get_model", lambda *a, **k: _Model()):
+            with self.assertRaises(engine_judge.Ungradable):
+                await engine_judge.grade(
+                    "it called a cloud API", _JudgeState(), must_happen=False
+                )
+
+
+class _JudgeState:
+    """The little of `TaskState` that `judge.grade` reads to build its evidence."""
+
+    messages: list = []
+    output = None
+
+
+class TestAnUngradedCheckIsAnErrorNotAFailure(unittest.TestCase):
+    """The attempt is unanswerable, not failed, and the difference is the point.
+
+    A side passes only by meeting *every* positive claim, so one claim with no
+    verdict leaves the side undecidable rather than negative. Routed through
+    `error` because that is the channel `staleness.answered` already drops, and
+    because it puts the fault in the errors column where it gets triaged as
+    infrastructure instead of read as the skill violating an expectation.
+    """
+
+    @staticmethod
+    def _case(case_id: str):
+        return datasets.Case(
+            id=case_id, skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+
+    @staticmethod
+    def _log(checks):
+        sample = types.SimpleNamespace(
+            id="c1",
+            scores={"s": types.SimpleNamespace(
+                metadata={engine_scorers.CHECKS: checks}
+            )},
+            error=None,
+            total_time=1.0,
+        )
+        return types.SimpleNamespace(
+            status="success", error=None, samples=[sample]
+        )
+
+    def test_a_check_nobody_graded_errors_the_attempt(self) -> None:
+        log = self._log([
+            {"kind": "expected_behavior", "expectation": "e", "passed": False,
+             "detail": "could not list the sandbox -- no container",
+             "graded": False},
+        ])
+        outcome = engine_behavioral._outcomes(log, "alpha", [self._case("c1")])[0]
+        self.assertIn("could not be graded", outcome.error or "")
+        self.assertFalse(outcome.passed)
+
+    def test_an_ordinary_failure_is_still_a_failure(self) -> None:
+        # The other direction, and the one a careless fix breaks: a case that
+        # genuinely failed its expectation must stay a failure, not become an
+        # error that `staleness` then declines to count at all.
+        log = self._log([
+            {"kind": "expected_behavior", "expectation": "e", "passed": False,
+             "detail": "judge: it did not", "graded": True},
+        ])
+        outcome = engine_behavioral._outcomes(log, "alpha", [self._case("c1")])[0]
+        self.assertIsNone(outcome.error)
+        self.assertFalse(outcome.passed)
+
+    def test_a_check_from_an_older_log_reads_as_graded(self) -> None:
+        # Logs written before `graded` existed have no such key, and must not
+        # all become ungraded the moment this lands.
+        self.assertTrue(engine_scorers.graded({"passed": True, "kind": "k"}))
+        log = self._log([{"kind": "k", "expectation": "e", "passed": True,
+                          "detail": ""}])
+        outcome = engine_behavioral._outcomes(log, "alpha", [self._case("c1")])[0]
+        self.assertIsNone(outcome.error)
+        self.assertTrue(outcome.passed)
+
+
+class TestABrokenJudgeOnTheBaselineIsNotEvidenceAboutTheSkill(unittest.TestCase):
+    """The regression itself, stated as the verdict it used to manufacture.
+
+    This is the one that would have shipped: a baseline attempt whose grader
+    never answered, paired against a graded attempt that passed, reported as
+    `earns_it` -- the skill credited for a case the baseline was never
+    actually asked.
+    """
+
+    # Both halves are built by running `_outcomes` over a log, not by handing
+    # `pair` an outcome with `error` already set. Setting it by hand tests
+    # that `classify` honours an error it was given, which was never the bug
+    # and passes with the fix reverted. The claim here is about the chain: an
+    # ungraded check has to *become* that error before `pair` ever sees it.
+    #
+    # The module-level `_outcome` helper is used where a plain outcome is
+    # wanted, rather than a method of this class: `self._outcome` is where
+    # `unittest.TestCase` keeps the running test's `_Outcome`, so a helper by
+    # that name is shadowed during the run while looking right on the class.
+
+    @staticmethod
+    def _side(check: dict) -> list:
+        sample = types.SimpleNamespace(
+            id="c1",
+            scores={"s": types.SimpleNamespace(
+                metadata={engine_scorers.CHECKS: [check]}
+            )},
+            error=None,
+            total_time=1.0,
+        )
+        log = types.SimpleNamespace(status="success", error=None, samples=[sample])
+        case = datasets.Case(
+            id="c1", skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+        return engine_behavioral._outcomes(log, "alpha", [case])
+
+    def test_a_baseline_nobody_could_grade_comes_out_ungraded(self) -> None:
+        with_skill = self._side(
+            {"kind": "expected_behavior", "expectation": "e", "passed": True,
+             "detail": "judge: it did", "graded": True}
+        )
+        without = self._side(
+            {"kind": "expected_behavior", "expectation": "e", "passed": False,
+             "detail": "could not list the sandbox -- no container",
+             "graded": False}
+        )
+        comparison = staleness.pair(with_skill, without)[0]
+        self.assertEqual(
+            comparison.verdict, "ungraded",
+            "a baseline whose judge never answered is not a baseline that failed",
+        )
+
+    def test_a_baseline_that_really_failed_is_still_graded(self) -> None:
+        # The control. Without it the fix could pass by calling everything
+        # ungraded, which would make the command useless rather than wrong.
+        #
+        # Asserted as "graded, and the skill is the side that passed" rather
+        # than as a verdict name: which name a case like this carries is what
+        # the taxonomy collapse is about, and this test is about the judge.
+        with_skill = self._side(
+            {"kind": "expected_behavior", "expectation": "e", "passed": True,
+             "detail": "judge: it did", "graded": True}
+        )
+        without = self._side(
+            {"kind": "expected_behavior", "expectation": "e", "passed": False,
+             "detail": "judge: it did not", "graded": True}
+        )
+        comparison = staleness.pair(with_skill, without)[0]
+        self.assertNotEqual(comparison.verdict, "ungraded")
+        self.assertEqual((comparison.passes_with, comparison.passes_without), (1, 0))
+
+
 class TestOneBadSampleDoesNotFailTheWholeBatch(unittest.TestCase):
     """A behavioral batch discarded every case it had already graded.
 
