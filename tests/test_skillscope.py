@@ -1610,6 +1610,23 @@ class TestSkillStructure(unittest.TestCase):
         self.declares("name: [demo-skill\ndescription: broken")
         self.assertTrue(any("not valid YAML" in e for e in structure.errors()))
 
+    def test_yaml_the_parser_rejects_without_a_yaml_error_is_reported_too(self) -> None:
+        # Each of these is rejected with something other than a YAMLError:
+        # ValueError, AttributeError, KeyError, and RecursionError for nesting
+        # deeper than the interpreter allows. Each used to end the structural
+        # check with a traceback.
+        for name, frontmatter in (
+            ("date", "name: demo-skill\ndescription: d\nupdated: 2001-13-45"),
+            ("timestamp tag", "name: demo-skill\ndescription: d\nupdated: !!timestamp x"),
+            ("bool tag", "name: demo-skill\ndescription: d\ndraft: !!bool x"),
+            ("nesting", "name: demo-skill\ndescription: " + "[" * 2_000),
+        ):
+            with self.subTest(name):
+                self.declares(frontmatter)
+                errors = structure.errors()
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("not valid YAML", errors[0])
+
     def test_frontmatter_that_is_not_a_mapping_is_reported(self) -> None:
         self.declares("- demo-skill\n- a list, not a mapping")
         self.assertTrue(any("must be a mapping" in e for e in structure.errors()))
