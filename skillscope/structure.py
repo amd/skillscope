@@ -149,7 +149,7 @@ def _frontmatter(text: str) -> tuple[dict | None, str, str]:
     # RecursionError. `safe_load` of a string does nothing else that can fail.
     try:
         declared = yaml.safe_load(match.group("frontmatter"))
-    except Exception as exc:  # noqa: BLE001 -- every rejection is the file's
+    except Exception as exc:  # noqa: BLE001 -- whatever safe_load raises is the frontmatter's fault
         return None, "", f"frontmatter is not valid YAML: {exc}"
     if not isinstance(declared, dict):
         return None, "", (
