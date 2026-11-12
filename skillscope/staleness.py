@@ -15,26 +15,35 @@ calls the second situation out as a failure mode, "answering from the prompt and
 scoring like it, which looks like a bad skill rather than a missing one". Asked
 for deliberately and labelled, that failure is the measurement.
 
-Five things a case can turn out to be:
+Three things a case can turn out to be, and an error state:
 
 ``earns_it``
-    Passes with the skill, fails without it, and the agent reached for the
-    skill. The case discriminates, which is the only outcome that tells you
-    the skill did something.
-``unattributed``
-    Passes with the skill and fails without it, but the agent never opened the
-    skill on an attempt that passed. Something moved; the skill is not shown
-    to be what moved it. Installing a skill does not make an agent use one,
-    and a difference that arrived without it is not evidence about it.
-``no_signal``
-    Passes either way. Says nothing about the skill, and usually says something
-    about the case: an expectation any agent meets is not evidence.
+    Passes with the skill, fails without it. The case discriminates, which is
+    the only outcome that tells you the skill did something. Whether the agent
+    actually opened the skill is reported beside it, because installing a
+    skill does not make an agent use one and a case that moved without it
+    firing moved for a reason nobody has identified.
 ``harmful``
     Fails with the skill, passes without it. Rare, and worth stopping for: the
     skill is actively steering the agent wrong.
-``fails_either_way``
-    Fails both times. A broken case or a genuinely hard one; either way the
-    comparison has nothing to report until it passes somewhere.
+``no_signal``
+    Came out the same both ways. Two findings sharing a name, and the pass
+    counts beside the verdict say which you are holding. Both sides passing is
+    a case any agent satisfies, which is not evidence about the skill. Both
+    sides failing is a broken case or a genuinely hard one, which is not
+    evidence about the skill either, and points somewhere else entirely.
+``ungraded``
+    One side or both could not be graded: a side that errored throughout, a
+    grader that never answered, or a baseline that turned out not to be the
+    empty room it claimed to be.
+
+Three rather than more. Earlier versions split out whether the skill fired,
+whether a case asserted anything positive at all, and whether a shared failure
+was a broken case or a hard one. Each of those is real and each is still
+reported -- as counts and notes beside the verdict, where the evidence for
+them already was. None of them was a different verdict: each was one of these
+verdicts with a caveat attached, and a caveat reads better as a sentence than
+as a row in a table nobody can hold seven of.
 
 Each side can be run more than once (``--attempts``). A side counts as having
 passed when any of its attempts met every positive claim, which at one attempt
@@ -76,12 +85,9 @@ from .behavior import BehaviorOutcome
 # (key, what it means) -- one row per verdict, in the order a reader should
 # care about them.
 VERDICTS: tuple[tuple[str, str], ...] = (
-    ("earns_it", "passed with the skill, failed without it, and the skill fired"),
+    ("earns_it", "passed with the skill, failed without it"),
     ("harmful", "failed with the skill, passed without it"),
-    ("unattributed", "passed only with the skill, but the skill never fired"),
-    ("no_signal", "passed either way"),
-    ("fails_either_way", "failed either way"),
-    ("guards_only", "asserts nothing the skill could be credited for"),
+    ("no_signal", "came out the same both ways"),
     ("ungraded", "one side or both could not be graded"),
 )
 
@@ -145,22 +151,14 @@ class Comparison:
     # skill that ran the forbidden thing on an attempt that was not chosen
     # was reported as having broken nothing at all.
     guards_with: list[dict] = field(default_factory=list)
-    # How much of the case each side satisfied, averaged over its graded
-    # attempts. The verdict is binary and these are not: a side passes only by
-    # meeting every positive claim, so `fails_either_way` covers a baseline
-    # that met four claims of five and one that met none, and `earns_it`
-    # covers a baseline that nearly managed it and one that never started.
-    # See `_claims`, which is where a reader meets them.
-    claims: int = 0
-    claims_met_with: float = 0.0
-    claims_met_without: float = 0.0
-    # Whether the agent actually reached for the skill on the installed side,
-    # read off the attempt the verdict rests on -- which `_decisive` picks to
-    # be a passing attempt that fired, where the side has one. The verdict
-    # itself is decided over every passing attempt and not over this one; a
-    # case that would otherwise be `earns_it` and fired on no attempt that
-    # passed is `unattributed` instead. See `classify`.
-    activated_with: str | None = None
+    # Whether the agent actually reached for the skill on an attempt the
+    # installed side passed. See `_fired_on_pass`: installing a skill does not
+    # make an agent use one, so an `earns_it` where this is False is a case
+    # that moved for a reason nobody has identified. A boolean rather than the
+    # skill's name, because the name was only ever this skill's own -- the
+    # room check reports either `None` or exactly the skill under test -- so
+    # it carried nothing the row did not already say.
+    fired_with: bool = False
     # Why the baseline was not the empty room it claims to be, if it was not.
     # Reported whenever it happened, on any attempt.
     baseline_contaminated: str | None = None
@@ -213,11 +211,13 @@ def _decisive(attempts: list[BehaviorOutcome]) -> BehaviorOutcome | None:
     nothing passed, every attempt is equally the answer and the first will do.
 
     Among passing attempts, one that reached for the skill is preferred over
-    one that did not. `classify` asks whether the skill fired on any attempt
-    that passed, and this is what keeps `activated_with` and `checks_with`
-    pointing at the same attempt as that answer: a report that said `earns_it`
-    while showing the checks of an attempt where nothing fired would be
-    describing a different run from the one it graded.
+    one that did not. The verdict no longer turns on firing, but the note
+    beside it does, and the failure the preference prevents is unchanged:
+    `_fired_on_pass` asks whether the skill fired on any attempt that passed,
+    and this is what keeps `fired_with` and `checks_with` pointing at the same
+    attempt as that answer. A report saying a case earned its place while
+    showing the checks of an attempt where nothing fired would be describing a
+    different run from the one it graded.
 
     A side where every attempt errored falls back to the first of those. Its
     verdict is `ungraded` whatever this returns, and an errored attempt can
@@ -257,19 +257,24 @@ def _worst_guards(attempts: list[BehaviorOutcome]) -> list[dict]:
     return list(worst.values())
 
 
-def _claims_met(attempts: list[BehaviorOutcome]) -> float:
-    """Mean positive claims met per graded attempt."""
-    scored = answered(attempts)
-    if not scored:
-        return 0.0
-    met = sum(sum(1 for c in positive(a.checks) if c["passed"]) for a in scored)
-    return round(met / len(scored), 2)
-
-
 def classify(
     with_skill: list[BehaviorOutcome], without: list[BehaviorOutcome]
 ) -> str:
     """Which of `VERDICTS` this case's two sides are.
+
+    Three verdicts and an error state, because three is what a pair of runs
+    can establish: the two sides differed in the skill's favour, they differed
+    against it, or they did not differ.
+
+    Everything the longer taxonomy split out of those is still reported, as
+    counts and notes beside the verdict rather than as verdicts of their own.
+    Whether the skill fired is `fired_with`, and a case that moved without it
+    firing is flagged where it is listed. Whether a case asserts anything the
+    skill could be credited for is visible in its claims. Whether a shared
+    failure is a broken case or a hard one is the pass counts, which are
+    printed next to every row. None of those was ever a different *verdict*:
+    each was this verdict with a caveat attached, and a caveat reads better as
+    a sentence than as a row in a table nobody can hold seven of.
 
     Both arguments are a side's attempts: one each is the ordinary run, and
     `--attempts` makes them longer. A side passed when any attempt met every
@@ -282,48 +287,51 @@ def classify(
     here_scored, there_scored = answered(with_skill), answered(without)
     if not here_scored or not there_scored:
         return "ungraded"
-    if not any(positive(a.checks) for a in here_scored + there_scored):
-        # Nothing was claimed, so nothing can be credited. Reporting this as
-        # `fails_either_way` would read as a broken case rather than as one
-        # that only ever pinned down what must not happen.
-        return "guards_only"
     here = any(_met(a) for a in here_scored)
     there = any(_met(a) for a in there_scored)
     if here and not there:
-        # Installed is not used. The outcome differed, and the thing under
-        # test is not shown to be why -- so it is reported as its own finding
-        # rather than counted among the cases that needed the skill.
-        #
-        # Asked over the whole side rather than over one attempt. Reading
-        # `activated` off the attempt `_decisive` picked made the verdict turn
-        # on which of two passing attempts ran first: the same pair of runs in
-        # the other order credited the skill, and the order two attempts
-        # happened to run in is not a property of the skill. The module
-        # docstring's definition is "never opened the skill on an attempt that
-        # passed", and this is that sentence.
-        fired = any(_met(a) and a.activated for a in here_scored)
-        return _voided_if_dirty("earns_it" if fired else "unattributed", without)
+        return _voided_if_dirty("earns_it", without)
     if there and not here:
         return _voided_if_dirty("harmful", without)
-    verdict = (
-        "no_signal" if (here and there)
-        else "fails_either_way"
-    )
-    return _voided_if_dirty(verdict, without)
+    return _voided_if_dirty("no_signal", without)
+
+
+def _fired_on_pass(attempts: list[BehaviorOutcome]) -> bool:
+    """Whether the skill fired on an attempt the installed side passed.
+
+    Installing a skill does not make an agent use one, so a case that moved
+    without the skill firing has moved for some reason nobody has identified.
+    That is no longer a verdict of its own, but it is still the difference
+    between a case that credits the skill and one that merely coincides with
+    it, so it is carried on the comparison and flagged in the report.
+
+    Asked over the whole side rather than over one attempt. Reading
+    `activated` off the attempt `_decisive` picked made the answer turn on
+    which of two passing attempts ran first: the same pair of runs in the
+    other order credited the skill, and the order two attempts happened to run
+    in is not a property of the skill.
+    """
+    return any(_met(a) and a.activated for a in answered(attempts))
 
 
 # Verdicts a contaminated baseline cannot support, and why it cannot.
 #
-# Contamination is not symmetric. `no_signal` and `harmful` both rest on the
-# baseline having *managed* something, and a baseline that reached another
-# skill or read this skill's own files did not manage it unaided -- which is
-# the whole of what those verdicts claim.
+# Contamination is not symmetric. `harmful` rests on the baseline having
+# *managed* something, and a baseline that reached another skill or read this
+# skill's own files did not manage it unaided, which is the whole of what the
+# verdict claims.
 #
-# `earns_it`, `unattributed` and `fails_either_way` rest on the baseline
-# having *failed*. A baseline that failed while holding more than it should
-# have fails all the harder without it, so the finding survives its own
-# contamination and voiding it would throw away a conclusion the run is
-# entitled to.
+# `earns_it` rests on the baseline having *failed*. A baseline that failed
+# while holding more than it should have fails all the harder without it, so
+# the finding survives its own contamination and voiding it would throw away a
+# conclusion the run is entitled to.
+#
+# `no_signal` is now two findings under one name, and the rule covers both
+# without a branch. Both sides passing rests on the baseline having passed, so
+# contamination voids it. Both sides failing rests on a baseline that passed
+# nothing -- and `dirty_on_pass` only fires on an attempt that passed, so it
+# is False there and the verdict stands. Merging the old `fails_either_way`
+# and `guards_only` in here therefore voids nothing it should not.
 VOIDED_BY_CONTAMINATION = ("no_signal", "harmful")
 
 
@@ -411,23 +419,16 @@ def pair(
             else "the graded run" if not these
             else None
         )
-        # The claims a case makes are the case's, not a side's, so either side
-        # can name them. The baseline is asked only when the graded attempt
-        # produced none -- a side that errored before it graded anything has
-        # no checks to count, and a denominator of 0 would print every case it
-        # lost as having claimed nothing.
-        #
-        # Tested on `here.checks` rather than on `here`. A `BehaviorOutcome`
-        # is a dataclass and so always truthy, which made `here or there` fall
-        # back only where the graded side was *absent* -- never in the case
-        # the comment above describes, which is the one it was written for.
-        naming = here if (here and here.checks) else (there or here)
-        claims = len(positive(naming.checks)) if naming else 0
         comparisons.append(
             Comparison(
                 id=case_id,
                 skill=(these or those)[0].skill,
-                verdict="ungraded" if missing else classify(these, those),
+                # `classify` answers `ungraded` for a side with no attempt
+                # that answered, which a side that is absent entirely also
+                # is. Left to it rather than special-cased here, so one
+                # function decides what `ungraded` means. `missing` still
+                # earns its keep below, where it says *which* side was gone.
+                verdict=classify(these, those),
                 attempts_with=with_n,
                 attempts_without=without_n,
                 passes_with=with_passes,
@@ -443,10 +444,7 @@ def pair(
                 guards_with=_worst_guards(these),
                 checks_with=list(here.checks) if here else [],
                 checks_without=list(there.checks) if there else [],
-                claims=claims,
-                claims_met_with=_claims_met(these),
-                claims_met_without=_claims_met(those),
-                activated_with=here.activated if here else None,
+                fired_with=_fired_on_pass(these),
                 baseline_contaminated=_why_dirty(those),
                 baseline_dirty_on_pass=dirty_on_pass(those),
             )
@@ -469,9 +467,7 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
             **{key: sum(1 for c in subset if c.verdict == key) for key, _ in VERDICTS},
         }
 
-    graded = [
-        c for c in comparisons if c.verdict not in ("ungraded", "guards_only")
-    ]
+    graded = [c for c in comparisons if c.verdict != "ungraded"]
 
     # Guard rails, counted separately. A broken one is the serious finding
     # here: a skill that made the agent do the forbidden thing.
@@ -487,16 +483,24 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
             "cases": len(comparisons),
             "graded": len(graded),
             **counts,
-            # Of the cases that were graded both ways, the share that moved
-            # when the skill was taken away *and* can be credited to the
-            # skill: `earns_it` alone. Cases that moved without the skill
-            # firing are `unattributed` and counted as that; the wider "moved"
-            # number is computed in `render_markdown`. This is the narrower
-            # one, and the one the run exists for.
+            # Of the cases graded both ways, the share that moved when the
+            # skill was taken away. Every `earns_it`, including the ones where
+            # the skill never fired -- those used to be their own verdict and
+            # left out of this number, and are now counted in it and flagged
+            # beside it. `earns_it_unfired` is how a reader discounts it, and
+            # the report says so next to the figure rather than computing a
+            # second share, which would be the old split under another name.
             "discriminating": (
                 round(sum(1 for c in graded if c.verdict == "earns_it") / len(graded), 3)
                 if graded
                 else None
+            ),
+            # `earns_it` cases where the skill never fired on an attempt
+            # that passed. The outcome moved; the skill is not shown to be
+            # what moved it.
+            "earns_it_unfired": sum(
+                1 for c in comparisons
+                if c.verdict == "earns_it" and not c.fired_with
             ),
             "guard_checks": guard_checks,
             "guards_broken_with_skill": len(broken),
@@ -595,26 +599,47 @@ def _passes(case: dict) -> str:
     )
 
 
-def _claims(case: dict) -> str:
-    """How much of the case each side met, averaged over its graded attempts.
+def _advice(case: dict) -> str:
+    """What to do about one case, where the verdict alone does not say.
 
-    A side "passes" only by meeting every positive claim, so the verdict is
-    deaf to how close the other side came. `fails_either_way` covers a
-    baseline that met four of five claims and one that met none; `earns_it`
-    covers a baseline that nearly managed it and one that never started. Those
-    are different findings about the case, and an author deciding whether a
-    case still tests anything needs the one the verdict threw away.
+    This is where the collapsed taxonomy is paid for. `no_signal` now covers
+    three situations that want three different actions, and the single
+    sentence it used to carry -- "the agent already did this unaided" -- is
+    false for two of them. A case that failed on both sides was never managed
+    by anybody, and telling its author the agent managed it unaided sends
+    them to delete a case that is merely broken.
 
-    Above one attempt a side it also shows what the pass counts cannot: a mean
-    of 4.5 of 5 is a side that met everything once and nearly everything the
-    next time.
+    Driven off the pass counts, which `_passes` is already printing in the
+    column alongside, so a reader can check the advice against the evidence
+    for it rather than taking it on trust.
     """
-    if not case["claims"]:
-        return "-"
-    return (
-        f"{case['claims_met_with']:g}/{case['claims']} with, "
-        f"{case['claims_met_without']:g}/{case['claims']} without"
-    )
+    if case["verdict"] == "harmful":
+        return "the skill steered the agent wrong here"
+    if case["verdict"] == "earns_it":
+        return (
+            "something moved, but the agent never opened the skill -- read "
+            "the run before crediting it"
+        )
+    if not positive(case["checks_with"] + case["checks_without"]):
+        # The old `guards_only` verdict, as advice. Asked before the pass
+        # counts, because a case claiming nothing positive cannot pass and
+        # would otherwise be told it is broken or hard -- which would send its
+        # author to fix a case that is working exactly as written.
+        return (
+            "this case claims nothing the skill could be credited for; its "
+            "guard rails were still checked"
+        )
+    if not case["passes_with"] and not case["passes_without"]:
+        return (
+            "neither side managed it; a broken case or a hard one, and not "
+            "yet evidence about the skill"
+        )
+    if _unsettled(case):
+        return (
+            "the two sides did not settle; run it again before reading "
+            "anything into it"
+        )
+    return "the agent already did this unaided; the case is not evidence about the skill"
 
 
 def _detail(check: dict | None) -> str:
@@ -701,14 +726,35 @@ def render_markdown(summary: dict) -> str:
     # and this is the one result the command exists to surface, so it is said
     # rather than left to be noticed in a table.
     #
-    # `unattributed` and `harmful` are checked too, and not for tidiness: a run
-    # whose only case was `unattributed` printed this, and its second sentence
-    # -- "every graded case came out the same with the skill and without it" --
-    # was false of the only case in it. That case passed with the skill and
-    # failed without it; what it lacked was evidence the skill was why. Those
-    # two findings have their own notes, which say the true thing.
-    moved = totals["earns_it"] + totals["unattributed"] + totals["harmful"]
-    if totals["graded"] and not moved:
+    # Split on whether anything passed, because the same verdict tally means
+    # two different things. A suite where both sides passed everything has
+    # cases that no longer test the skill. A suite where both sides failed
+    # everything has cases that do not work, and telling its author the skill
+    # has stopped earning its place would point them at the wrong thing
+    # entirely.
+    moved = totals["earns_it"] + totals["harmful"]
+    anything_passed = any(
+        c["passes_with"] or c["passes_without"] for c in summary["cases"]
+    )
+    # A suite that claims nothing positive anywhere is a third case again,
+    # and the one the old `guards_only` verdict used to catch here. Its cases
+    # cannot pass, so the "nothing passed" wording below would call a working
+    # suite broken; and they cannot move, so the "stopped earning its place"
+    # wording would blame a skill for not affecting checks that never asked
+    # anything of it.
+    claimed = any(
+        positive(c["checks_with"] + c["checks_without"]) for c in summary["cases"]
+    )
+    if totals["graded"] and not moved and not claimed:
+        lines += [
+            "> **Every case here only forbids things.** Their guard rails were "
+            "checked, and nothing was claimed that the skill could be "
+            "credited with, so this run says nothing about whether the skill "
+            "is earning its place. Add a case that asserts what it should "
+            "make the agent *do*.",
+            "",
+        ]
+    elif totals["graded"] and not moved and anything_passed:
         lines += [
             "> **No case in this suite shows the skill doing anything.** Every "
             "graded case came out the same with the skill and without it. "
@@ -716,6 +762,14 @@ def render_markdown(summary: dict) -> str:
             "never tested what it knows -- read the skill and ask whether any "
             "case here would need it. Those are different problems with "
             "different fixes.",
+            "",
+        ]
+    elif totals["graded"] and not moved:
+        lines += [
+            "> **No case in this suite passed on either side.** That is a "
+            "statement about the cases, not about the skill: nothing here has "
+            "been shown to work well enough to then ask whether the skill is "
+            "why. Fix the cases before reading anything into the verdicts.",
             "",
         ]
 
@@ -770,17 +824,9 @@ def render_markdown(summary: dict) -> str:
     ]
     if dirty:
         voided = [c for c in dirty if c["verdict"] == "ungraded"]
-        # Split four ways, not two, and each group worded for what it actually
-        # rests on.
+        # Split three ways, each group worded for what it actually rests on.
         #
-        # A `guards_only` case makes no positive claim at all, so it does not
-        # rest on the baseline having failed and saying that it does is a
-        # claim the run cannot support -- the same reading of its own
-        # contamination rule that `classify` gets right by returning before
-        # the rule is consulted, and that this paragraph used to get wrong by
-        # filtering on contamination alone.
-        #
-        # The fourth group is what `--attempts` opened up. `_why_dirty` reads
+        # The third group is what `--attempts` opened up. `_why_dirty` reads
         # every attempt and `dirty_on_pass` reads only the ones that passed,
         # so a baseline that was dirty on an attempt it failed and clean on
         # the one it passed keeps its verdict. Where that verdict is one of
@@ -789,11 +835,7 @@ def render_markdown(summary: dict) -> str:
         #
         # Driven off `VOIDED_BY_CONTAMINATION` rather than a verdict list
         # written out here, so the two cannot drift apart.
-        silent = [c for c in dirty if c["verdict"] == "guards_only"]
-        standing = [
-            c for c in dirty
-            if c["verdict"] not in ("ungraded", "guards_only")
-        ]
+        standing = [c for c in dirty if c["verdict"] != "ungraded"]
         stood = [
             c for c in standing
             if c["verdict"] not in VOIDED_BY_CONTAMINATION
@@ -832,25 +874,18 @@ def render_markdown(summary: dict) -> str:
                 "on is not the contaminated one. They stand, on weaker "
                 "evidence than a run with no contamination in it at all.",
             )
-        if silent:
-            note.append(
-                f"> {len(silent)} are `guards_only` -- "
-                + ", ".join(f"`{c['id']}`" for c in silent)
-                + " -- and claim nothing either way, so a dirty baseline "
-                "neither voids them nor leaves them standing on anything.",
-            )
         lines += note
 
-    unfired = totals["unattributed"]
+    unfired = totals["earns_it_unfired"]
     if unfired:
         lines += [
             "",
-            f"> **{unfired} case(s) passed only with the skill installed, but "
-            "the skill never fired on the attempt that passed.** Installing a "
-            "skill does not make an agent use it, so for those the outcome "
-            "differed without the skill being shown to be the reason. They "
-            "are `unattributed` rather than `earns_it`: a lead to go and read, "
-            "not a case the skill has been credited with.",
+            f"> **{unfired} of the {totals['earns_it']} `earns_it` case(s) "
+            "passed without the skill ever firing.** Installing a skill does "
+            "not make an agent use it, so for those the outcome differed "
+            "without the skill being shown to be the reason. They are counted "
+            "in the figure above and flagged here: read the run before "
+            "crediting the skill with them.",
         ]
 
     if totals["guard_checks"]:
@@ -884,9 +919,14 @@ def render_markdown(summary: dict) -> str:
             "again before acting on them.",
         ]
 
+    # Former `fails_either_way` cases land here now, because they are
+    # `no_signal`. That grows the section on a suite with many hard cases,
+    # which is the right trade: the advice column tells them apart, and this
+    # is "worth a look" rather than "failures".
     notable = [
         c for c in summary["cases"]
-        if c["verdict"] in ("no_signal", "harmful", "unattributed")
+        if c["verdict"] in ("no_signal", "harmful")
+        or (c["verdict"] == "earns_it" and not c["fired_with"])
     ]
     lines += ["", "### Cases worth a look", ""]
     if not totals["graded"] and not totals["guard_checks"]:
@@ -898,10 +938,10 @@ def render_markdown(summary: dict) -> str:
             "No case was graded both ways, so there is nothing to look at here."
         )
     elif not totals["graded"]:
-        # A `guards_only` case is not graded and is not nothing: it ran on
-        # both sides and its guards were checked. "Nothing to look at here",
-        # printed two paragraphs under "that is the skill doing the forbidden
-        # thing", is the strongest finding this command can produce being
+        # A case whose guards were checked is not nothing, even where no
+        # verdict was reached. "Nothing to look at here", printed two
+        # paragraphs under "that is the skill doing the forbidden thing",
+        # is the strongest finding this command can produce being
         # contradicted by the weakest sentence in it. This section is about
         # the verdict table, so it says that instead.
         lines.append(
@@ -910,31 +950,17 @@ def render_markdown(summary: dict) -> str:
         )
     elif not notable:
         lines.append(
-            "None. Every graded case either needed the skill or failed both ways."
+            "None. Every graded case needed the skill, and reached for it."
         )
     else:
         lines += [
-            "| Case | Verdict | Passed | Claims met | What to do |",
-            "| --- | --- | --- | --- | --- |",
+            "| Case | Verdict | Passed | What to do |",
+            "| --- | --- | --- | --- |",
         ]
         for case in notable:
-            advice = (
-                "the two sides did not settle; run it again before reading "
-                "anything into it"
-                if case["verdict"] == "no_signal" and _unsettled(case)
-                else {
-                    "harmful": "the skill steered the agent wrong here",
-                    "unattributed": "something moved, but the agent never "
-                    "opened the skill -- read the run before crediting it",
-                }.get(
-                    case["verdict"],
-                    "the agent already did this unaided; the case is not "
-                    "evidence about the skill",
-                )
-            )
             lines.append(
                 f"| `{case['id']}` | {case['verdict']} | {_passes(case)} "
-                f"| {_claims(case)} | {advice} |"
+                f"| {_advice(case)} |"
             )
 
     # Every claim that came out differently on the two sides -- whatever the
@@ -961,8 +987,7 @@ def render_markdown(summary: dict) -> str:
         )
     for case in detailed:
         lines += [
-            f"**`{case['id']}`** ({case['verdict']}) -- {_passes(case)}; "
-            f"claims met {_claims(case)}",
+            f"**`{case['id']}`** ({case['verdict']}) -- {_passes(case)}",
             "",
             "| Expectation | With the skill | Without it |",
             "| --- | --- | --- |",
