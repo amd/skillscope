@@ -167,6 +167,12 @@ class Comparison:
     # can be attempted more than once -- a baseline that was dirty on an
     # attempt it failed cannot have reached a conclusion it never reached.
     baseline_dirty_on_pass: bool = False
+    # Wall seconds each side spent on this case, over the attempts that
+    # answered. `None` where the side has no honest number -- see `_seconds`,
+    # where the distinction between "no time" and "no measurement" is the
+    # difference between reporting the finding and inverting it.
+    seconds_with: float | None = None
+    seconds_without: float | None = None
 
 
 def positive(checks: list[dict]) -> list[dict]:
@@ -201,6 +207,33 @@ def answered(attempts: list[BehaviorOutcome]) -> list[BehaviorOutcome]:
     `harmful` out of a broken graded run.
     """
     return [a for a in attempts if not a.error]
+
+
+def _seconds(attempts: list[BehaviorOutcome]) -> float | None:
+    """Wall seconds this side spent on the case, over the attempts that answered.
+
+    Summed rather than averaged or taken from the decisive attempt. The figure
+    has to reconcile with the per-half total in the table above it, and a mean
+    of medians adds up to nothing a reader can check. `_decisive` would be
+    worse still: it prefers an attempt that *passed*, which selects on exactly
+    the dimension that correlates with speed, so a baseline's one lucky fast
+    pass would be reported as its time while three slow failures vanished. At
+    one attempt a side -- the default -- the sum is that attempt's time.
+
+    The denominator is already on the row: `_passes` prints `3/3 with, 0/3
+    without` in the next column, so a reader seeing `7m12s` beside `3/3` reads
+    it as three attempts' worth without being told.
+
+    `None`, not `0.0`, where no attempt produced a number. This is the one
+    column where reporting nothing as zero inverts the finding: the case this
+    command exists for is a baseline that ran for half an hour and never
+    finished, and `0s` beside the graded half's `2m23s` reads as the baseline
+    being instant. Zero is discarded for the same reason -- it is what a
+    synthesised failure carries for a case inspect never ran, and an agent run
+    is never genuinely instantaneous.
+    """
+    timed = [a.elapsed_s for a in answered(attempts) if a.elapsed_s]
+    return round(sum(timed), 1) if timed else None
 
 
 def _decisive(attempts: list[BehaviorOutcome]) -> BehaviorOutcome | None:
@@ -447,6 +480,8 @@ def pair(
                 fired_with=_fired_on_pass(these),
                 baseline_contaminated=_why_dirty(those),
                 baseline_dirty_on_pass=dirty_on_pass(those),
+                seconds_with=_seconds(these),
+                seconds_without=_seconds(those),
             )
         )
     return comparisons
@@ -597,6 +632,22 @@ def _passes(case: dict) -> str:
         f"{case['passes_with']}/{case['attempts_with']} with, "
         f"{case['passes_without']}/{case['attempts_without']} without{tail}"
     )
+
+
+def _seconds_cell(case: dict, side: str) -> str:
+    """One side's time for one case: a figure, or why there is not one.
+
+    Three states and three strings, because the distinction is the whole
+    point of the column. A side that errored throughout has no time to show
+    and did not take zero seconds trying -- it is the half-hour baseline that
+    never concluded, which is the finding rather than a gap in it.
+    """
+    seconds = case[f"seconds_{side}"]
+    if seconds is not None:
+        return _duration(seconds)
+    if case[f"errored_{side}"]:
+        return "did not finish"
+    return "not run"
 
 
 def _advice(case: dict) -> str:
@@ -1100,12 +1151,13 @@ def render_markdown(summary: dict) -> str:
         )
     else:
         lines += [
-            "| Case | Verdict | Passed | What to do |",
-            "| --- | --- | --- | --- |",
+            "| Case | Verdict | Passed | Time (with / without) | What to do |",
+            "| --- | --- | --- | --- | --- |",
         ]
         for case in notable:
             lines.append(
                 f"| `{case['id']}` | {case['verdict']} | {_passes(case)} "
+                f"| {_seconds_cell(case, 'with')} / {_seconds_cell(case, 'without')} "
                 f"| {_advice(case)} |"
             )
 
@@ -1133,7 +1185,9 @@ def render_markdown(summary: dict) -> str:
         )
     for case in detailed:
         lines += [
-            f"**`{case['id']}`** ({case['verdict']}) -- {_passes(case)}",
+            f"**`{case['id']}`** ({case['verdict']}) -- {_passes(case)}; "
+            f"{_seconds_cell(case, 'with')} with, "
+            f"{_seconds_cell(case, 'without')} without",
             "",
             "| Expectation | With the skill | Without it |",
             "| --- | --- | --- |",
