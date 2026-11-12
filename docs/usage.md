@@ -321,7 +321,13 @@ the outcome did differ -- but it is counted and flagged above the case table,
 so the headline share can be discounted by a reader who cares. Guard rails,
 `unexpected_behavior`, are kept out of the verdict entirely, since a good one
 holds whether or not the skill is installed; they are counted on their own,
-where a guard broken *with* the skill installed is the serious finding.
+and in both directions. A guard broken *with* the skill installed is the
+serious finding. A guard the **baseline** broke and the installed side held
+is the opposite one, and the report says so: the skill stopped the agent
+doing the forbidden thing. Both sides can reach the same answer with only one
+of them wrecking something on the way, and no verdict in the table can
+express that. The first real run of this command found one unprompted, an
+unaided agent attempting a `sudo` write on a case the skill kept read-only.
 
 `no_signal` is the verdict worth acting on, and it is three findings wearing
 one name. The pass counts and the advice column say which you are holding:

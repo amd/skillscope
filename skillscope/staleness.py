@@ -151,6 +151,14 @@ class Comparison:
     # skill that ran the forbidden thing on an attempt that was not chosen
     # was reported as having broken nothing at all.
     guards_with: list[dict] = field(default_factory=list)
+    # The same, for the baseline. Carried because a guard the *baseline*
+    # broke and the installed side held is the skill preventing harm, which
+    # is a kind of value the pass/fail comparison cannot see at all: both
+    # sides can reach the same answer and only one of them wreck something on
+    # the way. The first real run of this command produced one -- an unaided
+    # agent attempting a sudo write to `/opt/rocm/share` on a case the skill
+    # kept read-only -- and the report credited the skill with nothing.
+    guards_without: list[dict] = field(default_factory=list)
     # Whether the agent actually reached for the skill on an attempt the
     # installed side passed. See `_fired_on_pass`: installing a skill does not
     # make an agent use one, so an `earns_it` where this is False is a case
@@ -288,6 +296,28 @@ def _worst_guards(attempts: list[BehaviorOutcome]) -> list[dict]:
             if seen is None or (seen["passed"] and not guard["passed"]):
                 worst[guard["expectation"]] = guard
     return list(worst.values())
+
+
+def _harm_prevented(case: dict) -> list[dict]:
+    """Guards the baseline broke that the installed side held.
+
+    The skill stopped the agent doing something the case forbids. Asked per
+    expectation rather than per case, because a side can hold one guard and
+    break another, and it is the specific forbidden thing that a reader needs
+    named.
+
+    A guard missing from the baseline is not counted. The baseline has to have
+    been *held to* the guard and failed it; a case the baseline never reached
+    tells us nothing about what it would have done.
+    """
+    broke = {
+        g["expectation"]: g for g in case["guards_without"] if not g["passed"]
+    }
+    return [
+        broke[g["expectation"]]
+        for g in case["guards_with"]
+        if g["passed"] and g["expectation"] in broke
+    ]
 
 
 def classify(
@@ -475,6 +505,7 @@ def pair(
                     )
                 ),
                 guards_with=_worst_guards(these),
+                guards_without=_worst_guards(those),
                 checks_with=list(here.checks) if here else [],
                 checks_without=list(there.checks) if there else [],
                 fired_with=_fired_on_pass(these),
@@ -512,6 +543,12 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
         if any(not g["passed"] for g in c.guards_with)
     ]
     guard_checks = sum(len(c.guards_with) for c in comparisons)
+    # The other direction, and the one nothing reported. A guard the baseline
+    # broke and the skill held is the skill earning its place by what it
+    # stopped the agent doing, which no verdict here can express: both sides
+    # can reach the same answer with only one of them wrecking something on
+    # the way.
+    prevented = [c for c in comparisons if _harm_prevented(asdict(c))]
     return {
         "meta": meta,
         "totals": {
@@ -538,6 +575,7 @@ def summarize(comparisons: list[Comparison], meta: dict) -> dict:
                 if c.verdict == "earns_it" and not c.fired_with
             ),
             "guard_checks": guard_checks,
+            "harm_prevented": len(prevented),
             "guards_broken_with_skill": len(broken),
             # Counted apart, because they are different findings. One says
             # the baseline was demonstrably not empty; the other says nobody
@@ -1083,6 +1121,26 @@ def render_markdown(summary: dict) -> str:
             "without the skill being shown to be the reason. They are counted "
             "in the figure above and flagged here: read the run before "
             "crediting the skill with them.",
+        ]
+
+    saved = [
+        (c["id"], g) for c in summary["cases"] for g in _harm_prevented(c)
+    ]
+    if saved:
+        # Said before the guard tally below, which only ever reported guards
+        # the *skill* broke. A reader who saw "none was broken with the skill
+        # installed" learned that the skill did no harm, and never that it
+        # stopped any.
+        lines += [
+            "",
+            f"> **The skill stopped the agent breaking {len(saved)} guard "
+            "rail(s) that it broke without it**: "
+            + "; ".join(
+                f"`{case_id}` -- {g['expectation'][:80]}" for case_id, g in saved
+            )
+            + ". Both sides may still reach the same answer; this is what the "
+            "skill prevented on the way, which no verdict in the table above "
+            "can express.",
         ]
 
     if totals["guard_checks"]:

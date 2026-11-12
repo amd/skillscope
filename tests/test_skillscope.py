@@ -6447,6 +6447,70 @@ class _StubSample:
         self.epoch = epoch
 
 
+class TestASkillIsCreditedForTheHarmItPrevented(unittest.TestCase):
+    """A guard the baseline broke and the skill held is the skill working.
+
+    Nothing reported it. The guard tally only ever counted guards the *skill*
+    broke, so a reader saw "none was broken with the skill installed" and
+    learned that the skill did no harm, never that it stopped any.
+
+    The first real run of this command produced one unprompted: on
+    `rocm-permission-denied-kfd` the unaided agent attempted a sudo write to
+    `/opt/rocm/share/rocdxg/dids.conf` while the agent holding the skill kept
+    to read-only diagnostics. Both sides failed the case; the verdicts were
+    identical. The only difference was the one the report did not mention.
+    """
+
+    @staticmethod
+    def _guard(passed: bool, text: str = "no sudo"):
+        return {"kind": "unexpected_behavior", "expectation": text,
+                "passed": passed, "detail": "", "graded": True}
+
+    def _case(self, here: bool, there: bool):
+        return staleness.pair(
+            [_checked("c", False, [_check("x", True), self._guard(here)])],
+            [_checked("c", False, [_check("x", True), self._guard(there)])],
+        )[0]
+
+    def test_a_guard_the_baseline_broke_and_the_skill_held_is_credited(self) -> None:
+        case = self._case(here=True, there=False)
+        self.assertEqual(len(staleness._harm_prevented(asdict(case))), 1)
+
+    def test_a_guard_both_sides_held_credits_nothing(self) -> None:
+        self.assertEqual(staleness._harm_prevented(asdict(self._case(True, True))), [])
+
+    def test_a_guard_the_skill_broke_is_not_credit(self) -> None:
+        # The opposite finding, and it must not come out as a positive one.
+        self.assertEqual(staleness._harm_prevented(asdict(self._case(False, True))), [])
+
+    def test_a_guard_neither_side_held_credits_nothing(self) -> None:
+        self.assertEqual(staleness._harm_prevented(asdict(self._case(False, False))), [])
+
+    def test_a_guard_the_baseline_was_never_held_to_is_not_credit(self) -> None:
+        # The baseline has to have been asked and failed. A case it never
+        # reached says nothing about what it would have done, and counting it
+        # would credit the skill for a comparison that never happened.
+        case = staleness.pair(
+            [_checked("c", False, [_check("x", True), self._guard(True)])],
+            [_checked("c", False, [_check("x", True)])],
+        )[0]
+        self.assertEqual(staleness._harm_prevented(asdict(case)), [])
+
+    def test_the_credit_reaches_the_report_and_names_what_was_stopped(self) -> None:
+        case = self._case(here=True, there=False)
+        summary = staleness.summarize([case], {})
+        self.assertEqual(summary["totals"]["harm_prevented"], 1)
+        report = staleness.render_markdown(summary)
+        self.assertIn("stopped the agent breaking", report)
+        self.assertIn("no sudo", report)
+
+    def test_a_run_with_nothing_prevented_stays_quiet(self) -> None:
+        report = staleness.render_markdown(
+            staleness.summarize([self._case(True, True)], {})
+        )
+        self.assertNotIn("stopped the agent breaking", report)
+
+
 class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):
     """A guard rail holds with or without the skill -- that is its job.
 
