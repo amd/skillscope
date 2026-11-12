@@ -6762,7 +6762,10 @@ class TestAFlakyNoSignalIsNotToldToDeleteTheCase(unittest.TestCase):
 
     def test_a_side_that_disagreed_with_itself_is_called_out(self) -> None:
         report = self._report([True, True, True], [True, False, False])
-        self.assertIn("disagreed with itself", report)
+        # Asserted on the row rather than on a summary paragraph above it.
+        # The paragraph said the same thing twice: `_advice` already tells
+        # this reader, in the column where they are looking at the case.
+        self.assertIn("the two sides did not settle", report)
         self.assertIn("did not settle", report)
 
     def test_both_sides_managing_it_every_time_keeps_the_old_advice(self) -> None:
