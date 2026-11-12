@@ -642,6 +642,137 @@ def _advice(case: dict) -> str:
     return "the agent already did this unaided; the case is not evidence about the skill"
 
 
+def _cell(value) -> str:
+    """A figure, or `n/a` where there is none. Never a zero standing in for one.
+
+    Same spelling as `tools/benchmark_engines.py`, which reports the same
+    columns for the same reason.
+    """
+    return "n/a" if value is None else str(value)
+
+
+def _duration(seconds: float | None) -> str:
+    """`2m23s`, because `143.2s` beside `1680.4s` does not compare at a glance."""
+    if seconds is None:
+        return "n/a"
+    minutes, rest = divmod(int(round(seconds)), 60)
+    return f"{minutes}m{rest:02d}s" if minutes else f"{rest}s"
+
+
+def _ratio(halves: list[dict]) -> str | None:
+    """How much longer the baseline took, where both halves have a number."""
+    graded, baseline = halves[0]["wall_time_s"], halves[1]["wall_time_s"]
+    if not graded or not baseline:
+        return None
+    return f"{baseline / graded:.1f}x"
+
+
+def _spend_lead(halves: list[dict]) -> list[str]:
+    """The sentence this command exists to print, above everything else.
+
+    A skill's worth is not only whether the agent gets there. An agent holding
+    the skill goes straight to the work and an agent without it explores, and
+    the gap between those is a result in its own right -- one the verdicts
+    cannot express, because both halves can pass and the case still be worth
+    keeping. The first run of this command had a graded half finish in 2m23s
+    against a baseline still going half an hour later, and the report said
+    nothing about it.
+
+    Three shapes, because the honest sentence differs. A baseline that was
+    stopped is a floor and is said as one. A graded half slower than its
+    baseline is a finding and is said plainly rather than suppressed: a skill
+    that costs the agent time is something its author wants to know.
+    """
+    graded, baseline = halves
+    if not baseline["finished"]:
+        return [
+            f"> **The baseline never finished.** The graded half took "
+            f"{_duration(graded['wall_time_s'])}; the baseline was still "
+            f"going {_duration(baseline['wall_time_s'])} in, when the bound "
+            "stopped it. That gap is itself a result: whatever these cases "
+            "ask for, an agent without the skill reaches it only by "
+            "exploring, if at all.",
+            "",
+        ]
+    times = _ratio(halves)
+    if times is None:
+        return []
+    if baseline["wall_time_s"] >= graded["wall_time_s"]:
+        return [
+            f"> **The baseline took {times} the graded half's wall time** -- "
+            f"{_duration(graded['wall_time_s'])} with the skill, "
+            f"{_duration(baseline['wall_time_s'])} without it.",
+            "",
+        ]
+    return [
+        "> **The graded half was the slower of the two** -- "
+        f"{_duration(graded['wall_time_s'])} with the skill, "
+        f"{_duration(baseline['wall_time_s'])} without it. The skill is "
+        "costing the agent time; whether it buys anything for that is the "
+        "verdict table below.",
+        "",
+    ]
+
+
+def _spend_caveats(halves: list[dict], meta: dict) -> list[str]:
+    """Which of these columns compare, and which do not.
+
+    The cost one is not decoration. Dollars arrive only through the host
+    leg's final event, which a half the bound killed never reaches -- so the
+    half that spent *more* is the likelier of the two to report nothing, and
+    a reader who takes a blank for a zero reads the result exactly backwards.
+    """
+    notes = [
+        "> Both halves ran the same cases on the same model, one after the "
+        "other, under one `--timeout`: the graded half goes first, so an "
+        "overrun there eats the baseline's budget. Wall time is the clock, "
+        "and includes waiting for retries and rate limits."
+    ]
+    if any("cost_usd" not in half for half in halves):
+        notes.append(
+            "> **A missing cost is a missing number, not a zero.** The "
+            "inspect-backed engines report one only where the provider "
+            "supplies pricing, which a gateway generally does not and which "
+            "inspect's own registry does not supply for any model; "
+            "`SKILLSCOPE_MODEL_PRICING` is the way in. Worse for this "
+            "report: dollars arrive with a run's final event, which a half "
+            "the bound stopped never reaches -- so the half that spent more "
+            "is the likelier one to show `n/a`. Tokens and model calls are "
+            "the like-for-like columns."
+        )
+    if meta.get("concurrency"):
+        notes.append(
+            f"> Up to {meta['concurrency']} cases ran at once on each half, "
+            "so wall time measures how long the run took rather than how "
+            "much agent time it bought. Model calls and tokens are unaffected."
+        )
+    if any(not half["finished"] for half in halves):
+        stopped = ", ".join(h["label"] for h in halves if not h["finished"])
+        notes.append(
+            f"> The `{stopped}` row is a floor: the bound stopped it, so it "
+            "spent at least this and would have spent more."
+        )
+    return notes
+
+
+def _spend_table(halves: list[dict]) -> list[str]:
+    naming = {"graded": "with the skill", "baseline": "nothing installed"}
+    rows = [
+        "| Half | Wall time | Model calls | Tokens | Cost |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for half in halves:
+        floor = "" if half["finished"] else "+"
+        rows.append(
+            f"| {naming.get(half['label'], half['label'])} "
+            f"| {_duration(half['wall_time_s'])}{floor} "
+            f"| {_cell(half.get('model_calls'))} "
+            f"| {_cell(half.get('total_tokens'))} "
+            f"| {_cell(half.get('cost_usd'))} |"
+        )
+    return rows
+
+
 def _detail(check: dict | None) -> str:
     if check is None:
         return "not graded this side"
@@ -722,6 +853,17 @@ def render_markdown(summary: dict) -> str:
             "the cases it did not run.",
             "",
         ]
+    # What each half spent. Placed above the verdicts because it is the
+    # cheaper question and often the more useful answer: a skill whose cases
+    # all pass either way can still be the difference between two minutes and
+    # half an hour, and a verdict table alone reports that as "no signal".
+    #
+    # Absent from a summary built by something that did not run two halves,
+    # so `summarize` stays usable for a caller that has only comparisons.
+    halves = meta.get("legs") or []
+    if len(halves) == 2:
+        lines += _spend_lead(halves)
+
     # Nothing moved at all. The row `earns_it | 0` is true and says nothing,
     # and this is the one result the command exists to surface, so it is said
     # rather than left to be noticed in a table.
@@ -772,6 +914,10 @@ def render_markdown(summary: dict) -> str:
             "why. Fix the cases before reading anything into the verdicts.",
             "",
         ]
+
+    if len(halves) == 2:
+        lines += ["### What each half cost", "", *_spend_table(halves), ""]
+        lines += [*_spend_caveats(halves, meta), ""]
 
     lines += [
         "Reporting only. Agents disagree with themselves between runs, so treat "

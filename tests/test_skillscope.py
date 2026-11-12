@@ -6307,9 +6307,18 @@ def _staleness_harness(test, *, dataset=None):
                 "cases": [c.id for c in gradable],
             }
         )
+        # Spend something, and a different something per half, so a test can
+        # tell which half a figure came from. An engine records from inside
+        # this call, which is the whole reason the leg scope wraps it.
+        usage.record(
+            input_tokens=10 if install else 100,
+            output_tokens=1 if install else 20,
+            calls=1 if install else 7,
+        )
         return []
 
-    harness = types.SimpleNamespace(repo=repo, calls=calls)
+    reports: list[dict] = []
+    harness = types.SimpleNamespace(repo=repo, calls=calls, reports=reports)
 
     def run(engine="claude-code", extra=None):
         argv = [
@@ -6322,8 +6331,11 @@ def _staleness_harness(test, *, dataset=None):
     harness.run = run
 
     with mock.patch.object(cli, "_run_behavioral", record), \
-            mock.patch.object(cli, "_write_report", lambda *a, **k: None), \
+            mock.patch.object(
+                cli, "_write_report",
+                lambda summary, *a, **k: reports.append(summary)), \
             mock.patch.object(cli, "_prepare_graded_run", lambda *a, **k: ["alpha"]):
+        usage.reset()
         yield harness
 
 
@@ -7536,6 +7548,157 @@ class TestAWalkThatDidNotFinishCannotVouchForTheRoom(unittest.TestCase):
         self.assertEqual(why, engine_behavioral.UNKNOWN_ROOM)
 
 
+class TestTheTwoHalvesAreBilledSeparately(unittest.TestCase):
+    """One global accumulator, two halves, and a trap in how it is read.
+
+    `usage.snapshot()` returns `_current` itself rather than a copy, so the
+    obvious way to measure a half -- hold a snapshot, subtract it afterwards
+    -- subtracts the totals from themselves and reports both halves as having
+    spent nothing. That failure produces plausible zeros rather than an error,
+    which is the kind nobody catches by reading a report.
+
+    So the scope swaps the global instead, and these pin both halves of that:
+    each leg sees only its own, and the command total afterwards is still the
+    sum, which is what keeps every other report's meta unchanged.
+    """
+
+    def setUp(self) -> None:
+        usage.reset()
+        self.addCleanup(usage.reset)
+
+    def test_each_half_holds_only_its_own_spend(self) -> None:
+        with usage.leg("graded") as graded:
+            usage.record(input_tokens=10, output_tokens=1, calls=1)
+        with usage.leg("baseline") as baseline:
+            usage.record(input_tokens=100, output_tokens=20, calls=7)
+        self.assertEqual((graded.usage.input_tokens, graded.usage.calls), (10, 1))
+        self.assertEqual((baseline.usage.input_tokens, baseline.usage.calls), (100, 7))
+
+    def test_the_command_total_is_still_the_sum(self) -> None:
+        # The no-regression property. `behavioral` and `routing` splice
+        # `usage.snapshot()` into their own meta and must not notice this.
+        with usage.leg("graded"):
+            usage.record(input_tokens=10, calls=1)
+        with usage.leg("baseline"):
+            usage.record(input_tokens=100, calls=7)
+        self.assertEqual(usage.snapshot().input_tokens, 110)
+        self.assertEqual(usage.snapshot().calls, 8)
+
+    def test_a_snapshot_taken_inside_a_leg_is_that_leg(self) -> None:
+        # The trap, made explicit. A caller holding this reference and
+        # subtracting it later gets zero, which is why the scope swaps.
+        with usage.leg("graded") as graded:
+            usage.record(input_tokens=10, calls=1)
+            self.assertIs(usage.snapshot(), graded.usage)
+
+    def test_an_unknown_cost_does_not_fold_back_as_zero(self) -> None:
+        with usage.leg("graded"):
+            usage.record(input_tokens=10, calls=1)
+        self.assertIsNone(usage.snapshot().cost_usd)
+
+    def test_an_engine_recording_from_a_log_lands_in_the_enclosing_half(self) -> None:
+        # How the real thing records: `stats.record_log` is called deep inside
+        # the engine, never at the leg boundary, and reaches the global by
+        # name at call time. That is what the swap relies on.
+        log = types.SimpleNamespace(
+            stats=types.SimpleNamespace(
+                model_usage={"m": types.SimpleNamespace(
+                    input_tokens=42, output_tokens=5, total_cost=None
+                )}
+            ),
+            samples=[],
+        )
+        with usage.leg("baseline") as baseline:
+            engine_stats.record_log(log)
+        self.assertEqual(baseline.usage.input_tokens, 42)
+
+    def test_a_half_that_raises_still_folds_back(self) -> None:
+        # The deadline stops the baseline by unwinding through here. A scope
+        # that only folded back on success would lose the stopped half's
+        # spend -- the half most worth knowing the cost of.
+        with contextlib.suppress(RuntimeError):
+            with usage.leg("baseline"):
+                usage.record(input_tokens=100, calls=7)
+                raise RuntimeError("stopped")
+        self.assertEqual(usage.snapshot().input_tokens, 100)
+
+
+class TestTheReportSaysWhatEachHalfCost(unittest.TestCase):
+    """The signal the first version of this command measured and threw away.
+
+    A graded half finished in 2m23s while the baseline was still going half
+    an hour later, and the report said nothing about it: both halves' cases
+    passed, so every verdict read `no_signal`. The verdicts cannot express
+    this, which is why it is said above them.
+    """
+
+    @staticmethod
+    def _summary(*, finished=True, baseline_s=1680.4, cost=None, meta=None):
+        halves = [
+            {"label": "graded", "wall_time_s": 143.2, "finished": True,
+             "model_calls": 37, "total_tokens": 184220},
+            {"label": "baseline", "wall_time_s": baseline_s,
+             "finished": finished, "model_calls": 214, "total_tokens": 1044901},
+        ]
+        if cost is not None:
+            for half, value in zip(halves, cost):
+                half["cost_usd"] = value
+        return staleness.summarize(
+            staleness.pair([_outcome("a", True)], [_outcome("a", True)]),
+            {"legs": halves, **(meta or {})},
+        )
+
+    def _report(self, **kw) -> str:
+        return staleness.render_markdown(self._summary(**kw))
+
+    def test_a_baseline_that_was_stopped_is_not_a_baseline_that_was_quick(self) -> None:
+        report = self._report(finished=False)
+        self.assertIn("The baseline never finished", report)
+        self.assertIn("28m00s+", report)
+        self.assertIn("is a floor", report)
+
+    def test_a_baseline_that_finished_is_compared_as_a_ratio(self) -> None:
+        report = self._report()
+        self.assertIn("11.7x the graded half", report)
+        self.assertNotIn("never finished", report)
+
+    def test_a_skill_that_costs_time_is_said_so_rather_than_hidden(self) -> None:
+        # A ratio under one is a finding about the skill, not a number to
+        # suppress because it is unflattering.
+        report = self._report(baseline_s=30.0)
+        self.assertIn("The graded half was the slower of the two", report)
+
+    def test_the_spend_is_above_the_verdicts(self) -> None:
+        report = self._report()
+        self.assertLess(report.index("What each half cost"), report.index("| Verdict |"))
+
+    def test_an_unknown_cost_reads_as_unknown_and_says_why(self) -> None:
+        report = self._report()
+        self.assertIn("| n/a |", report)
+        self.assertIn("missing cost is a missing number, not a zero", report)
+
+    def test_a_known_cost_is_printed_without_the_caveat(self) -> None:
+        report = self._report(cost=(0.14, 1.80))
+        self.assertIn("0.14", report)
+        self.assertNotIn("missing cost is a missing number", report)
+
+    def test_running_cases_at_once_is_disclosed_against_the_clock(self) -> None:
+        # Wall time stops meaning agent time the moment cases overlap, and
+        # this table is read as though it did.
+        self.assertIn(
+            "ran at once on each half", self._report(meta={"concurrency": 4})
+        )
+        self.assertNotIn("ran at once on each half", self._report())
+
+    def test_a_summary_with_no_halves_still_renders(self) -> None:
+        # `summarize` is called by tests and by anything holding only
+        # comparisons; the spend section is additive and must not be assumed.
+        report = staleness.render_markdown(
+            staleness.summarize(staleness.pair([_outcome("a", True)], [_outcome("a", False)]), {})
+        )
+        self.assertNotIn("What each half cost", report)
+
+
 class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
     """The command's whole measurement is that the two runs differ in one way.
 
@@ -7561,6 +7724,47 @@ class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
             harness.run()
         self.assertEqual(harness.calls[0]["cases"], harness.calls[1]["cases"])
         self.assertTrue(harness.calls[0]["cases"])
+
+    def test_the_two_halves_are_billed_apart_in_the_report(self) -> None:
+        # End to end, through the real `cmd_staleness`. The stub spends a
+        # different amount per half, so a scope that captured both halves
+        # together -- or captured neither -- shows up here as the two rows
+        # agreeing.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        legs = harness.reports[0]["meta"]["legs"]
+        self.assertEqual([half["label"] for half in legs], ["graded", "baseline"])
+        self.assertEqual(legs[0]["input_tokens"], 10)
+        self.assertEqual(legs[1]["input_tokens"], 100)
+
+    def test_the_command_total_still_covers_both_halves(self) -> None:
+        with _staleness_harness(self) as harness:
+            harness.run()
+        meta = harness.reports[0]["meta"]
+        self.assertEqual(meta["input_tokens"], 110)
+        self.assertEqual(
+            meta["input_tokens"],
+            sum(half["input_tokens"] for half in meta["legs"]),
+            "the totals are the sum of the halves, or one of them is wrong",
+        )
+
+    def test_a_half_the_bound_stopped_is_marked_unfinished(self) -> None:
+        # `finished` is what the report's floor marker rests on. The graceful
+        # stage fires before the wall, so `interrupted` is the condition that
+        # catches a baseline inspect cancelled.
+        with _staleness_harness(self) as harness:
+            bound = deadline.Deadline(seconds=600)
+            bound.interrupted = True
+            with mock.patch.object(deadline, "active", lambda: bound):
+                harness.run()
+        legs = harness.reports[0]["meta"]["legs"]
+        self.assertFalse(legs[0]["finished"])
+        self.assertFalse(legs[1]["finished"])
+
+    def test_an_unhurried_run_marks_both_halves_finished(self) -> None:
+        with _staleness_harness(self) as harness:
+            harness.run()
+        self.assertTrue(all(half["finished"] for half in harness.reports[0]["meta"]["legs"]))
 
     def test_a_dataset_with_nothing_to_grade_runs_neither_half(self) -> None:
         with _staleness_harness(self, dataset=tier0_dataset("alpha")) as harness:
