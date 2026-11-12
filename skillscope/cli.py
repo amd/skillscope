@@ -434,17 +434,29 @@ def _empty_room(args: argparse.Namespace) -> None:
     )
 
 
-def _fail_if_expired() -> int | None:
-    """Non-zero when the command's ``--timeout`` has elapsed or stopped the run.
+def _within_deadline() -> bool:
+    """Whether the command's ``--timeout`` is still unspent.
 
-    Both, because the graceful stage fires `GRACEFUL_RESERVE_S` *before* the
-    wall. inspect then returns from `eval()` normally, so a run it stopped
-    reaches the gate with the clock still short of `expired()` -- and was
-    reported as "every case errored" instead of the overrun it was.
+    Both conditions, because the graceful stage fires `GRACEFUL_RESERVE_S`
+    *before* the wall. inspect then returns from `eval()` normally, so a run
+    it stopped is back here with the clock still short of `expired()` --
+    which is why `interrupted` is asked as well as the time.
+
+    Asked between the two halves of a staleness run as well as at the end, so
+    a half the bound stopped can be reported as a floor rather than as a
+    measurement. A baseline that was still going when the clock ran out is
+    the finding, and a report that cannot tell it from a baseline that
+    finished states a weaker thing than the run actually established.
     """
     bound = deadline.active()
-    if bound is None or not (bound.expired() or bound.interrupted):
+    return bound is None or not (bound.expired() or bound.interrupted)
+
+
+def _fail_if_expired() -> int | None:
+    """Non-zero when the command's ``--timeout`` has elapsed or stopped the run."""
+    if _within_deadline():
         return None
+    bound = deadline.active()
     print(f"error: {bound.message()}", file=sys.stderr)
     return 1
 
@@ -1055,14 +1067,22 @@ def cmd_staleness(args: argparse.Namespace) -> int:
         tempfile.TemporaryDirectory(prefix="skillscope-staleness-without-") as bare_dir,
     ):
         host = args.engine == "claude-code-no-sandbox"
-        with_skill = _run_behavioral(
-            args, skills, gradable,
-            config_dir=Path(graded_dir) if host else None,
-        )
-        without = _run_behavioral(
-            args, skills, gradable, install=False,
-            config_dir=Path(bare_dir) if host else None,
-        )
+        # Billed per half. The graded half runs first and the two are
+        # sequential, so each scope covers exactly one half's spend -- and
+        # `finished` is asked straight after each, because the bound they
+        # share is what stops the second one.
+        with usage.leg("graded") as graded_leg:
+            with_skill = _run_behavioral(
+                args, skills, gradable,
+                config_dir=Path(graded_dir) if host else None,
+            )
+        graded_leg.finished = _within_deadline()
+        with usage.leg("baseline") as baseline_leg:
+            without = _run_behavioral(
+                args, skills, gradable, install=False,
+                config_dir=Path(bare_dir) if host else None,
+            )
+        baseline_leg.finished = _within_deadline()
 
     comparisons = staleness.pair(with_skill, without)
     summary = staleness.summarize(
@@ -1082,6 +1102,10 @@ def cmd_staleness(args: argparse.Namespace) -> int:
             "wall_time_s": round(time.time() - started, 1),
             "timeout": args.timeout,
             "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            # In run order, which is also the order the report prints them.
+            # The totals below stay the sum of the two, so every other
+            # report's meta keeps the shape it had.
+            "legs": [graded_leg.as_meta(), baseline_leg.as_meta()],
             **usage.snapshot().as_meta(),
             **_sandbox_meta(args),
         },
