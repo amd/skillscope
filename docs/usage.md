@@ -274,45 +274,73 @@ login` is enough for `behavioral` and is not enough here. `--engine
 claude-code` needs no key for this, since its guest has no user-level skills
 at all.
 
+The report leads with what each half cost, because that is the cheaper
+question and often the more useful answer. An agent holding the skill goes
+straight to the work; an agent without it explores. On the first real run of
+this command the graded half finished in 2m23s and the baseline was still
+going half an hour later, with every case passing on both sides -- a skill
+plainly earning its keep, which a verdict table alone reports as `no_signal`
+throughout.
+
+| Half | Wall time | Model calls | Tokens | Cost |
+| --- | --- | --- | --- | --- |
+| with the skill | 2m23s | 37 | 184220 | n/a |
+| nothing installed | 28m00s+ | 214 | 1044901 | n/a |
+
+A `+` marks a half the `--timeout` stopped: that row is a floor, not a
+measurement. Cost reads `n/a` unless the provider supplies pricing, which a
+gateway generally does not and which inspect's own registry supplies for no
+model at all; `SKILLSCOPE_MODEL_PRICING` is the way in. **A missing cost is a
+missing number and not a zero** -- dollars arrive with a run's final event,
+which a half the bound stopped never reaches, so the half that spent *more*
+is the likelier one to show nothing. Tokens and wall clock are the reliable
+columns.
+
+Then the verdicts. Three, and an error state:
+
 | Verdict | Means |
 | --- | --- |
-| `earns_it` | passed with the skill, failed without it, and the skill fired — the case discriminates |
-| `harmful` | failed with the skill, passed without it — the skill steered the agent wrong |
-| `unattributed` | passed only with the skill installed, but the skill never fired on the attempt that passed |
-| `no_signal` | passed either way — says nothing about the skill |
-| `fails_either_way` | failed both times — a broken case, or a hard one |
-| `guards_only` | asserts nothing the skill could be credited for — see the guard rails below |
-| `ungraded` | nothing could be concluded: every attempt errored on one side or both, a case was missing from a side, its baseline was not empty, or whether the baseline was empty could not be established |
+| `earns_it` | passed with the skill, failed without it -- the case discriminates |
+| `harmful` | failed with the skill, passed without it -- the skill steered the agent wrong |
+| `no_signal` | came out the same both ways |
+| `ungraded` | nothing could be concluded: every attempt errored on one side or both, a grader never answered, a case was missing from a side, or the baseline was not the empty room it claimed to be |
+
+Three rather than more. Earlier versions split out whether the skill fired,
+whether a case claimed anything positive at all, and whether a shared failure
+was a broken case or a hard one. All three are still reported, as counts and
+notes beside the verdict rather than as verdicts of their own. None of them
+was a different answer to the question this command asks; each was one of
+these answers with a caveat attached.
 
 A verdict says what changed, not why. So the graded side also records whether
 the agent *reached for* the skill, using the same detector the routing leg
 uses: installing a skill does not make an agent use it, and "installed and the
 outcome differed" is a weaker claim than "the skill fired and the outcome
-differed". A case that moved without the skill firing is `unattributed` rather
-than `earns_it`: it stays out of the headline number and is reported as the
-lead it is. Guard rails -- `unexpected_behavior` -- are kept
-out of the verdict entirely, since a good one holds whether or not the skill is
-installed; they are counted on their own, where a guard broken *with* the skill
-installed is the serious finding.
+differed". A case that moved without the skill firing is still `earns_it` --
+the outcome did differ -- but it is counted and flagged above the case table,
+so the headline share can be discounted by a reader who cares. Guard rails,
+`unexpected_behavior`, are kept out of the verdict entirely, since a good one
+holds whether or not the skill is installed; they are counted on their own,
+where a guard broken *with* the skill installed is the serious finding.
 
-The verdict is binary and the evidence behind it is not, so the report prints
-both. Every case carries how many attempts passed on each side, and how much
-of the case each side satisfied on average: `fails_either_way` covers a
-baseline that met four claims of five and one that met none, and only one of
-those says the case is worth keeping.
+`no_signal` is the verdict worth acting on, and it is three findings wearing
+one name. The pass counts and the advice column say which you are holding:
 
-`no_signal` is the verdict worth acting on, and it is two findings wearing one
-name: either the skill has stopped mattering, or the case was never evidence
-about it in the first place. The second is the more common, which makes this a
-check on the dataset as much as on the skill.
+* **both sides passed** -- the agent already does this unaided, so the case is
+  not evidence about the skill. Either the skill has stopped mattering or the
+  case never tested it, and the second is more common, which makes this as
+  much a check on the dataset as on the skill.
+* **both sides failed** -- a broken case or a hard one. Nothing here has been
+  shown to work well enough to then ask whether the skill is why, so this
+  points at the case rather than the skill.
+* **a side disagreed with itself** -- only possible above one attempt. The
+  baseline managed it at least once, which is not the same finding as a case
+  both sides managed every time. Re-run before reading anything into it.
 
-Above one attempt there is a third, and the report separates it out. A case
-where a side passed some of its attempts and failed others is `no_signal`
-because the baseline managed it at least once, and that is not the same
-finding as a case both sides managed every single time. One says the agent
-does this unaided; the other says the two sides did not settle. The advice
-column says which, and the counts beside it are the evidence: act on the
-first, re-run the second.
+A case that claims nothing positive at all is `no_signal` too, since neither
+side can meet a claim that was never made. The advice column says so rather
+than calling it broken: its guard rails were still checked, and the case is
+working exactly as written.
 
 ### Spending less on a run
 
@@ -322,7 +350,7 @@ without it explores. Three flags decide what a run costs.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--attempts N` | 1 | Run every case N times on each side. Costs N times as much. A side counts as having passed when **any** of its attempts did, so a higher N is a harder question rather than a steadier reading of the same one: `earns_it` at three attempts needs the baseline to have failed all three times, and a baseline that passes once in three takes the case to `no_signal`. Verdicts compare with verdicts from runs at the same N, not across different ones. What you gain is the counts printed beside each verdict: `3/3` against `0/3` is a result, `3/3` against `1/3` is a baseline that managed it once, and `2/3` against `1/3` is two sides that both disagreed with themselves. The report calls that last one out rather than letting it read as a dead case. |
+| `--attempts N` | 1 | Run every case N times on each side. Costs N times as much. A side counts as having passed when **any** of its attempts did, so a higher N is a harder question rather than a steadier reading of the same one: `earns_it` at three attempts needs the baseline to have failed all three times, and a baseline that passes once in three takes the case to `no_signal`. Verdicts compare with verdicts from runs at the same N, not across different ones. What you gain is the counts printed beside each verdict: `3/3` against `0/3` is a result, `3/3` against `1/3` is a baseline that managed it once, and `2/3` against `1/3` is two sides that both disagreed with themselves. The advice column calls that last one out rather than letting it read as a dead case. |
 | `--max-cases N` | every case | Grade only the first N cases of each selected skill, after `--only` and `--extended` have chosen them. Both sides run the same N, and the report says the run did not cover the whole suite. |
 | `--concurrency N` | inspect's default | How many cases may be in flight at once. Where the wall clock goes on the baseline half. Raise it as far as the engine's sandboxes and the model's rate limits allow. |
 
