@@ -1058,58 +1058,44 @@ def render_markdown(summary: dict) -> str:
         if c["baseline_contaminated"] and c["baseline_contaminated"] != UNKNOWN_ROOM
     ]
     if dirty:
+        # Three groups, because each rests on something different. A verdict
+        # in `VOIDED_BY_CONTAMINATION` claims the baseline *managed*
+        # something, so contamination kills it; the others rest on the
+        # baseline having *failed*, and a baseline that failed while holding
+        # more than it should have fails all the harder clean. The third
+        # group is what `--attempts` opened up: dirty on an attempt it
+        # failed, clean on the one it passed, so the attempt the verdict
+        # rests on is not the contaminated one. Driven off the constant so
+        # the rule and the wording cannot drift apart.
         voided = [c for c in dirty if c["verdict"] == "ungraded"]
-        # Split three ways, each group worded for what it actually rests on.
-        #
-        # The third group is what `--attempts` opened up. `_why_dirty` reads
-        # every attempt and `dirty_on_pass` reads only the ones that passed,
-        # so a baseline that was dirty on an attempt it failed and clean on
-        # the one it passed keeps its verdict. Where that verdict is one of
-        # `VOIDED_BY_CONTAMINATION` it rests on the baseline having *passed*,
-        # so the sentence about resting on a failure is false for it.
-        #
-        # Driven off `VOIDED_BY_CONTAMINATION` rather than a verdict list
-        # written out here, so the two cannot drift apart.
         standing = [c for c in dirty if c["verdict"] != "ungraded"]
-        stood = [
-            c for c in standing
-            if c["verdict"] not in VOIDED_BY_CONTAMINATION
-        ]
-        elsewhere = [
-            c for c in standing if c["verdict"] in VOIDED_BY_CONTAMINATION
-        ]
-        reasons = sorted({c["baseline_contaminated"] for c in dirty})
-        note = [
-            "",
-            f"> **{len(dirty)} case(s) had a baseline that was not empty**: "
-            + "; ".join(reasons)
-            + ".",
-        ]
+        stood = [c for c in standing if c["verdict"] not in VOIDED_BY_CONTAMINATION]
+        elsewhere = [c for c in standing if c["verdict"] in VOIDED_BY_CONTAMINATION]
+        named = lambda group: ", ".join(  # noqa: E731
+            f"`{c['id']}` ({c['verdict']})" for c in group
+        )
+        lines += ["", f"> **{len(dirty)} case(s) had a baseline that was not "
+                  "empty**: " + "; ".join(sorted(
+                      {c["baseline_contaminated"] for c in dirty})) + "."]
         if voided:
-            note.append(
+            lines.append(
                 f"> {len(voided)} of them are reported `ungraded`: a baseline "
-                "that reached another skill, or read this skill's own files, "
-                "cannot show what an agent manages unaided.",
+                "that reached another skill, or read this skill's own "
+                "files, cannot show what an agent manages unaided."
             )
         if stood:
-            note.append(
-                f"> {len(stood)} still stand -- "
-                + ", ".join(f"`{c['id']}` ({c['verdict']})" for c in stood)
-                + " -- because they rest on the baseline *failing*, and it "
-                "failed while holding more than it should have.",
+            lines.append(
+                f"> {len(stood)} still stand ({named(stood)}): they rest on "
+                "the baseline *failing*, and it failed while holding more "
+                "than it should have."
             )
         if elsewhere:
-            note.append(
-                f"> {len(elsewhere)} case(s) rest on a clean attempt -- "
-                + ", ".join(
-                    f"`{c['id']}` ({c['verdict']})" for c in elsewhere
-                )
-                + " -- the baseline passed on an attempt that was clean and "
-                "was dirty on one it failed, so the attempt the verdict rests "
-                "on is not the contaminated one. They stand, on weaker "
-                "evidence than a run with no contamination in it at all.",
+            lines.append(
+                f"> {len(elsewhere)} rest on a clean attempt "
+                f"({named(elsewhere)}): the baseline passed on an attempt "
+                "that was clean and was dirty on one it failed. Weaker "
+                "evidence than a run with no contamination at all."
             )
-        lines += note
 
     unfired = totals["earns_it_unfired"]
     if unfired:
@@ -1162,22 +1148,6 @@ def render_markdown(summary: dict) -> str:
         c for c in summary["cases"]
         if c["verdict"] == "no_signal" and _unsettled(c)
     ]
-    if unsettled:
-        lines += [
-            "",
-            f"> **{len(unsettled)} case(s) are `no_signal` because a side "
-            "disagreed with itself**, not because both sides managed it every "
-            "time: "
-            + ", ".join(f"`{c['id']}`" for c in unsettled)
-            + ". One baseline attempt in three is enough to stop a case "
-            "being `earns_it` and is not enough to call it dead. Run them "
-            "again before acting on them.",
-        ]
-
-    # Former `fails_either_way` cases land here now, because they are
-    # `no_signal`. That grows the section on a suite with many hard cases,
-    # which is the right trade: the advice column tells them apart, and this
-    # is "worth a look" rather than "failures".
     notable = [
         c for c in summary["cases"]
         if c["verdict"] in ("no_signal", "harmful")
