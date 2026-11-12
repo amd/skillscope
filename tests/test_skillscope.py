@@ -6213,10 +6213,17 @@ class TestStalenessSeparatesTheSkillFromTheModel(unittest.TestCase):
         )
 
     def test_a_case_failing_both_ways_says_nothing_either(self) -> None:
+        # Both-ways-failed and both-ways-passed are one verdict now. They are
+        # the same answer to the question this command asks -- the sides did
+        # not differ -- and what separates them is what to do about it, which
+        # the pass counts and `_advice` carry. See `_advice`: this one must
+        # not be told the agent managed it unaided.
         self.assertEqual(
             staleness.classify([_outcome("a", False)], [_outcome("a", False)]),
-            "fails_either_way",
+            "no_signal",
         )
+        case = staleness.pair([_outcome("a", False)], [_outcome("a", False)])[0]
+        self.assertIn("neither side managed it", staleness._advice(asdict(case)))
 
     def test_an_errored_side_is_ungraded_rather_than_no_difference(self) -> None:
         # A dropped connection measured nothing. Reading it as "the skill made
@@ -6460,27 +6467,37 @@ class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):
         )
         self.assertIn("forbidden thing", staleness.render_markdown(summary))
 
-    def test_a_guard_holding_on_both_sides_does_not_make_a_case_no_signal(self) -> None:
-        # The claim moved; the guard did not. The verdict follows the claim.
-        with_skill = _checked("c", True, [_check("run the CLI", True), self._guard(True)])
-        without = _checked("c", False, [_check("run the CLI", False), self._guard(True)])
-        self.assertEqual(staleness.classify([with_skill], [without]), "earns_it")
+    def test_the_guard_state_cannot_change_the_verdict(self) -> None:
+        # The claim is held constant and the *guard* is varied, which is the
+        # property: a verdict that moved when a guard did would mark every
+        # guard-bearing case as showing nothing. Varying the claim instead
+        # tested only that the claim decides it, which it would do under a
+        # buggy implementation that folded guards in as well.
+        for here, there in ((True, True), (True, False), (False, True), (False, False)):
+            with self.subTest(guards=(here, there)):
+                with_skill = _checked(
+                    "c", True, [_check("run the CLI", True), self._guard(here)]
+                )
+                without = _checked(
+                    "c", False, [_check("run the CLI", False), self._guard(there)]
+                )
+                self.assertEqual(
+                    staleness.classify([with_skill], [without]), "earns_it"
+                )
 
-    def test_a_case_with_only_guards_is_called_that(self) -> None:
-        # Nothing was claimed, so nothing can be credited -- but the case is
-        # not broken, which `fails_either_way` would imply.
+    def test_a_case_claiming_nothing_is_not_told_it_is_broken(self) -> None:
+        # It has no verdict of its own any more: nothing positive was claimed,
+        # so neither side met everything and it comes out `no_signal`. The
+        # danger in the collapse is the advice that travels with it -- "a
+        # broken case or a hard one" is what every other both-sides-failed
+        # case is told, and it is false here. The case is working exactly as
+        # written.
         both = _checked("c", True, [self._guard(True)])
-        self.assertEqual(staleness.classify([both], [both]), "guards_only")
-
-    def test_guards_only_cases_stay_out_of_the_discriminating_share(self) -> None:
-        comparisons = staleness.pair(
-            [_checked("a", True, [_check("x", True)]), _checked("b", True, [self._guard(True)])],
-            [_checked("a", False, [_check("x", False)]), _checked("b", True, [self._guard(True)])],
-        )
-        totals = staleness.summarize(comparisons, {"model": "m", "effort": "e"})["totals"]
-        self.assertEqual(totals["guards_only"], 1)
-        self.assertEqual(totals["graded"], 1)
-        self.assertEqual(totals["discriminating"], 1.0)
+        case = staleness.pair([both], [both])[0]
+        self.assertEqual(case.verdict, "no_signal")
+        report = staleness.render_markdown(staleness.summarize([case], {}))
+        self.assertIn("claims nothing the skill could be credited for", report)
+        self.assertNotIn("a broken case or a hard one", report)
 
     def test_a_guard_broken_with_the_skill_is_surfaced(self) -> None:
         # The serious finding: the skill made the agent do the forbidden thing.
@@ -6611,7 +6628,7 @@ class TestASkillThatChangedNothingIsToldPlainly(unittest.TestCase):
         report = staleness.render_markdown(
             staleness.summarize(moved, {"model": "m", "effort": "e"})
         )
-        self.assertEqual(moved[0].verdict, "unattributed")
+        self.assertEqual(moved[0].verdict, "earns_it")
         self.assertNotIn("No case in this suite shows the skill doing anything", report)
 
     def test_a_harmful_case_is_not_reported_as_nothing_moving_either(self) -> None:
@@ -6681,67 +6698,6 @@ class TestAFlakyNoSignalIsNotToldToDeleteTheCase(unittest.TestCase):
         self.assertNotIn("disagreed with itself", self._report([True], [True]))
 
 
-class TestHowMuchOfACaseEachSideMetIsCarried(unittest.TestCase):
-    """The verdict is binary and the evidence behind it is not.
-
-    A side passes only by meeting every positive claim, so `fails_either_way`
-    covers a baseline that met four claims of five and one that met none, and
-    only one of those says the case is worth keeping. Nothing asserted this at
-    any level: replacing `_claims_met`'s body with `return 0.0` left the whole
-    suite green.
-    """
-
-    def _case(self, with_attempts, without_attempts):
-        return staleness.pair(
-            [_checked("c", False, checks, attempt=i)
-             for i, checks in enumerate(with_attempts, 1)],
-            [_checked("c", False, checks, attempt=i)
-             for i, checks in enumerate(without_attempts, 1)],
-        )[0]
-
-    def test_the_claim_count_belongs_to_the_case_not_to_a_side(self) -> None:
-        case = self._case(
-            [[_check("a", True), _check("b", False), _check("c", False)]],
-            [[_check("a", False), _check("b", False), _check("c", False)]],
-        )
-        self.assertEqual(case.claims, 3)
-        self.assertEqual((case.claims_met_with, case.claims_met_without), (1.0, 0.0))
-
-    def test_several_attempts_are_averaged(self) -> None:
-        # What the pass counts cannot show: a side that met everything once
-        # and nearly everything the next time.
-        case = self._case(
-            [[_check("a", True), _check("b", True)],
-             [_check("a", True), _check("b", False)]],
-            [[_check("a", False), _check("b", False)]],
-        )
-        self.assertEqual(case.claims_met_with, 1.5)
-
-    def test_a_graded_side_that_errored_still_lets_the_case_name_its_claims(self) -> None:
-        # `naming = here or there` could never fall back, because a dataclass
-        # is always truthy -- so a graded side that errored before grading
-        # anything printed the case as having claimed nothing, over a baseline
-        # that had really graded three.
-        errored = _checked("c", False, [], attempt=1)
-        errored.error = "API Error: 504"
-        case = staleness.pair(
-            [errored],
-            [_checked("c", False, [
-                _check("a", True), _check("b", True), _check("c", False),
-            ])],
-        )[0]
-        self.assertEqual(case.claims, 3)
-        self.assertEqual(case.claims_met_without, 2.0)
-
-    def test_the_counts_reach_the_report(self) -> None:
-        case = self._case(
-            [[_check("a", True), _check("b", False)]],
-            [[_check("a", False), _check("b", False)]],
-        )
-        report = staleness.render_markdown(staleness.summarize([case], {}))
-        self.assertIn("1/2 with, 0/2 without", report)
-
-
 class TestAReportWithNothingGradedAssertsNothingAboutGradedCases(unittest.TestCase):
     """Sentences whose condition is not the thing they assert.
 
@@ -6763,7 +6719,7 @@ class TestAReportWithNothingGradedAssertsNothingAboutGradedCases(unittest.TestCa
             [_checked("c", True, [self._guard(True)])],
         ))
         self.assertNotIn("Every graded case either", report)
-        self.assertIn("No case reached a verdict", report)
+        self.assertIn("Every case here only forbids things", report)
 
     def test_a_broken_guard_is_not_followed_by_nothing_to_look_at(self) -> None:
         # The strongest finding this command produces, contradicted two
@@ -6776,7 +6732,8 @@ class TestAReportWithNothingGradedAssertsNothingAboutGradedCases(unittest.TestCa
         ))
         self.assertIn("the skill doing the forbidden thing", report)
         self.assertNotIn("nothing to look at here", report)
-        self.assertIn("guard rails above are what this run found", report)
+        self.assertIn("that is the skill doing the forbidden thing", report)
+        self.assertNotIn("nothing to look at here", report)
 
     def test_a_run_with_no_guards_either_still_says_there_is_nothing(self) -> None:
         report = self._report(staleness.pair([_outcome("c", True)], []))
@@ -6955,11 +6912,12 @@ class TestAFlagThatCannotDoAnythingIsRefused(unittest.TestCase):
         self.assertEqual(self._pair([True], [False]).verdict, "earns_it")
         self.assertEqual(self._pair([True], [True]).verdict, "no_signal")
         self.assertEqual(self._pair([False], [True]).verdict, "harmful")
-        self.assertEqual(self._pair([False], [False]).verdict, "fails_either_way")
+        self.assertEqual(self._pair([False], [False]).verdict, "no_signal")
 
     def test_a_side_passes_when_any_attempt_did(self) -> None:
         # "Any" rather than "all". A skill that works two times in three has
-        # done something, and `fails_either_way` would say it had not.
+        # done something, and counting it as a side that failed would say it
+        # had not.
         case = self._pair([False, True, False], [False, False, False])
         self.assertEqual(case.verdict, "earns_it")
         self.assertEqual(case.passes_with, 1)
@@ -7078,26 +7036,33 @@ class TestContaminationVoidsOnTheAttemptTheVerdictRestsOn(unittest.TestCase):
         self.assertNotIn("rest on the baseline *failing*", report)
 
 
-class TestEarningItMeansTheSkillActuallyFired(unittest.TestCase):
+class TestEarningItIsReportedWithWhetherTheSkillFired(unittest.TestCase):
     """Installing a skill does not make an agent use it.
 
-    Until activation was recorded, an `earns_it` meant only that the outcome
-    differed on the side where the skill happened to be installed.
+    Firing used to be a verdict of its own (`unattributed`). It is now a flag
+    on the comparison and a note in the report, which is a weaker statement
+    than a verdict and the honest one: the outcome did differ, so the case is
+    `earns_it`; what is unknown is whether the skill is why. The distinction
+    still has to survive, or a case the skill never touched is credited to it
+    in the one number this command is read for.
     """
 
     def _pair(self, activated):
         with_skill = _checked("c", True, [_check("ran the CLI", True)])
         with_skill.activated = activated
-        return staleness.pair([with_skill], [_checked("c", False, [_check("ran the CLI", False)])])
+        return staleness.pair(
+            [with_skill], [_checked("c", False, [_check("ran the CLI", False)])]
+        )
 
     def test_the_firing_is_carried_onto_the_comparison(self) -> None:
-        self.assertEqual(self._pair("rocm-doctor")[0].activated_with, "rocm-doctor")
+        self.assertTrue(self._pair("rocm-doctor")[0].fired_with)
+        self.assertFalse(self._pair(None)[0].fired_with)
 
     def test_the_order_of_two_passing_attempts_does_not_decide_it(self) -> None:
-        # The verdict used to be read off `_decisive`'s pick, which is the
-        # *first* passing attempt -- so the same two runs in the other order
-        # came out `unattributed`. Which of two attempts happened to run
-        # first is not a property of the skill.
+        # Read off `_decisive`'s pick -- the *first* passing attempt -- the
+        # same two runs in the other order came out as not having fired.
+        # Which of two attempts happened to run first is not a property of
+        # the skill.
         for order in ((None, "rocm-doctor"), ("rocm-doctor", None)):
             with self.subTest(order=order):
                 case = staleness.pair(
@@ -7107,72 +7072,57 @@ class TestEarningItMeansTheSkillActuallyFired(unittest.TestCase):
                     [_checked("c", False, [_check("ran the CLI", False)])],
                 )[0]
                 self.assertEqual(case.verdict, "earns_it")
-                self.assertEqual(case.activated_with, "rocm-doctor")
+                self.assertTrue(case.fired_with)
 
-    def test_an_attempt_that_fired_and_failed_does_not_credit_the_skill(self) -> None:
-        # The `_met(a) and` half of the guard, which nothing reached: every
-        # other test here varies `activated` across attempts that all passed
-        # or all failed, so the guard never met a counter-example. Removing
-        # it left the whole suite green.
-        #
-        # The skill fired on an attempt the agent *failed*, and the attempt
-        # that passed never opened it. "The skill fired" and "the skill moved
-        # the outcome" are the two claims `unattributed` exists to keep apart,
-        # and this is the shape where they come apart hardest.
+    def test_an_attempt_that_fired_and_failed_does_not_count_as_firing(self) -> None:
+        # The `_met(a) and` half of the guard. The skill fired on an attempt
+        # the agent *failed*, and the attempt that passed never opened it.
+        # "The skill fired" and "the skill moved the outcome" are the two
+        # claims this keeps apart, and this is where they come apart hardest.
         case = staleness.pair(
             [_checked("c", False, [_check("x", False)], attempt=1, activated="s"),
              _checked("c", True, [_check("x", True)], attempt=2, activated=None)],
             [_checked("c", False, [_check("x", False)], attempt=1, activated=None)],
         )[0]
-        self.assertEqual(case.verdict, "unattributed")
+        self.assertEqual(case.verdict, "earns_it")
+        self.assertFalse(case.fired_with)
 
-    def test_no_passing_attempt_firing_is_still_unattributed(self) -> None:
-        case = staleness.pair(
-            [_checked("c", True, [_check("ran the CLI", True)],
-                      attempt=i, activated=None)
-             for i in (1, 2)],
-            [_checked("c", False, [_check("ran the CLI", False)])],
-        )[0]
-        self.assertEqual(case.verdict, "unattributed")
+    def test_a_case_that_moved_without_firing_is_still_counted(self) -> None:
+        # The change from the longer taxonomy, stated outright. The outcome
+        # differed, so it is `earns_it` and it is in the share. What is not
+        # known is whether the skill is why, which the count below carries.
+        totals = staleness.summarize(
+            self._pair(None), {"model": "m", "effort": "e"}
+        )["totals"]
+        self.assertEqual(totals["earns_it"], 1)
+        self.assertEqual(totals["earns_it_unfired"], 1)
+        self.assertEqual(totals["discriminating"], 1.0)
 
-    def test_a_case_that_moved_without_firing_is_not_credited(self) -> None:
-        # The case passed with the skill installed and failed without it, and
-        # the agent never opened the skill. Something moved; the thing under
-        # test is not shown to be what moved it.
-        totals = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})["totals"]
-        self.assertEqual(totals["unattributed"], 1)
-        self.assertEqual(totals["earns_it"], 0)
-
-    def test_a_case_that_moved_after_firing_is_credited(self) -> None:
+    def test_a_case_that_moved_after_firing_is_not_flagged(self) -> None:
         totals = staleness.summarize(
             self._pair("rocm-doctor"), {"model": "m", "effort": "e"}
         )["totals"]
         self.assertEqual(totals["earns_it"], 1)
-        self.assertEqual(totals["unattributed"], 0)
-
-    def test_an_unattributed_case_stays_out_of_the_discriminating_share(self) -> None:
-        # The share is what the command is read for. Counting a case the skill
-        # was never shown to have touched would be the one number nobody
-        # checks saying the thing nobody checked.
-        totals = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})["totals"]
-        self.assertEqual(totals["discriminating"], 0.0)
+        self.assertEqual(totals["earns_it_unfired"], 0)
 
     def test_the_reader_is_warned_before_believing_the_number(self) -> None:
+        # The share now counts these, so the warning is what keeps it honest.
+        # It has to come before the reader reaches the case table.
         summary = staleness.summarize(self._pair(None), {"model": "m", "effort": "e"})
         report = staleness.render_markdown(summary)
-        self.assertIn("the skill never fired on the attempt that passed", report)
+        self.assertIn("passed without the skill ever firing", report)
         self.assertLess(
-            report.index("never fired on the attempt"),
+            report.index("without the skill ever firing"),
             report.index("### Cases worth a look"),
         )
 
     def test_a_clean_run_says_nothing_about_firing(self) -> None:
-        # No warning when every earns_it fired: an unconditional note would be
+        # No note when every earns_it fired: an unconditional one would be
         # noise, and noise is what gets skipped on the run that matters.
         report = staleness.render_markdown(
             staleness.summarize(self._pair("rocm-doctor"), {"model": "m", "effort": "e"})
         )
-        self.assertNotIn("never fired on the attempt", report)
+        self.assertNotIn("without the skill ever firing", report)
 
 
 class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
@@ -7382,7 +7332,7 @@ class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
 
     def test_a_marker_cannot_reach_the_report_as_an_activation(self) -> None:
         # The consequence, asserted where it is read: a truthy garbage string
-        # in `activated_with` suppresses the warning this totals.
+        # read as an activation suppresses the note this totals.
         sample = self._sample([
             self._call("Skill", {"command": "beta"}),
             self._call("Skill", {"command": "gamma"}),
@@ -7396,8 +7346,8 @@ class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
         totals = staleness.summarize(
             staleness.pair([graded], [without]), {"model": "m", "effort": "e"}
         )["totals"]
-        self.assertEqual(totals["unattributed"], 1)
-        self.assertEqual(totals["earns_it"], 0)
+        self.assertEqual(totals["earns_it_unfired"], 1)
+        self.assertEqual(totals["earns_it"], 1)
 
 
 class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
