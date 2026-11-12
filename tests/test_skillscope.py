@@ -7548,6 +7548,71 @@ class TestAWalkThatDidNotFinishCannotVouchForTheRoom(unittest.TestCase):
         self.assertEqual(why, engine_behavioral.UNKNOWN_ROOM)
 
 
+class TestABaselineThatNeverFinishedIsNotABaselineThatWasFast(unittest.TestCase):
+    """The per-case column, and the one way it can invert its own finding.
+
+    A side whose attempts all errored has no time to report. Writing that as
+    `0s` beside a graded half's `2m23s` says the baseline was instant, which
+    is the exact opposite of the case this command was built for: a baseline
+    that ran for half an hour and never concluded.
+    """
+
+    @staticmethod
+    def _timed(case_id, passed, seconds, *, attempt=1, error=None):
+        out = _outcome(case_id, passed, attempt=attempt, error=error)
+        out.elapsed_s = seconds
+        return out
+
+    def test_a_side_is_the_sum_of_the_attempts_that_answered(self) -> None:
+        # Summed, so the column reconciles with the per-half total above it.
+        case = staleness.pair(
+            [self._timed("c", True, 10.0, attempt=1),
+             self._timed("c", False, 5.0, attempt=2)],
+            [self._timed("c", False, 2.0)],
+        )[0]
+        self.assertEqual(case.seconds_with, 15.0)
+
+    def test_an_attempt_that_errored_contributes_no_time(self) -> None:
+        case = staleness.pair(
+            [self._timed("c", True, 10.0, attempt=1),
+             self._timed("c", False, 99.0, attempt=2, error="API Error: 504")],
+            [self._timed("c", False, 2.0)],
+        )[0]
+        self.assertEqual(case.seconds_with, 10.0)
+
+    def test_a_side_with_no_time_at_all_is_none_not_zero(self) -> None:
+        case = staleness.pair(
+            [self._timed("c", True, 10.0)],
+            [self._timed("c", False, 0.0, error="API Error: 504")],
+        )[0]
+        self.assertIsNone(
+            case.seconds_without,
+            "zero seconds and no measurement are different findings here",
+        )
+
+    def test_a_side_that_never_finished_says_so_in_the_report(self) -> None:
+        comparisons = staleness.pair(
+            [self._timed("c", True, 143.2)],
+            [self._timed("c", False, 0.0, error="deadline stopped the run")],
+        )
+        report = staleness.render_markdown(staleness.summarize(comparisons, {}))
+        self.assertIn("did not finish", report)
+        self.assertNotIn("0s", report)
+
+    def test_a_case_missing_from_a_side_is_not_run_rather_than_instant(self) -> None:
+        comparisons = staleness.pair([self._timed("c", True, 10.0)], [])
+        report = staleness.render_markdown(staleness.summarize(comparisons, {}))
+        self.assertIn("not run", report)
+
+    def test_the_times_reach_the_case_table(self) -> None:
+        comparisons = staleness.pair(
+            [self._timed("c", True, 143.2)], [self._timed("c", True, 1680.4)]
+        )
+        report = staleness.render_markdown(staleness.summarize(comparisons, {}))
+        self.assertIn("2m23s", report)
+        self.assertIn("28m00s", report)
+
+
 class TestTheTwoHalvesAreBilledSeparately(unittest.TestCase):
     """One global accumulator, two halves, and a trap in how it is read.
 
