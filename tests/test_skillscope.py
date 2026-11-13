@@ -68,6 +68,7 @@ from skillscope.engine import routing as engine_routing
 from skillscope.engine import no_sandbox as engine_no_sandbox
 from skillscope.engine import behavioral as engine_behavioral
 from skillscope.engine import tools as engine_tools
+from skillscope.engine import convert as engine_convert
 from skillscope.engine import scorers as engine_scorers
 from skillscope.engine import stats as engine_stats
 from skillscope.engine import pricing as engine_pricing
@@ -6509,6 +6510,184 @@ class TestASkillIsCreditedForTheHarmItPrevented(unittest.TestCase):
             staleness.summarize([self._case(True, True)], {})
         )
         self.assertNotIn("stopped the agent breaking", report)
+
+
+class TestTheHeadlineIsDrawnFromCasesThatWereGraded(unittest.TestCase):
+    """An ungraded case was choosing the sentence above the table.
+
+    A suite whose only graded case failed on both sides, sitting beside an
+    ungraded case whose graded half happened to pass, was told the skill had
+    "stopped earning its place" -- while the row directly underneath said
+    "neither side managed it; a broken case or a hard one". The report
+    contradicted itself, and the half it got wrong was the advice.
+    """
+
+    def test_an_ungraded_cases_passes_do_not_choose_the_headline(self) -> None:
+        comparisons = staleness.pair(
+            [_outcome("graded-fail", False), _outcome("lost", True)],
+            [_outcome("graded-fail", False),
+             _outcome("lost", False, error="API Error: 504")],
+        )
+        report = staleness.render_markdown(staleness.summarize(comparisons, {}))
+        self.assertIn("No case in this suite passed on either side", report)
+        self.assertNotIn("stopped earning its place", report)
+
+    def test_a_suite_that_really_passed_both_ways_still_says_so(self) -> None:
+        # The control: the other branch has to stay reachable.
+        comparisons = staleness.pair(
+            [_outcome("c", True)], [_outcome("c", True)]
+        )
+        report = staleness.render_markdown(staleness.summarize(comparisons, {}))
+        self.assertIn("stopped earning its place", report)
+
+
+class TestAnAgentThatWentLookingIsNotACleanRoom(unittest.TestCase):
+    """The detector only caught a path that spelled the skill's own name.
+
+    Every one of these reads the skill and none of them names its directory.
+    `find`, `grep -r` and a glob are what an agent reaches for when it has
+    been told nothing and is looking for something -- so the miss was
+    likeliest on the baseline, the one side whose emptiness this whole
+    command rests on, and it failed in the dangerous direction: the room was
+    reported clean, so `no_signal` and `harmful` stood where they should have
+    been voided.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("run", dataset=tier0_dataset("run"))
+        self.repo.activate()
+        self.own = str(config.active().skill_path("run"))
+
+    def _why(self, arguments, function="Bash"):
+        from skillscope.engine import routing as routing_engine
+
+        call = _FakeCall("t", function=function)
+        call.arguments = arguments
+        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, "run", self.own
+        )[1]
+
+    def test_a_parent_traversal_names_the_skill_and_is_contamination(self) -> None:
+        # Provable: the path resolves to the skill with no cwd needed.
+        parent, name = self.own.rsplit("/", 1)
+        why = self._why({"file_path": f"{parent}/other/../{name}/SKILL.md"},
+                        function="Read")
+        self.assertIn("read the skill's own files", why or "")
+
+    def test_a_recursive_search_of_a_directory_above_it_is_unknown(self) -> None:
+        # Not provable, and not clean either: the call would sweep the skill
+        # up and the record cannot say whether it did.
+        for command in (
+            f"find {self.own.rsplit('/', 1)[0]} -name SKILL.md -exec cat {{}} +",
+            f"grep -r rocm {self.own.rsplit('/', 1)[0]}/",
+            f"cat {self.own.rsplit('/', 1)[0]}/*/SKILL.md",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self._why({"command": command}),
+                    engine_behavioral.UNKNOWN_ROOM,
+                )
+
+    def test_a_sweep_somewhere_else_entirely_is_still_clean(self) -> None:
+        # The false positive this must not buy: a sweep is only a sweep of
+        # *this* skill if it reaches a directory the skill is under.
+        self.assertIsNone(self._why({"command": "grep -r foo /etc/"}))
+        self.assertIsNone(self._why({"command": "ls -la /tmp/ws-1/out"}))
+        self.assertIsNone(self._why({"command": "cat build/*/out.json"}))
+
+    def test_naming_the_skill_outright_still_says_so(self) -> None:
+        # The sweep answer is weaker than the exact one, so it is asked last.
+        # A call that provably read the skill keeps the reason that says it.
+        why = self._why({"command": f"cat {self.own}/SKILL.md"})
+        self.assertIn("read the skill's own files", why or "")
+
+
+class TestTheScorerTurnsAnUnansweredJudgeIntoAnUngradedCheck(unittest.TestCase):
+    """The glue between `judge.Ungradable` and the check it becomes.
+
+    `judge.grade` raising was tested, and a hand-built check dict carrying
+    `graded: False` was tested, but nothing ran the code that turns the first
+    into the second. `scorers.expectations()` was called by no test at all,
+    so `graded=False` could be flipped to `True` -- or the key dropped from
+    `_check` entirely -- with the whole suite green. The raise is only worth
+    anything if this converts it.
+    """
+
+    def _score(self, grade):
+        from inspect_ai.scorer import Score  # noqa: F401 -- import side effect
+
+        scorer = engine_scorers.expectations()
+        state = types.SimpleNamespace(
+            messages=[], metadata={engine_convert.EXPECTED: ["it wrote the file"]},
+            output=None,
+        )
+        with mock.patch.object(engine_judge, "grade", grade):
+            return asyncio.run(scorer(state, None))
+
+    def test_a_judge_that_could_not_answer_marks_the_check_ungraded(self) -> None:
+        async def _raise(*a, **k):
+            raise engine_judge.Ungradable("could not list the sandbox")
+
+        checks = self._score(_raise).metadata[engine_scorers.CHECKS]
+        self.assertEqual(len(checks), 1)
+        self.assertFalse(engine_scorers.graded(checks[0]))
+        self.assertFalse(checks[0]["passed"], "an ungraded check is not a pass")
+        self.assertIn("could not list the sandbox", checks[0]["detail"])
+
+    def test_a_judge_that_answered_marks_the_check_graded(self) -> None:
+        async def _answer(*a, **k):
+            return True, "judge: it did"
+
+        checks = self._score(_answer).metadata[engine_scorers.CHECKS]
+        self.assertTrue(engine_scorers.graded(checks[0]))
+        self.assertTrue(checks[0]["passed"])
+
+
+class TestASidePassesOnlyByMeetingEveryClaim(unittest.TestCase):
+    """`_met` is the module's central rule and nothing pinned the conjunction.
+
+    `all(...)` could be changed to `any(...)` and all 763 tests passed. A case
+    asserting three things and satisfying one would have read as a side that
+    passed, which flows straight into `earns_it` and the headline share.
+
+    Nothing caught it because every asymmetric test used exactly one claim,
+    and the only multi-claim tests gave both sides the same mixed pattern --
+    where `all` and `any` cannot disagree. This gives the two sides patterns
+    that the two operators answer differently.
+    """
+
+    @staticmethod
+    def _side(*passes):
+        return [_checked("c", False, [
+            _check(f"claim-{i}", ok) for i, ok in enumerate(passes, 1)
+        ])]
+
+    def test_meeting_some_claims_is_not_meeting_them(self) -> None:
+        # 1 of 3 against 0 of 3. Under `any` the graded side "passes" and the
+        # case is `earns_it`; under `all` neither side passed.
+        verdict = staleness.classify(
+            self._side(True, False, False), self._side(False, False, False)
+        )
+        self.assertEqual(
+            verdict, "no_signal",
+            "a side that met one claim of three has not met every claim",
+        )
+
+    def test_meeting_every_claim_is(self) -> None:
+        # The control, same shape, so the pair can only be told apart by the
+        # operator under test.
+        verdict = staleness.classify(
+            self._side(True, True, True), self._side(False, False, False)
+        )
+        self.assertEqual(verdict, "earns_it")
+
+    def test_the_counts_follow_the_same_rule(self) -> None:
+        case = staleness.pair(
+            self._side(True, False, False), self._side(False, False, False)
+        )[0]
+        self.assertEqual((case.passes_with, case.passes_without), (0, 0))
 
 
 class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):

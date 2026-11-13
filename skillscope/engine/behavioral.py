@@ -152,8 +152,77 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
 
 
 def _normalise(text: str) -> str:
-    """Lowercased with separators flattened, so one comparison covers both OSes."""
-    return text.replace("\\", "/").lower()
+    """Lowercased, separators flattened, `..` segments collapsed.
+
+    The collapse is textual and needs no cwd: `a/b/../c` is `a/c` whoever is
+    asking. Only a `..` with a real segment in front of it is removed, so a
+    leading `../x` is left alone -- resolving that *would* need the agent's
+    cwd, which no tool-call record carries.
+
+    Without it, `<skills>/other/../run/SKILL.md` names the skill and matched
+    nothing, and a baseline that read the skill by that spelling was reported
+    as a clean room.
+    """
+    flat = text.replace("\\", "/").lower()
+    if "/../" not in flat:
+        return flat
+    out: list[str] = []
+    for part in flat.split("/"):
+        if part == ".." and out and out[-1] not in ("", "..") and ":" not in out[-1]:
+            out.pop()
+            continue
+        out.append(part)
+    return "/".join(out)
+
+
+# Shapes that read a whole directory rather than one named file. A call
+# carrying one of these *and* naming a directory the skill sits in has swept
+# the skill up with everything else, without ever spelling its name.
+_SWEEPS = ("*", "?", "-r ", "-R ", "--recursive", "find ", "**", "rglob", "ls ")
+
+
+def _swept(text: str, marks: tuple[str, ...]) -> bool:
+    """Whether this call read a directory containing the skill, wholesale.
+
+    `find <skills> -name SKILL.md`, `grep -r x <skills>/`, and
+    `cat <skills>/*/SKILL.md` all read the skill and none of them spells its
+    directory, so matching the skill's own path missed every one. An agent
+    that has been told nothing and is looking for something reaches for
+    exactly these, which made the miss likeliest on the baseline -- the one
+    side whose emptiness the whole command rests on.
+
+    Reported as an unknown room rather than as contamination: the call could
+    sweep the skill and the record does not prove it did. Unknown and dirty
+    void the same verdicts, so the conservative answer costs nothing here.
+    """
+    if not any(sweep in text for sweep in _SWEEPS):
+        return False
+    return any(_mentions(text, ancestor) for ancestor in _ancestors(marks))
+
+
+def _ancestors(marks: tuple[str, ...]) -> set[str]:
+    """Every directory the skill sits under, by its own spelling.
+
+    The whole chain, not just the immediate parent: `find ~/.claude -name
+    SKILL.md` reads the skill from two levels up and names neither the skill
+    nor the directory holding it.
+
+    Stops short of the top level, which is where the cost of being wrong
+    turns over. A skill checked out under `/tmp/<something>` would otherwise
+    contribute `/tmp` to this set, and then every `ls /tmp/...` in the run --
+    including ones nowhere near the skill -- reads as a room nobody can
+    vouch for. So `/home/u` is kept and `/home` is not. A sweep of a
+    top-level directory does reach the skill, and flagging it would void
+    verdicts across whole runs on the strength of a wildcard.
+    """
+    found: set[str] = set()
+    for mark in marks:
+        parts = mark.split("/")
+        while len(parts) > 3:
+            parts = parts[:-1]
+            if (parent := "/".join(parts)):
+                found.add(parent)
+    return found
 
 
 # Said instead of a contamination reason when there is no way to look for one.
@@ -309,6 +378,12 @@ def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
     # the staging area rather than a file of its own.
     if any("_bundled_skills" in _normalise(v) for v in _strings(arguments)):
         return reason
+
+    # Last, and weaker on purpose: a call that read a directory the skill
+    # sits in, wholesale. Answered after the exact matches above so a call
+    # that provably named the skill keeps the reason that says so.
+    if any(_swept(_normalise(v), marks) for v in _strings(arguments)):
+        return UNKNOWN_ROOM
     return None
 
 

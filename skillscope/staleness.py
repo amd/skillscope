@@ -964,8 +964,15 @@ def render_markdown(summary: dict) -> str:
     # has stopped earning its place would point them at the wrong thing
     # entirely.
     moved = totals["earns_it"] + totals["harmful"]
+    # Graded cases only, on both of these. An `ungraded` case is one nobody
+    # could draw a conclusion from, so letting its counts choose the headline
+    # lets a case that was never graded speak for the ones that were: a suite
+    # whose only graded case failed both ways, beside an ungraded case whose
+    # graded half happened to pass, was told the skill had stopped earning
+    # its place while the row underneath said the case was simply broken.
+    settled = [c for c in summary["cases"] if c["verdict"] != "ungraded"]
     anything_passed = any(
-        c["passes_with"] or c["passes_without"] for c in summary["cases"]
+        c["passes_with"] or c["passes_without"] for c in settled
     )
     # A suite that claims nothing positive anywhere is a third case again,
     # and the one the old `guards_only` verdict used to catch here. Its cases
@@ -974,7 +981,7 @@ def render_markdown(summary: dict) -> str:
     # wording would blame a skill for not affecting checks that never asked
     # anything of it.
     claimed = any(
-        positive(c["checks_with"] + c["checks_without"]) for c in summary["cases"]
+        positive(c["checks_with"] + c["checks_without"]) for c in settled
     )
     if totals["graded"] and not moved and not claimed:
         lines += [
@@ -1144,10 +1151,6 @@ def render_markdown(summary: dict) -> str:
             ),
         ]
 
-    unsettled = [
-        c for c in summary["cases"]
-        if c["verdict"] == "no_signal" and _unsettled(c)
-    ]
     notable = [
         c for c in summary["cases"]
         if c["verdict"] in ("no_signal", "harmful")
