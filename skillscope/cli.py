@@ -5,7 +5,7 @@
 """The one entry point for skill evals.
 
 Every skill owns a single dataset at ``<skill>/evals/evals.json``. This runner
-reads those datasets and grades them with three commands:
+reads those datasets and grades them with four commands:
 
   * ``structural`` -- every skill folder, every dataset, and every reference
     the skill's markdown makes. No agent, no tokens, instant.
@@ -18,13 +18,17 @@ reads those datasets and grades them with three commands:
     grades ``expected_behavior`` / ``unexpected_behavior`` / ``logs_contain``
     / ``files_exist``. Only runs evaluations that assert something beyond the
     routing decision.
+  * ``staleness`` -- runs ``behavioral``'s cases twice, once with the skill
+    installed and once without, and compares. Answers a question the other
+    three cannot: whether the cases still need the skill, or whether the model
+    has caught up and the suite is passing on its own.
 
 A skill may also ship ``<skill>/evals/extended_evals.json``, in the same format
-and under no coverage requirement of its own. Both graded commands include it
+and under no coverage requirement of its own. The graded commands include it
 by default; ``--no-extended`` grades the required dataset alone.
 
-The prompt is written once and both graded commands read it, which is the whole
-point: the alternative is a central routing prompt set plus a separate
+The prompt is written once and every graded command reads it, which is the
+whole point: the alternative is a central routing prompt set plus a separate
 per-skill test file that re-asserts routing with a substring match on the
 transcript.
 
@@ -52,6 +56,10 @@ Usage::
     # one case, keeping the raw transcript
     skillscope routing --only qwen-on-mi300x --keep-logs eval-logs
 
+    # whether the skill is earning its place: every case run with it and
+    # without it, twice the agent passes of a behavioral run
+    skillscope staleness --skill serving-llms-on-epyc
+
     # what CI should run for a change
     skillscope select --since BASE HEAD
 
@@ -68,6 +76,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -79,6 +88,7 @@ from . import (
     engine,
     references,
     routing,
+    staleness,
     structure,
     usage,
 )
@@ -424,17 +434,29 @@ def _empty_room(args: argparse.Namespace) -> None:
     )
 
 
-def _fail_if_expired() -> int | None:
-    """Non-zero when the command's ``--timeout`` has elapsed or stopped the run.
+def _within_deadline() -> bool:
+    """Whether the command's ``--timeout`` is still unspent.
 
-    Both, because the graceful stage fires `GRACEFUL_RESERVE_S` *before* the
-    wall. inspect then returns from `eval()` normally, so a run it stopped
-    reaches the gate with the clock still short of `expired()` -- and was
-    reported as "every case errored" instead of the overrun it was.
+    Both conditions, because the graceful stage fires `GRACEFUL_RESERVE_S`
+    *before* the wall. inspect then returns from `eval()` normally, so a run
+    it stopped is back here with the clock still short of `expired()` --
+    which is why `interrupted` is asked as well as the time.
+
+    Asked between the two halves of a staleness run as well as at the end, so
+    a half the bound stopped can be reported as a floor rather than as a
+    measurement. A baseline that was still going when the clock ran out is
+    the finding, and a report that cannot tell it from a baseline that
+    finished states a weaker thing than the run actually established.
     """
     bound = deadline.active()
-    if bound is None or not (bound.expired() or bound.interrupted):
+    return bound is None or not (bound.expired() or bound.interrupted)
+
+
+def _fail_if_expired() -> int | None:
+    """Non-zero when the command's ``--timeout`` has elapsed or stopped the run."""
+    if _within_deadline():
         return None
+    bound = deadline.active()
     print(f"error: {bound.message()}", file=sys.stderr)
     return 1
 
@@ -442,7 +464,7 @@ def _fail_if_expired() -> int | None:
 def _prepare_graded_run(
     args: argparse.Namespace, scope: list[str] | None = None
 ) -> list[str]:
-    """Structural checks, model pin, and API reachability. Shared by both graders.
+    """Structural checks, model pin, and API reachability. Shared by the graders.
 
     The structural gate reads `scope`, defaulting to the skills ``--skill``
     selected -- the ones about to be graded, and nobody else. A routing run
@@ -484,8 +506,8 @@ def _prepare_graded_run(
         )
         # Also before the probe, and for the same reason: a malformed price
         # table should fail the command, not one sample into a graded run.
-        # Registered here rather than in the engine because both graded
-        # commands come through this function and inspect's registry is
+        # Registered here rather than in the engine because every graded
+        # command comes through this function and inspect's registry is
         # process-global -- setting it twice would be the same work.
         from .engine import pricing as engine_pricing
 
@@ -537,9 +559,11 @@ def _require_hook_support(engine: str, skills: list[str], command: str) -> None:
     run perfectly well.
 
     Routing is exempt on every engine: it installs the skills, asks which one
-    fires, and executes nothing.
+    fires, and executes nothing. Staleness is not: it drives the same
+    `build_task` on the same cases, twice, so a `check` it skipped is skipped
+    on both halves and the comparison is between two runs that both lied.
     """
-    if command != "behavioral":
+    if command not in ("behavioral", "staleness"):
         return
 
     from .engine import hooks as engine_hooks
@@ -784,17 +808,125 @@ def cmd_routing(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_behavioral(args: argparse.Namespace) -> int:
-    skills = _prepare_graded_run(args)
-    subject = harnesses.get(args.harness)
-    started = time.time()
+def _gradable_cases(args: argparse.Namespace, skills: list[str]) -> list:
+    """The cases a behavioral-style run grades: selected, filtered, assertive.
 
+    Shared so `behavioral` and `staleness` cannot drift apart about what
+    `--only` or `--extended` select. A staleness run comparing a different set
+    of cases than the behavioral run it is read beside would be the one bug
+    neither report could show you.
+    """
     cases = []
     for skill in skills:
         cases.extend(datasets.load_dataset(skill, extended=args.extended))
     if args.only:
+        # Applied across every selected skill at once, because it refuses a
+        # selection that matched nothing. Per skill, `--only` naming a case of
+        # one skill would fail the run on the next skill's empty match.
         cases = datasets.filter_cases(cases, args.only)
-    gradable = [c for c in cases if c.has_behavior]
+    cases = [c for c in cases if c.has_behavior]
+
+    # Capped here rather than through inspect's own `limit`, which applies per
+    # task, and a run builds one task per skill: the same number would mean
+    # "the first N cases" on a one-skill run and "N per skill" on a four-skill
+    # one. Capped after the filters, so `--only` and `--max-cases` compose the
+    # way a reader would expect.
+    #
+    # And capped once, in the shared selector, because the two halves of a
+    # staleness run have to grade the same cases. A cap applied anywhere
+    # downstream could hand the baseline a different set, and a comparison
+    # between two runs that answered different questions is worse than no
+    # comparison: nothing in the report would say so.
+    #
+    # Per skill rather than over the whole run, so a four-skill run does not
+    # spend its whole budget on the first skill's dataset and report the other
+    # three as having nothing to grade.
+    cap = getattr(args, "max_cases", 0)
+    if cap:
+        kept: list = []
+        for skill in skills:
+            kept.extend([c for c in cases if c.skill == skill][:cap])
+        return kept
+    return cases
+
+
+def _run_behavioral(
+    args: argparse.Namespace,
+    skills: list[str],
+    gradable: list,
+    *,
+    install: bool = True,
+    config_dir: Path | None = None,
+) -> list:
+    """Run the behavioral cases on the selected engine.
+
+    `install` False runs them with no skill staged, which is the baseline half
+    of `cmd_staleness`. Both halves go through here rather than through two
+    similar call sites, so the only difference between the run being measured
+    and the run it is measured against is the flag.
+
+    `attempts` and `concurrency` are read off `args` rather than passed, so
+    the two halves cannot be given different ones. A baseline attempted fewer
+    times than the graded half is not a baseline, and the counts the report
+    prints would be comparing different denominators without saying so.
+    """
+    from .engine import behavioral as inspect_behavioral
+    from .engine import models as engine_models
+
+    attempts = getattr(args, "attempts", 1)
+    concurrency = getattr(args, "concurrency", 0)
+
+    if args.engine == "claude-code":
+        from .engine import verify as runner
+
+        return runner.run(
+            skills,
+            gradable,
+            engine_models.resolve(args.model),
+            args.effort,
+            install=install,
+            attempts=attempts,
+            concurrency=concurrency,
+        )
+    if args.engine == "claude-code-no-sandbox":
+        # The real CLI, driven on the host, inside inspect's framework.
+        # `--model` stays the CLI's own alias here: this one does not go
+        # through an inspect model provider.
+        from .engine import no_sandbox
+
+        # The harness is read here rather than passed in, for the reason
+        # `attempts` and `concurrency` are: both halves of a staleness run go
+        # through this function, so reading it once is what stops the two
+        # halves being given different agents.
+        subject = harnesses.get(getattr(args, "harness", None))
+        no_sandbox.require_local(subject)
+        return inspect_behavioral.run(
+            skills,
+            gradable,
+            engine_models.resolve(args.model),
+            args.effort,
+            solver_factory=lambda d: no_sandbox.harness_solver(
+                subject, args.model, args.effort, d, config_dir, install=install
+            ),
+            baseline=not install,
+            attempts=attempts,
+            concurrency=concurrency,
+        )
+    # Not a fallthrough. An engine in ENGINES with no branch here is a
+    # bug this dispatch has had once already, and a silent default is
+    # what let it survive: runs asked for one agent, got another, and
+    # the report named the one they had asked for.
+    raise SystemExit(
+        f"error: --engine {args.engine} has no behavioral leg. "
+        f"This is a bug in skillscope, not in how it was called."
+    )
+
+
+def cmd_behavioral(args: argparse.Namespace) -> int:
+    skills = _prepare_graded_run(args)
+    started = time.time()
+
+    gradable = _gradable_cases(args, skills)
 
     if not gradable:
         print(
@@ -805,40 +937,7 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         )
         return 0
 
-    from .engine import behavioral as inspect_behavioral
-    from .engine import models as engine_models
-
-    if args.engine == "claude-code":
-        from .engine import verify as runner
-
-        outcomes = runner.run(
-            skills, gradable, engine_models.resolve(args.model), args.effort
-        )
-    elif args.engine == "claude-code-no-sandbox":
-        # The real CLI, driven on the host, inside inspect's framework.
-        # `--model` stays the CLI's own alias here: this one does not go
-        # through an inspect model provider.
-        from .engine import no_sandbox
-
-        no_sandbox.require_local(subject)
-        outcomes = inspect_behavioral.run(
-            skills,
-            gradable,
-            engine_models.resolve(args.model),
-            args.effort,
-            solver_factory=lambda d: no_sandbox.harness_solver(
-                subject, args.model, args.effort, d
-            ),
-        )
-    else:
-        # Not a fallthrough. An engine in ENGINES with no branch here is a
-        # bug this dispatch has had once already, and a silent default is
-        # what let it survive: runs asked for one agent, got another, and
-        # the report named the one they had asked for.
-        raise SystemExit(
-            f"error: --engine {args.engine} has no behavioral leg. "
-            f"This is a bug in skillscope, not in how it was called."
-        )
+    outcomes = _run_behavioral(args, skills, gradable)
 
     summary = behavior.summarize(
         outcomes,
@@ -860,6 +959,160 @@ def cmd_behavioral(args: argparse.Namespace) -> int:
         return code
     if summary["totals"]["passed"] != summary["totals"]["cases"]:
         return 1
+    return 0
+
+
+def cmd_staleness(args: argparse.Namespace) -> int:
+    """Run every behavioral case twice, with the skill and without it.
+
+    Both passes run under the one `--timeout`, so a deadline that expires
+    partway leaves the rest of the second pass unmeasured -- those cases are
+    reported `ungraded` rather than as a skill that made no difference.
+
+    Budget for a baseline that runs *longer than the graded pass*, not the
+    same. An agent holding the skill goes straight to the work; an agent
+    without it explores -- building throwaway virtualenvs, dry-running
+    installs, reading around the problem. Measured on a two-case skill: the
+    graded pass finished both cases in 2m23s and the baseline was still going
+    on the second after 30 minutes. Twice a `behavioral` bound is the floor,
+    not the figure -- which is why this parser defaults `--timeout` to twice
+    what the single-pass commands use. On the shared 900s default those
+    numbers left the slower half ~637s of a measured 1800s+ need, so
+    truncation was the expected outcome on this command's own example rather
+    than a risk it ran.
+
+    Always exits 0 on a completed run. The comparison is nondeterministic on
+    both sides, so a verdict here is somewhere to look rather than a build
+    failure -- see `skillscope/staleness.py`. A deadline that expired still
+    fails, because that is a statement about the run rather than about a skill.
+    """
+    started = time.time()
+
+    asked = getattr(args, "harness", None) or os.environ.get("SKILLSCOPE_HARNESS")
+    if asked and asked != harnesses.DEFAULT:
+        # The one place this command cannot be harness-neutral yet. Its
+        # baseline half is only a measurement if the room is empty, and the
+        # check that establishes that -- `routing.can_isolate_config` below --
+        # reads Claude Code's credential variables and no other harness's. Run
+        # against a different agent with an Anthropic key happening to sit in
+        # the environment, it would report an isolated room it had not
+        # isolated, which is the one error this whole command exists to avoid
+        # making. Refused rather than run on a baseline nobody can vouch for.
+        raise SystemExit(
+            f"error: --harness {asked} has no staleness leg yet. The baseline "
+            "half has to be a room with no skills in it, and the check that "
+            f"establishes that reads {harnesses.DEFAULT}'s credentials rather "
+            "than this harness's -- so a run here would claim an empty room "
+            f"it never checked. Use --harness {harnesses.DEFAULT}, or "
+            "`routing` and `behavioral`, which are harness-neutral."
+        )
+
+    if args.attempts < 1:
+        raise SystemExit(
+            f"error: --attempts {args.attempts} would run nothing. The "
+            "command compares a side that ran against a side that ran; one "
+            "attempt each is the minimum that produces a comparison."
+        )
+    if args.max_cases < 0 or args.concurrency < 0:
+        raise SystemExit(
+            "error: --max-cases and --concurrency count things, so they "
+            "cannot be negative. 0 means no cap on either."
+        )
+
+    skills = _prepare_graded_run(args)
+    gradable = _gradable_cases(args, skills)
+
+    if not gradable:
+        print(
+            "[staleness] no evaluation in the selected skill(s) asserts "
+            "anything beyond routing, so there is nothing to compare. A "
+            "staleness run needs cases that say what the skill should do."
+        )
+        return 0
+
+    # The runner's own `~/.claude/skills` are registered beside the staged
+    # ones, so without this the baseline is not an empty room -- it is this
+    # machine's skills minus the one under test. `routing` has refused to run
+    # without isolation for the same reason; staleness needs it more, because
+    # the baseline being empty is the entire measurement rather than one
+    # input to it.
+    if args.engine == "claude-code-no-sandbox" and not routing.can_isolate_config():
+        raise SystemExit(
+            "error: staleness cannot run on --engine claude-code-no-sandbox "
+            f"without {' or '.join(routing.ENV_CREDENTIALS)}. The baseline "
+            "half has to be a room with no skills in it, and redirecting the "
+            "CLI away from the runner's own config dir only works when auth "
+            "comes from the environment. Without it every skill installed on "
+            "this machine joins the baseline, and a case it solves there "
+            "would be reported as one the skill under test was not needed "
+            "for.\n    Set one of those, or use --engine claude-code, whose "
+            "guest has no user-level skills at all."
+        )
+
+
+    passes = (
+        "run twice" if args.attempts <= 1
+        else f"run {args.attempts} time(s) on each side"
+    )
+    print(f"[staleness] {len(gradable)} case(s), {passes}", flush=True)
+    # A directory per half, not one shared between them. The contamination
+    # check reads what the agent did, so it cannot see state the CLI itself
+    # writes into its config dir; were the graded half to leave anything
+    # there that the baseline half could pick up, the baseline would no
+    # longer be the empty room the whole command rests on. Nothing is known
+    # to do this, but a second temporary directory costs nothing and the
+    # question stops needing an answer.
+    with (
+        tempfile.TemporaryDirectory(prefix="skillscope-staleness-with-") as graded_dir,
+        tempfile.TemporaryDirectory(prefix="skillscope-staleness-without-") as bare_dir,
+    ):
+        host = args.engine == "claude-code-no-sandbox"
+        # Billed per half. The graded half runs first and the two are
+        # sequential, so each scope covers exactly one half's spend -- and
+        # `finished` is asked straight after each, because the bound they
+        # share is what stops the second one.
+        with usage.leg("graded") as graded_leg:
+            with_skill = _run_behavioral(
+                args, skills, gradable,
+                config_dir=Path(graded_dir) if host else None,
+            )
+        graded_leg.finished = _within_deadline()
+        with usage.leg("baseline") as baseline_leg:
+            without = _run_behavioral(
+                args, skills, gradable, install=False,
+                config_dir=Path(bare_dir) if host else None,
+            )
+        baseline_leg.finished = _within_deadline()
+
+    comparisons = staleness.pair(with_skill, without)
+    summary = staleness.summarize(
+        comparisons,
+        {
+            "model": args.model,
+            "engine": args.engine,
+            "effort": args.effort,
+            "skills": skills,
+            "extended": args.extended,
+            "attempts": args.attempts,
+            # Recorded only when it bound. A `0` in the report would read as a
+            # cap of nothing rather than as no cap, and `render_markdown`
+            # warns about a partial run on the presence of this key.
+            **({"max_cases": args.max_cases} if args.max_cases else {}),
+            **({"concurrency": args.concurrency} if args.concurrency else {}),
+            "wall_time_s": round(time.time() - started, 1),
+            "timeout": args.timeout,
+            "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+            # In run order, which is also the order the report prints them.
+            # The totals below stay the sum of the two, so every other
+            # report's meta keeps the shape it had.
+            "legs": [graded_leg.as_meta(), baseline_leg.as_meta()],
+            **usage.snapshot().as_meta(),
+            **_sandbox_meta(args),
+        },
+    )
+    _write_report(summary, staleness.render_markdown(summary), args, "staleness")
+    if (code := _fail_if_expired()) is not None:
+        return code
     return 0
 
 
@@ -921,8 +1174,14 @@ def _add_routing_room_argument(
     )
 
 
-def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
-    """Flags shared by the routing and behavioral commands."""
+def _add_graded_arguments(
+    parser: argparse.ArgumentParser, *, timeout: float = deadline.DEFAULT_TIMEOUT_S
+) -> None:
+    """Flags shared by the graded commands: routing, behavioral and staleness.
+
+    `timeout` is threaded through rather than overridden afterwards so the
+    `--help` text matches the default in force. See `_add_timeout_argument`.
+    """
     _add_skills_argument(parser)
     parser.add_argument(
         "--skill",
@@ -997,18 +1256,28 @@ def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
             "comparable. Default: claude-code, or $SKILLSCOPE_HARNESS."
         ),
     )
-    _add_timeout_argument(parser)
+    _add_timeout_argument(parser, timeout)
 
 
-def _add_timeout_argument(parser: argparse.ArgumentParser) -> None:
+def _add_timeout_argument(
+    parser: argparse.ArgumentParser, default: float = deadline.DEFAULT_TIMEOUT_S
+) -> None:
+    """The whole-command deadline, with a help string that knows its default.
+
+    `default` is a parameter rather than a `set_defaults` call afterwards
+    because the help text is built here and argparse does not revisit it.
+    `staleness` overrode the value and left the help saying 900, three lines
+    under a description announcing that it defaults to twice the usual -- a
+    screen of `--help` contradicting itself.
+    """
     parser.add_argument(
         "--timeout",
         type=float,
-        default=deadline.DEFAULT_TIMEOUT_S,
+        default=default,
         help=(
             "Seconds before the whole command is abandoned. Shared by "
-            "structural, routing, and behavioral. Default: 900 (15 minutes). "
-            "0 disables."
+            "structural, routing, behavioral and staleness. "
+            f"Default: {default:g} ({default / 60:g} minutes). 0 disables."
         ),
     )
 
@@ -1192,6 +1461,80 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_graded_arguments(behavioral_parser)
     behavioral_parser.set_defaults(handler=cmd_behavioral)
+
+    staleness_parser = commands.add_parser(
+        "staleness",
+        help="Whether a skill's cases still need the skill.",
+        description=(
+            "Run every behavioral case twice -- once with the skill installed, "
+            "once with nothing installed -- and report which cases moved. A "
+            "case that passes either way is not evidence about the skill. "
+            "Reports only: a verdict here never fails a run, though an "
+            "expired deadline or a refused run still exits non-zero. It costs "
+            "twice what `behavioral` costs and wants more than twice the "
+            "--timeout, which is why --timeout defaults to twice the usual "
+            "here: both passes share one bound, and the baseline is the "
+            "slower half because an agent without the skill explores instead "
+            "of going straight to the work."
+        ),
+    )
+    # Twice the shared bound, because the command is two passes under one.
+    # Passed into `_add_graded_arguments` rather than set afterwards, so the
+    # `--help` text is built from the number actually in force: a
+    # `set_defaults` override changes the value and leaves the help saying
+    # whatever it was built with. The measurement behind the number is in
+    # `cmd_staleness`: a two-case skill finished the graded pass in 2m23s and
+    # had not finished the baseline after 30 minutes, so the shared 900s gave
+    # the slower half ~637s of a measured 1800s+ need.
+    _add_graded_arguments(staleness_parser, timeout=2 * deadline.DEFAULT_TIMEOUT_S)
+    staleness_parser.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Run every case N times on each side instead of once. One pair of "
+            "runs is a lead rather than a result -- an agent disagrees with "
+            "itself between runs, so a case can pass with the skill and fail "
+            "without it for no reason the skill is responsible for. Repeats "
+            "are what let a reader weigh a verdict: the report prints how "
+            "many attempts passed on each side, and 3/3 against 0/3 is not "
+            "3/3 against 1/3. A side counts as having passed when any of its "
+            "attempts did, which makes a higher N a higher bar rather than a "
+            "steadier reading of the same one: earns_it at three attempts "
+            "needs the baseline to have failed all three times, and a "
+            "baseline that passes once takes the case to no_signal. So "
+            "verdicts compare across runs at equal N and not otherwise. "
+            "Costs N times what it costs now, on both sides. Default: 1."
+        ),
+    )
+    staleness_parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Grade only the first N cases of each selected skill, after "
+            "--only and --extended have chosen them. For trying the command "
+            "on a large suite without paying for all of it. Both sides run "
+            "the same N, and the report says the run did not cover the whole "
+            "suite. Default: 0, every case."
+        ),
+    )
+    staleness_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "How many cases may be in flight at once. This command's baseline "
+            "half is the slow one -- an agent with no skill explores -- and "
+            "running its cases one after another is where the wall clock "
+            "goes. Raise it as far as the engine's sandboxes and the model's "
+            "rate limits will take. Default: 0, inspect's own default."
+        ),
+    )
+    staleness_parser.set_defaults(handler=cmd_staleness)
 
     select_parser = commands.add_parser(
         "select",

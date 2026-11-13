@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import agent, config, deadline, routing as routing_core
+from .. import agent, config, deadline, harness as harnesses, routing as routing_core
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
 from . import convert, hooks, models, sandbox as sandbox_spec, scorers, stats
@@ -85,6 +85,7 @@ def build_task(
     ctx: dict | None = None,
     *,
     solver_factory,
+    baseline: bool = False,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
@@ -96,6 +97,11 @@ def build_task(
     Required, and keyword-only. It was optional while a built-in react agent
     was the default, and a caller that forgot it silently graded a different
     agent than it asked for.
+
+    `baseline` only names the task. Whether the skill is actually staged is
+    the solver's business, so the flag and the factory have to agree -- the
+    name is what makes a disagreement visible in the log directory rather
+    than invisible in the numbers.
     """
     from inspect_ai import Task
 
@@ -110,7 +116,14 @@ def build_task(
 
     bound = deadline.active()
     return Task(
-        name=f"behavioral-{skill}",
+        name=f"behavioral-{skill}" + ("-baseline" if baseline else ""),
+        metadata={
+            BASELINE_KEY: baseline,
+            SKILL_KEY: skill,
+            # Resolved here, where it is known to be right. See `SKILL_DIR_KEY`.
+            SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
+        },
+        tags=["skillscope", "baseline" if baseline else "graded"],
         dataset=samples,
         setup=hooks.setup_solver(hook, skill, cases),
         solver=solver_factory(skill_dir),
@@ -138,6 +151,310 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
     ]
 
 
+def _normalise(text: str) -> str:
+    """Lowercased, separators flattened, `..` segments collapsed.
+
+    The collapse is textual and needs no cwd: `a/b/../c` is `a/c` whoever is
+    asking. Only a `..` with a real segment in front of it is removed, so a
+    leading `../x` is left alone -- resolving that *would* need the agent's
+    cwd, which no tool-call record carries.
+
+    Without it, `<skills>/other/../run/SKILL.md` names the skill and matched
+    nothing, and a baseline that read the skill by that spelling was reported
+    as a clean room.
+    """
+    flat = text.replace("\\", "/").lower()
+    if "/../" not in flat:
+        return flat
+    out: list[str] = []
+    for part in flat.split("/"):
+        if part == ".." and out and out[-1] not in ("", "..") and ":" not in out[-1]:
+            out.pop()
+            continue
+        out.append(part)
+    return "/".join(out)
+
+
+# Shapes that read a whole directory rather than one named file. A call
+# carrying one of these *and* naming a directory the skill sits in has swept
+# the skill up with everything else, without ever spelling its name.
+_SWEEPS = ("*", "?", "-r ", "-R ", "--recursive", "find ", "**", "rglob", "ls ")
+
+
+def _swept(text: str, marks: tuple[str, ...]) -> bool:
+    """Whether this call read a directory containing the skill, wholesale.
+
+    `find <skills> -name SKILL.md`, `grep -r x <skills>/`, and
+    `cat <skills>/*/SKILL.md` all read the skill and none of them spells its
+    directory, so matching the skill's own path missed every one. An agent
+    that has been told nothing and is looking for something reaches for
+    exactly these, which made the miss likeliest on the baseline -- the one
+    side whose emptiness the whole command rests on.
+
+    Reported as an unknown room rather than as contamination: the call could
+    sweep the skill and the record does not prove it did. Unknown and dirty
+    void the same verdicts, so the conservative answer costs nothing here.
+    """
+    if not any(sweep in text for sweep in _SWEEPS):
+        return False
+    return any(_mentions(text, ancestor) for ancestor in _ancestors(marks))
+
+
+def _ancestors(marks: tuple[str, ...]) -> set[str]:
+    """Every directory the skill sits under, by its own spelling.
+
+    The whole chain, not just the immediate parent: `find ~/.claude -name
+    SKILL.md` reads the skill from two levels up and names neither the skill
+    nor the directory holding it.
+
+    Stops short of the top level, which is where the cost of being wrong
+    turns over. A skill checked out under `/tmp/<something>` would otherwise
+    contribute `/tmp` to this set, and then every `ls /tmp/...` in the run --
+    including ones nowhere near the skill -- reads as a room nobody can
+    vouch for. So `/home/u` is kept and `/home` is not. A sweep of a
+    top-level directory does reach the skill, and flagging it would void
+    verdicts across whole runs on the strength of a wildcard.
+    """
+    found: set[str] = set()
+    for mark in marks:
+        parts = mark.split("/")
+        while len(parts) > 3:
+            parts = parts[:-1]
+            if (parent := "/".join(parts)):
+                found.add(parent)
+    return found
+
+
+# Said instead of a contamination reason when there is no way to look for one.
+# Phrased as what is missing rather than as a finding: it is not a claim that
+# the baseline was dirty, it is a refusal to claim it was clean.
+UNKNOWN_ROOM = (
+    "could not tell whether the baseline read the skill: the run did not "
+    "record where the skill was, and it is not on this machine"
+)
+
+
+def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | None:
+    """The paths that reading makes a room dirty, lowercased and separator-flat.
+
+    Two of them. The skill's own directory, absolute, which is where an agent
+    that went looking would find it. And `<skills_dir>/<name>`, the staged copy
+    `no_sandbox.install_skill` writes under a workspace that changes per
+    sample, so only its tail is knowable here. The harness names that
+    directory -- `.claude/skills` for Claude Code, its own for anything else --
+    so this asks it rather than spelling one harness's answer in, which would
+    read every other harness's staged copy as untouched.
+
+    It asks the *default* harness, which is right while that is the only one
+    registered. Once a run can name another, the staged mark has to come off
+    the log beside `recorded`, for the reason `recorded` exists: a reader
+    standing on a different harness than the run is not evidence about the
+    run.
+
+    `recorded` is `SKILL_DIR_KEY` off the log: where the skill was on the
+    machine that ran the agent. Preferred over resolving it here, because
+    resolving it here resolves it against *this* process. A reader standing
+    somewhere else is not evidence about where the agent stood.
+
+    `None` when neither source can say where the skill was, which is an
+    unknown room rather than a clean one. Returning the staged mark alone
+    looked like an answer and was not: it is the subset of the check that
+    cannot fail, so every tool call that reached the skill by its real path
+    came back clean and the case was credited. See `SKILL_DIR_KEY`.
+
+    The staged mark carries no leading separator on purpose. `no_sandbox` runs
+    the agent with `cwd=workspace`, which makes `cat .claude/skills/foo/...`
+    the natural shell form, and a mark anchored with a leading `/` missed
+    exactly that. `_mentions` supplies the boundary instead, which is what
+    keeps the mark from matching the middle of a longer name.
+    """
+    home = recorded
+    if home is None:
+        try:
+            home = str(Path(config.active().skill_path(skill)).resolve())
+        except (Exception, SystemExit):  # noqa: BLE001 -- see below
+            # `skill_path` raises `SystemExit` rather than returning, so
+            # catching `Exception` alone let a rebuild of someone else's logs
+            # take the whole command down.
+            return None
+    staged = f"{harnesses.get().skills_dir}/{skill}"
+    return (_normalise(home), _normalise(staged))
+
+
+# Characters that continue a path component. A mark followed or preceded by
+# one of these is part of a longer name, not the name itself.
+_NAME_CHARS = "-_."
+
+
+def _mentions(text: str, mark: str) -> bool:
+    """Whether `text` names `mark` as a whole path component.
+
+    Plain `in` was the bug twice over. It is what made `/{skill}/` match
+    `/run/user/1000`, and it survived in the shell branch after the structured
+    branch was fixed, where it read `.claude/skills/foo-extra` as skill `foo`'s
+    own files. A sibling skill whose name extends this one's is not this one.
+
+    So a hit has to end at a boundary -- end of string, or a character that
+    cannot continue a component -- and start at one. `foo` matches in
+    `/x/.claude/skills/foo/SKILL.md` and in `cat .claude/skills/foo/S`, and
+    does not match in `foo-extra`, `foo.bak` or `myfoo`.
+    """
+    width = len(mark)
+    start = 0
+    while (at := text.find(mark, start)) >= 0:
+        start = at + 1
+        after = text[at + width : at + width + 1]
+        if after and (after.isalnum() or after in _NAME_CHARS):
+            continue
+        before = text[at - 1 : at] if at else ""
+        if before and (before.isalnum() or before in _NAME_CHARS):
+            continue
+        return True
+    return False
+
+
+def _strings(value) -> list[str]:
+    """Every string anywhere in a tool call's arguments.
+
+    Flat rather than by field name. The first version of this checked a fixed
+    list of path-ish argument names, which is a closed set against an open tool
+    surface: it had no entry for Glob's `pattern`, which is often the only
+    argument a Glob call carries, so that call was invisible. MCP tools name
+    their arguments whatever they like, so the list would have kept drifting.
+
+    Checking every string is safe here only because the marks are boundary
+    matched and absolute. That is what removed the false positives, not the
+    field list.
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _strings(v)]
+    return []
+
+
+def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
+    """Whether this call reached into the skill's own directory.
+
+    Every string argument is tested as written, and a `~`-relative one is
+    tested expanded as well. Expansion is skipped for anything with whitespace
+    in it: that is a command line rather than a path, and it is matched as
+    written.
+
+    The graded side reads its own installed skill by design, so a hit there is
+    expected. It is the baseline where this means the room was not empty.
+    """
+    arguments = getattr(call, "arguments", None) or {}
+    if not isinstance(arguments, dict):
+        return None
+
+    reason = f"read the skill's own files ({skill})"
+    for value in _strings(arguments):
+        text = _normalise(value)
+        if any(_mentions(text, mark) for mark in marks):
+            return reason
+        # `~/x` names the same file by another spelling, and expanding it is
+        # context-free: `$HOME` is the agent's own, recorded in the
+        # environment rather than inferred from where this is running.
+        #
+        # `./x` and `../x` are deliberately *not* resolved. Resolving them
+        # needs the agent's cwd, which is `no_sandbox`'s per-sample workspace
+        # and appears nowhere in the tool-call record -- so `resolve()` here
+        # resolved them against skillscope's own cwd instead, and made the
+        # verdict depend on which directory the report was run from. It never
+        # could serve the case it was written for.
+        if value.startswith("~") and not any(c.isspace() for c in value):
+            try:
+                expanded = _normalise(str(Path(value).expanduser()))
+            except (Exception, SystemExit):  # noqa: BLE001 -- not a path, then
+                continue
+            if any(_mentions(expanded, mark) for mark in marks):
+                return reason
+
+    # The one mark that is not a path. `_bundled_skills` is the harness's own
+    # staging directory, so its name in any argument is the agent having found
+    # the staging area rather than a file of its own.
+    if any("_bundled_skills" in _normalise(v) for v in _strings(arguments)):
+        return reason
+
+    # Last, and weaker on purpose: a call that read a directory the skill
+    # sits in, wholesale. Answered after the exact matches above so a call
+    # that provably named the skill keeps the reason that says so.
+    if any(_swept(_normalise(v), marks) for v in _strings(arguments)):
+        return UNKNOWN_ROOM
+    return None
+
+
+def _inspect_room(
+    routing_engine, sample, skill: str, skill_dir: str | None = None
+) -> tuple[str | None, str | None]:
+    """`(the skill that fired, why the room was not what it claimed)`.
+
+    `skill_dir` is `SKILL_DIR_KEY` off the log, passed by a reader rebuilding
+    someone else's run. A live run leaves it `None` and resolves the skill
+    where it already knows it is.
+
+    One walk over the tool calls, answering both questions, because the second
+    is only meaningful beside the first. `detect_activation` reports a skill
+    nobody staged as `other:<name>`, which is exactly the contamination this
+    looks for -- the runner's own `~/.claude/skills` are registered next to
+    the staged ones, and a behavioral run passes no `config_dir` to keep them
+    out.
+
+    `fired` is `None` or exactly `skill`, never an `other:` marker. The two
+    questions are answered by separate branches for that reason: when they
+    shared one `if/elif`, a second `other:` hit arriving after `why` was
+    already set fell through to the `elif` and was recorded as the skill
+    having fired -- which reads downstream as "the skill activated" on exactly
+    the contaminated cases that most need the opposite.
+
+    Reading the skill's own source is the second route, and the one isolation
+    only partly closes: `no_sandbox` runs the agent with `cwd=workspace`, but
+    nothing stops it naming an absolute path, so a directory the staging step
+    skipped is still on disk for it to find. The sandboxed `claude-code` leg
+    does close it, by isolating the filesystem. A baseline that read it was
+    not a baseline.
+
+    Best effort: a shape this cannot walk is an unknown room, not a failed
+    case.
+    """
+    fired: str | None = None
+    why: str | None = None
+    marks = _skill_marks(skill, skill_dir)
+    # Nowhere to check against, so the read half of the check cannot run. Said
+    # out loud rather than passed over: this lands the case `ungraded`, which
+    # is what an unanswerable question is worth. Applied after the walk, not
+    # before it, so a reason the walk *could* establish -- another skill
+    # firing, which needs no path at all -- is reported in preference to it.
+    unknown, marks = marks is None, marks or ()
+    try:
+        for call in routing_engine._tool_calls(sample):
+            hit = routing_core.detect_activation(
+                routing_engine._activation_event(call),
+                [skill],
+                allow_body_path=routing_engine.ALLOW_BODY_PATH,
+            )
+            if hit and hit.startswith("other:"):
+                if why is None:
+                    why = f"another skill fired: {hit.removeprefix('other:')}"
+            elif hit and fired is None:
+                fired = hit
+            if why is None:
+                why = _read_the_skill(call, marks, skill)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        # A walk cut short inspected only the calls it reached, so evidence on
+        # any later call was never looked at. That is an unknown room whatever
+        # `unknown` says: it was computed before the walk, from whether there
+        # were marks to check against, and cannot speak for a walk that did
+        # not finish. Returning the completed-walk expression here would
+        # report a baseline nobody inspected as clean, which is the one
+        # direction this check must never fail in.
+        return fired, why or UNKNOWN_ROOM
+    return fired, why or (UNKNOWN_ROOM if unknown else None)
+
+
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     """Map one inspect `EvalLog` back onto skillscope's outcome objects.
 
@@ -153,6 +470,10 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
     for the same reason; the two now agree. Cases with no sample are still
     errored below, so nothing goes quietly missing.
     """
+    # Imported here rather than at module scope: `engine/routing.py` imports
+    # this module, so a top-level import would close the cycle.
+    from . import routing as routing_engine  # noqa: PLC0415
+
     prompts = {c.id: c.prompt for c in cases}
     outcomes: list[BehaviorOutcome] = []
 
@@ -172,6 +493,20 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
             error = f"{sample.error.message}"
         elif not checks:
             error = "case has no behavioral assertions to grade"
+        elif ungraded := [c for c in checks if not scorers.graded(c)]:
+            # One check nobody could grade makes the whole attempt
+            # unanswerable rather than partly answered: a side passes only by
+            # meeting *every* positive claim, so a claim with no verdict
+            # leaves the result undecidable, not negative. Reported as an
+            # error so it lands in the errors column and gets triaged as
+            # infrastructure, which is what it is -- and so that
+            # `staleness.answered` drops the attempt instead of reading a
+            # grader that never answered as evidence about a skill.
+            error = "could not be graded: " + "; ".join(
+                c["detail"] for c in ungraded[:3]
+            )
+
+        activated, contaminated = _inspect_room(routing_engine, sample, skill)
 
         outcomes.append(
             BehaviorOutcome(
@@ -183,6 +518,11 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
                 checks=checks,
                 error=error,
                 degraded=routing_core.is_provider_error(error),
+                activated=activated,
+                contaminated=contaminated,
+                # Which repeat this is, where `--attempts` asked for several.
+                # 1 on every sample of an ordinary single-epoch run.
+                attempt=int(getattr(sample, "epoch", 1) or 1),
             )
         )
 
@@ -206,6 +546,29 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
 # Eval-level metadata naming the `run_eval` call that started an eval, so a
 # stopped run reads back its own log and nobody else's.
 CALL_TOKEN = "skillscope_call"
+
+# Which half of a staleness comparison a log is, and whose skill it is about.
+# The task name says the same thing, but a name is a string somebody has to
+# parse; inspect filters on metadata and tags, and so can anything reading a
+# log directory afterwards. Written by both engines, so a reader does not have
+# to know which one produced the log it is holding.
+BASELINE_KEY = "skillscope_baseline"
+SKILL_KEY = "skillscope_skill"
+
+# Where the skill was on the machine that ran the agent.
+#
+# `_skill_marks` needs an absolute directory to recognise a tool call that
+# reached into the skill. Deriving it at read time derives it from whoever is
+# *reading*: a rebuild in another directory, or on a machine where the skill
+# is not checked out, built a quietly weaker mark set and reported a baseline
+# the live run had voided as `ungraded` back as `no_signal`. That is the
+# "a rebuild is more permissive than the run it rebuilds" failure this module
+# closes everywhere else; contamination was the one place it was still open.
+#
+# So the run records where the skill actually was, and the reader uses that
+# rather than its own cwd. Written by both engines for the same reason
+# `SKILL_KEY` is: a reader should not have to know which one produced the log.
+SKILL_DIR_KEY = "skillscope_skill_dir"
 
 
 def stop_requested() -> bool:
@@ -292,8 +655,26 @@ def run(
     *,
     solver_factory,
     log_dir: str | None = None,
+    baseline: bool = False,
+    attempts: int = 1,
+    concurrency: int = 0,
 ) -> list[BehaviorOutcome]:
-    """Run every behavioral case, grouped by skill. Mirrors `behavior.run`."""
+    """Run every behavioral case, grouped by skill. Mirrors `behavior.run`.
+
+    `baseline` is passed through to the task and used in the progress lines.
+    It does not itself remove the skill: the caller's `solver_factory` does
+    that, and this says so in the output.
+
+    `attempts` runs every case that many times, as inspect epochs, and the
+    epoch comes back on each sample as `BehaviorOutcome.attempt`. One attempt
+    is the ordinary run and leaves the logs exactly as they were.
+
+    `concurrency` caps how many cases are in flight at once; 0 leaves
+    inspect's own default alone. Not raised by default: the agents these legs
+    drive hold real sandboxes and real rate limits, and a default that
+    multiplied either would be a change to every existing command rather than
+    an option on a slow one.
+    """
     from inspect_ai import eval as inspect_eval
 
     sandbox_spec.require_provider()
@@ -311,15 +692,30 @@ def run(
             outcomes.extend(_failed(skill, skill_cases, deadline.active().message()))
             continue
 
-        print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
+        label = "baseline" if baseline else "behavioral"
+        each = "" if attempts <= 1 else f", {attempts} attempts each"
+        print(f"[{label}] {skill}: {len(skill_cases)} case(s){each}", flush=True)
         try:
             logs = run_eval(
                 inspect_eval,
-                build_task(skill, skill_cases, model, solver_factory=solver_factory),
+                build_task(
+                    skill,
+                    skill_cases,
+                    model,
+                    solver_factory=solver_factory,
+                    baseline=baseline,
+                ),
                 model=model,
                 model_args=models.model_args(model),
                 log_dir=log_dir or str(Path(".skillscope") / "logs"),
                 log_realtime=realtime_logging(),
+                # Repeats are inspect's epochs: one task, one log, each case
+                # sampled `attempts` times with the epoch on every sample.
+                # Running the leg twice over would have written two logs a
+                # side, which is the shape `staleness._no_duplicates` refuses
+                # precisely because it cannot tell it from a collision.
+                epochs=attempts,
+                **({"max_samples": concurrency} if concurrency else {}),
                 # A sample that raises is that case's failure, not the batch's.
                 # inspect's default ends the task on the first error, so one
                 # container that would not start discarded every case already

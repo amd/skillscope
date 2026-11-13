@@ -22,13 +22,35 @@ from . import convert, judge, tools
 CHECKS = "checks"
 
 
-def _check(kind: str, expectation: str, passed: bool, detail: str = "") -> dict:
+def _check(
+    kind: str,
+    expectation: str,
+    passed: bool,
+    detail: str = "",
+    graded: bool = True,
+) -> dict:
+    """One expectation's result. `graded` False means nobody could tell.
+
+    `passed` stays False where nothing graded it, so a reader that knows only
+    about pass and fail still refuses to call the case green. Anything
+    attributing a result to the skill has to read `graded` first.
+
+    Always written rather than omitted when True, so the dict has one shape.
+    Readers still default it to True -- see `graded()` -- because a dict read
+    back from a log written before this existed does not carry the key.
+    """
     return {
         "kind": kind,
         "expectation": expectation,
         "passed": passed,
         "detail": detail,
+        "graded": graded,
     }
+
+
+def graded(check: dict) -> bool:
+    """Whether anybody actually graded this check. A missing key reads as True."""
+    return bool(check.get("graded", True))
 
 
 def searchable(state) -> str:
@@ -81,7 +103,13 @@ def expectations():
                     # would blame the agent for the harness's failure.
                     for path in wanted:
                         checks.append(
-                            _check("files_exist", path, False, f"could not list the sandbox: {exc}")
+                            _check(
+                                "files_exist",
+                                path,
+                                False,
+                                f"could not list the sandbox: {exc}",
+                                graded=False,
+                            )
                         )
                     files = None
                 else:
@@ -98,13 +126,23 @@ def expectations():
 
             # Judged expectations last: the deterministic results are on screen
             # before the grader calls, which take a few seconds each, begin.
-            for statement in meta.get(convert.EXPECTED, []):
-                ok, reason = await judge.grade(statement, state, must_happen=True)
-                checks.append(_check("expected_behavior", statement, ok, reason))
-
-            for statement in meta.get(convert.UNEXPECTED, []):
-                ok, reason = await judge.grade(statement, state, must_happen=False)
-                checks.append(_check("unexpected_behavior", statement, ok, reason))
+            for kind, key, must_happen in (
+                ("expected_behavior", convert.EXPECTED, True),
+                ("unexpected_behavior", convert.UNEXPECTED, False),
+            ):
+                for statement in meta.get(key, []):
+                    try:
+                        ok, reason = await judge.grade(
+                            statement, state, must_happen=must_happen
+                        )
+                    except judge.Ungradable as exc:
+                        # The polarity is why this cannot be left as a False.
+                        # On `must_happen=False` a False asserts the forbidden
+                        # thing *happened*, so a grader that never answered
+                        # would be reported as the agent having done it.
+                        checks.append(_check(kind, statement, False, str(exc), graded=False))
+                        continue
+                    checks.append(_check(kind, statement, ok, reason))
 
             passed = bool(checks) and all(c["passed"] for c in checks)
             return Score(

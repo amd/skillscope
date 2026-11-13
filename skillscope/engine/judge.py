@@ -45,6 +45,24 @@ Answer with a single line of JSON and nothing else:
 """
 
 
+class Ungradable(Exception):
+    """The judge could not reach a verdict. The run's failure, not the skill's.
+
+    Raised rather than returned as `(False, reason)`. A `False` here is a
+    statement about what the agent did, and an infrastructure fault wearing
+    that shape is not a neutral mistake -- it is one that reliably produces
+    the most alarming reading available. `skillscope staleness` compares two
+    runs, so a baseline whose judge never answered reads as a case the skill
+    was needed for, and a graded run whose judge never answered reads as a
+    skill that did harm. Both are conclusions about a skill drawn from a
+    sandbox that would not list or a grader that returned prose.
+
+    An exception rather than a third return value because the caller has to
+    do something different with it, and a `bool | None` invites being read as
+    falsy by every caller that does not know yet.
+    """
+
+
 def is_image(path: str) -> bool:
     return PurePosixPath(path).suffix.lower() in IMAGE_SUFFIXES
 
@@ -232,7 +250,7 @@ async def grade(
         # Say so rather than presenting an empty workspace as fact. A judge told
         # "no files" will confidently report the agent did nothing, which reads
         # as the skill failing when the sandbox is what failed.
-        return False, f"judge skipped: could not list the sandbox -- {exc}"
+        raise Ungradable(f"could not list the sandbox -- {exc}") from exc
 
     described, images = await artifacts(paths)
 
@@ -277,7 +295,9 @@ async def grade(
 
     parsed = parse_verdict(output.completion or "")
     if parsed is None:
-        return False, f"judge gave no JSON verdict: {(output.completion or '')[:200]!r}"
+        raise Ungradable(
+            f"judge gave no JSON verdict: {(output.completion or '')[:200]!r}"
+        )
     satisfied, reason = parsed
     return satisfied, f"judge: {reason}"
 
