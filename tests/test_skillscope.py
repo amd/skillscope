@@ -6571,18 +6571,28 @@ class TestAnAgentThatWentLookingIsNotACleanRoom(unittest.TestCase):
 
     def test_a_parent_traversal_names_the_skill_and_is_contamination(self) -> None:
         # Provable: the path resolves to the skill with no cwd needed.
-        parent, name = self.own.rsplit("/", 1)
-        why = self._why({"file_path": f"{parent}/other/../{name}/SKILL.md"},
-                        function="Read")
+        #
+        # Built through `Path` rather than by splitting on "/". Windows hands
+        # back `C:\\...\\run`, where a `rsplit("/")` finds no separator and
+        # returns the whole path -- so an earlier version of this test raised
+        # on one runner and asserted against the skill's own directory on the
+        # other. The code under test normalises separators itself; the test
+        # has to be told.
+        own = Path(self.own)
+        why = self._why(
+            {"file_path": f"{own.parent}/other/../{own.name}/SKILL.md"},
+            function="Read",
+        )
         self.assertIn("read the skill's own files", why or "")
 
     def test_a_recursive_search_of_a_directory_above_it_is_unknown(self) -> None:
         # Not provable, and not clean either: the call would sweep the skill
         # up and the record cannot say whether it did.
+        above = Path(self.own).parent
         for command in (
-            f"find {self.own.rsplit('/', 1)[0]} -name SKILL.md -exec cat {{}} +",
-            f"grep -r rocm {self.own.rsplit('/', 1)[0]}/",
-            f"cat {self.own.rsplit('/', 1)[0]}/*/SKILL.md",
+            f"find {above} -name SKILL.md -exec cat {{}} +",
+            f"grep -r rocm {above}/",
+            f"cat {above}/*/SKILL.md",
         ):
             with self.subTest(command=command):
                 self.assertEqual(
