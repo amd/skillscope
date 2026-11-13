@@ -459,8 +459,9 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
         {o.observed for o in outcomes if o.observed and o.observed.startswith("other:")}
     )
     # The room check, and whether it ran at all. `visible_skills` is populated
-    # from the CLI's session-init event, which only the host leg can read:
-    # `claude-code` drives the CLI through `inspect_swe` and never sees one. So
+    # from the CLI's session-init event, which only the host leg can read
+    # (`claude-code` drives the CLI through `inspect_swe` and never sees one), or,
+    # for a harness that announces nothing, from asking it (`Harness.room`). So
     # an empty list is ambiguous between "the agent reported no skills" and
     # "nobody could ask", and the two must not render the same way -- a report
     # with no missing-skill warning reads as a verified room.
@@ -509,6 +510,31 @@ def summarize(outcomes: list[Outcome], skills: list[str], meta: dict) -> dict:
         "room_checked_cases": len(checked),
         "cases": [asdict(o) for o in outcomes],
     }
+
+
+def _other_harness(summary: dict) -> bool:
+    """Whether the run's agent was something other than Claude Code."""
+    harness = (summary.get("meta") or {}).get("harness")
+    return bool(harness) and harness != "claude-code"
+
+
+def _isolate_advice(summary: dict) -> str:
+    """How to keep the runner's own skills out of the room, for this harness."""
+    from . import harness as harnesses
+
+    # A report from before reports named a harness is a Claude Code report.
+    name = (summary.get("meta") or {}).get("harness") or harnesses.DEFAULT
+    try:
+        variables = harnesses.get(name).credentials
+    except SystemExit:  # a report may name a harness that is no longer registered
+        variables = ()
+    if not variables:
+        return "Remove those skills from the runner, or run where it has none."
+    names = ", ".join(f"`{variable}`" for variable in variables)
+    return (
+        f"Set one of {names} in the environment so the run can use an "
+        "isolated config dir, or remove them from the runner."
+    )
 
 
 def render_markdown(summary: dict) -> str:
@@ -665,10 +691,17 @@ def render_markdown(summary: dict) -> str:
             f"skills installed, so these routing results are not trustworthy.",
         ]
     if summary["skills_missing_from_session"]:
+        # Claude Code announces its skills when a session starts; another harness
+        # is asked what a session would load, so "session init" is not true of it.
+        reported = (
+            "did not list these installed skills for the session"
+            if _other_harness(summary)
+            else "did not report these installed skills at session init"
+        )
         lines += [
             "",
-            f"> **Warning:** the CLI did not report these installed skills at "
-            f"session init: {', '.join(summary['skills_missing_from_session'])}. "
+            f"> **Warning:** the CLI {reported}: "
+            f"{', '.join(summary['skills_missing_from_session'])}. "
             f"They may not have been installed for the run.",
         ]
     if summary["extra_skills_in_session"]:
@@ -676,27 +709,44 @@ def render_markdown(summary: dict) -> str:
         shown = ", ".join(f"`{name}`" for name in extras[:12])
         if len(extras) > 12:
             shown += f", and {len(extras) - 12} more"
+        # Where a stray skill comes from is the harness's own business: only
+        # Claude Code's is known to read `~/.claude/skills`.
+        source = (
+            "the runner's own config for this harness"
+            if _other_harness(summary)
+            else "the runner's own config (usually `~/.claude/skills`)"
+        )
         lines += [
             "",
             f"> **Warning:** {len(extras)} skill(s) beyond the routing set were "
-            f"registered for these sessions ({shown}). They come from the "
-            f"runner's own config (usually `~/.claude/skills`) and compete for "
+            f"registered for these sessions ({shown}). They come from "
+            f"{source} and compete for "
             f"every prompt, so the room measured here is not the one that was "
-            f"asked for. Set `ANTHROPIC_API_KEY` so the run can use an isolated "
-            f"config dir, or remove them from the runner.",
+            f"asked for. {_isolate_advice(summary)}",
         ]
     if not summary.get("room_checked_cases"):
         # Said once, and only when no case could be checked. Both warnings
         # above are silent on this leg whatever the room actually held, and a
         # silent warning reads as a passed check -- which is how a contaminated
         # runner would go unreported rather than unreportable.
-        lines += [
-            "",
-            "> **Note:** the room was not verified. The check reads the skills "
-            "the CLI announces at session init, which only "
-            "`claude-code-no-sandbox` can see -- `claude-code` drives the CLI "
-            "through `inspect_swe`, which does not surface that event. So the "
-            "two warnings above cannot fire on this leg: absence of them is "
-            "not evidence the agent saw the room this report describes.",
-        ]
+        if _other_harness(summary):
+            lines += [
+                "",
+                "> **Note:** the room was not verified. The check asks the "
+                "harness which skills a session would load. Either the "
+                "harness could not say, or it answered and listed none of the "
+                "staged skills, and the two read the same here. So the "
+                "missing-skills warning above cannot fire: its absence is not "
+                "evidence the agent saw the room this report describes.",
+            ]
+        else:
+            lines += [
+                "",
+                "> **Note:** the room was not verified. The check reads the skills "
+                "the CLI announces at session init, which only "
+                "`claude-code-no-sandbox` can see -- `claude-code` drives the CLI "
+                "through `inspect_swe`, which does not surface that event. So the "
+                "two warnings above cannot fire on this leg: absence of them is "
+                "not evidence the agent saw the room this report describes.",
+            ]
     return "\n".join(lines) + "\n"

@@ -288,6 +288,26 @@ class TestEveryRegisteredHarnessMeetsTheContract(unittest.TestCase):
                 command = subject.command(harness.RunSpec(workspace="ws", prompt="p"))
                 self.assertEqual(command[0], subject.binary)
 
+    def test_no_harness_hands_the_judge_a_permission_it_was_not_asked_for(self) -> None:
+        # `tool_free` is the judge: it reads evidence and must never act on the
+        # machine it reads about. A harness either refuses to build that command
+        # or builds one with nothing pre-approved. One that ignored the flag would
+        # pass every other test here and hand the judge the run of the machine.
+        granting = ("--allow-all", "--allow-all-tools", "--yolo", "--dangerously-skip-permissions")
+        for name in harness.names():
+            with self.subTest(harness=name):
+                subject = harness.get(name)
+                try:
+                    command = subject.command(
+                        harness.RunSpec(workspace="ws", prompt="p", tool_free=True)
+                    )
+                except NotImplementedError:
+                    continue
+                self.assertFalse(
+                    [flag for flag in command if flag in granting or "skip-permissions" in flag],
+                    f"{name} builds a tool-free command that pre-approves tools: {command}",
+                )
+
     def test_the_environment_carries_only_what_the_harness_sets(self) -> None:
         # Not the runner's PATH, its HOME or any key on it: a container would
         # inherit all of it.

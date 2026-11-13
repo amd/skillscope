@@ -56,8 +56,12 @@ def searchable(state) -> str:
     return "\n".join(parts)
 
 
-def expectations():
-    """Grade every expectation on the case and report each one."""
+def expectations(complete=None):
+    """Grade every expectation on the case and report each one.
+
+    `complete` replaces the inspect model for the judged expectations; see
+    `judge.grade`.
+    """
     from inspect_ai.scorer import CORRECT, INCORRECT, Score, accuracy, scorer, stderr
 
     @scorer(metrics=[accuracy(), stderr()])
@@ -99,11 +103,15 @@ def expectations():
             # Judged expectations last: the deterministic results are on screen
             # before the grader calls, which take a few seconds each, begin.
             for statement in meta.get(convert.EXPECTED, []):
-                ok, reason = await judge.grade(statement, state, must_happen=True)
+                ok, reason = await judge.grade(
+                    statement, state, must_happen=True, complete=complete
+                )
                 checks.append(_check("expected_behavior", statement, ok, reason))
 
             for statement in meta.get(convert.UNEXPECTED, []):
-                ok, reason = await judge.grade(statement, state, must_happen=False)
+                ok, reason = await judge.grade(
+                    statement, state, must_happen=False, complete=complete
+                )
                 checks.append(_check("unexpected_behavior", statement, ok, reason))
 
             passed = bool(checks) and all(c["passed"] for c in checks)
