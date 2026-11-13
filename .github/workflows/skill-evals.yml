@@ -634,6 +634,14 @@ jobs:
           install-claude: "true"
           node-version: ${{ inputs.node_version }}
 
+      - name: Upload behavioral report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: behavioral-report-${{ matrix.skill }}-${{ matrix.os }}
+          path: .skillscope/
+          if-no-files-found: warn
+
   # Behavioral legs on hardware with its own environment. Those bring scoped
   # secrets, which is why they cannot share the job above: a job's credentials
   # are fixed before its matrix expands.
@@ -690,6 +698,14 @@ jobs:
           setup-python: "false"
           install-claude: "true"
           node-version: ${{ inputs.node_version }}
+
+      - name: Upload behavioral report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: behavioral-report-${{ matrix.skill }}-${{ matrix.os }}-${{ matrix.environment }}
+          path: .skillscope/
+          if-no-files-found: warn
 
   # Single aggregate result, so a caller can gate on one check:
   #
