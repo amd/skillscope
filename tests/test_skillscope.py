@@ -6706,6 +6706,202 @@ class TestAnAgentThatWentLookingIsNotACleanRoom(unittest.TestCase):
         self.assertIsNone(self._why({"command": f"grep -r foo /{top}"}))
 
 
+class TestWhatTheHalvesAskTheEngineFor(unittest.TestCase):
+    """`_run_behavioral`'s kwargs were asserted by reading its source.
+
+    `install`, `attempts`, `concurrency`, `baseline` and `config_dir` are
+    what make the baseline half a baseline, and the only test touching them
+    grepped the function for engine names or replaced the function with a
+    mock. Each could be dropped, or wired to the wrong value, with the suite
+    green -- and `baseline=not install` inverted is the whole measurement
+    reported backwards.
+    """
+
+    @staticmethod
+    def _args(engine):
+        return argparse.Namespace(
+            engine=engine, model="mockllm/model", effort="high",
+            attempts=3, concurrency=4, harness=None,
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _host_leg(seen: dict):
+        """The host engine and its harness, recorded rather than run.
+
+        The engine's `run` calls `solver_factory` the way the real one does,
+        because `install` and `config_dir` reach the agent only through that
+        closure -- a stub that never calls it records a solver nobody built
+        and the two arguments that make the baseline a baseline go unseen.
+        """
+        no_sandbox = types.SimpleNamespace(
+            require_local=lambda subject: None,
+            harness_solver=lambda *a, **k: seen.update(solver=k, built=a) or "s",
+        )
+
+        def run(*a, **k):
+            seen.update(k)
+            k["solver_factory"]("dataset")
+            return []
+
+        with mock.patch.object(
+            engine_module, "no_sandbox", no_sandbox
+        ), mock.patch.object(
+            engine_module, "behavioral", types.SimpleNamespace(run=run)
+        ):
+            yield
+
+    def test_the_host_leg_is_told_which_half_it_is(self) -> None:
+        seen: dict = {}
+        with self._host_leg(seen):
+            cli._run_behavioral(
+                self._args("claude-code-no-sandbox"), ["alpha"], [],
+                install=False, config_dir=Path("/tmp/bare"),
+            )
+        self.assertTrue(seen["baseline"], "the half with no skill is the baseline")
+        self.assertEqual(seen["attempts"], 3)
+        self.assertEqual(seen["concurrency"], 4)
+        self.assertFalse(seen["solver"]["install"])
+        self.assertIn(
+            Path("/tmp/bare"), seen["built"],
+            "the bare config dir is what keeps this machine's own skills out",
+        )
+
+    def test_the_graded_half_is_not_the_baseline(self) -> None:
+        # The control. `baseline=not install` reads the same either way until
+        # both halves are run through it.
+        seen: dict = {}
+        with self._host_leg(seen):
+            cli._run_behavioral(
+                self._args("claude-code-no-sandbox"), ["alpha"], [], install=True,
+            )
+        self.assertFalse(seen["baseline"])
+        self.assertTrue(seen["solver"]["install"])
+
+    def test_the_sandboxed_leg_carries_the_same_three(self) -> None:
+        seen = {}
+        verify = types.SimpleNamespace(run=lambda *a, **k: seen.update(k) or [])
+        with mock.patch.object(engine_module, "verify", verify):
+            cli._run_behavioral(
+                self._args("claude-code"), ["alpha"], [], install=False,
+            )
+        self.assertFalse(seen["install"])
+        self.assertEqual(seen["attempts"], 3)
+        self.assertEqual(seen["concurrency"], 4)
+
+
+class TestTheRecursiveShapesAnAgentActuallyTypes(unittest.TestCase):
+    """The sweep detector matched the tidiest spelling of each shape only.
+
+    `_SWEEPS` held the literal `"-r "`, so `grep -ri`, `grep -rn` and `ls -lR`
+    -- the flags an agent actually types -- all swept the skill up and were
+    reported as a clean room. `rg`, `tree` and `fd` were not listed at all.
+    `~` was expanded only for an argument that was a bare path, so a `~`
+    inside a Bash command line, which is the only place one appears, was
+    never expanded. And `_normalise` collapsed `/../` but not `//` or
+    `/./`, which a shell joining two pieces of a path produces without
+    anybody typing them.
+
+    Every one of these was probed against the code and came back `None`.
+    This is the failure class the sweep detector was added to close, on the
+    one side whose emptiness the command rests on.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("run", dataset=tier0_dataset("run"))
+        self.repo.activate()
+        self.own = Path(config.active().skill_path("run"))
+
+    def _why(self, command):
+        from skillscope.engine import routing as routing_engine
+
+        call = _FakeCall("t", function="Bash")
+        call.arguments = {"command": command}
+        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
+        return engine_behavioral._inspect_room(
+            routing_engine, sample, "run", str(self.own)
+        )[1]
+
+    def test_a_recursive_flag_in_any_cluster_is_a_sweep(self) -> None:
+        above = self.own.parent
+        for command in (
+            f"grep -ri foo {above}/",
+            f"grep -rn foo {above}/",
+            f"grep -Rn foo {above}/",
+            f"ls -lR {above}",
+            f"grep -nr foo {above}",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self._why(command), engine_behavioral.UNKNOWN_ROOM)
+
+    def test_the_other_search_tools_sweep_too(self) -> None:
+        above = self.own.parent
+        for command in (f"rg foo {above}", f"tree {above}", f"fd SKILL.md {above}"):
+            with self.subTest(command=command):
+                self.assertEqual(self._why(command), engine_behavioral.UNKNOWN_ROOM)
+
+    def test_a_flag_with_no_r_in_it_is_not_a_sweep(self) -> None:
+        # The false positive the cluster rule must not buy: a single-dash
+        # flag is only a sweep when it actually asks for recursion.
+        above = self.own.parent
+        self.assertIsNone(self._why(f"head -n 5 {above}/notes.txt"))
+        self.assertIsNone(self._why(f"cat -A {above}/notes.txt"))
+
+    @contextlib.contextmanager
+    def _home_at(self, where: Path):
+        """`Path.home()` answering `where`, which is where the skill is.
+
+        The repo fixture puts the skill in a temp directory rather than under
+        the real home, so without this the `~` spellings resolve nowhere near
+        it and the test passes by asserting on an absence. Patched rather
+        than skipped: a skipped test pins nothing, and this is the branch
+        that was reported missing.
+        """
+        with mock.patch.object(
+            engine_behavioral.Path, "home", classmethod(lambda cls: where)
+        ):
+            yield
+
+    def test_a_home_relative_path_inside_a_command_is_expanded(self) -> None:
+        # The shape an agent types. The expansion before this fired only on
+        # an argument that was a bare `~`-path with no whitespace, and a
+        # command line is never that, so `~` was never expanded at all.
+        tail = self.own.name
+        with self._home_at(self.own.parent):
+            for spelling in (
+                f"cat ~/{tail}/SKILL.md",
+                f"cat $HOME/{tail}/SKILL.md",
+                f"cat ${{HOME}}/{tail}/SKILL.md",
+            ):
+                with self.subTest(spelling=spelling):
+                    self.assertIn(
+                        "read the skill's own files", self._why(spelling) or ""
+                    )
+
+    def test_a_home_relative_sweep_is_expanded_too(self) -> None:
+        with self._home_at(self.own.parent.parent):
+            self.assertEqual(
+                self._why(f"find ~/{self.own.parent.name} -name SKILL.md"),
+                engine_behavioral.UNKNOWN_ROOM,
+            )
+
+    def test_a_doubled_or_dotted_separator_still_names_the_skill(self) -> None:
+        parent, name = self.own.parent, self.own.name
+        for spelling in (
+            f"cat {parent}//{name}/SKILL.md",
+            f"cat {parent}/./{name}/SKILL.md",
+            f"cat {parent}//.//{name}/SKILL.md",
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertIn("read the skill's own files", self._why(spelling) or "")
+
+    def test_a_tilde_belonging_to_something_else_is_left_alone(self) -> None:
+        # The anchor on the expansion: `~` is a home only where a path can
+        # start. A backup file's suffix is not one.
+        self.assertIsNone(self._why("cat notes.txt~/x"))
+
+
 class TestTheScorerTurnsAnUnansweredJudgeIntoAnUngradedCheck(unittest.TestCase):
     """The glue between `judge.Ungradable` and the check it becomes.
 
@@ -6745,6 +6941,126 @@ class TestTheScorerTurnsAnUnansweredJudgeIntoAnUngradedCheck(unittest.TestCase):
         checks = self._score(_answer).metadata[engine_scorers.CHECKS]
         self.assertTrue(engine_scorers.graded(checks[0]))
         self.assertTrue(checks[0]["passed"])
+
+    def test_a_forbidden_expectation_is_graded_on_its_own_polarity(self) -> None:
+        # `must_happen` is what tells the grader which answer is the failure.
+        # Hard-wiring it to True left the suite green and inverts every
+        # `unexpected_behavior` check: the grader is asked whether the
+        # forbidden thing happened and the answer is read as whether the
+        # required thing did, so an agent that stayed away from it is
+        # reported as having done it.
+        asked: list[bool] = []
+
+        async def _answer(statement, state, *, must_happen):
+            asked.append(must_happen)
+            return True, "judge: it did"
+
+        from inspect_ai.scorer import Score  # noqa: F401 -- import side effect
+
+        scorer = engine_scorers.expectations()
+        state = types.SimpleNamespace(
+            messages=[],
+            metadata={
+                engine_convert.EXPECTED: ["it wrote the file"],
+                engine_convert.UNEXPECTED: ["it ran sudo"],
+            },
+            output=None,
+        )
+        with mock.patch.object(engine_judge, "grade", _answer):
+            asyncio.run(scorer(state, None))
+        self.assertEqual(asked, [True, False])
+
+
+class TestASandboxThatWouldNotListIsNotTheAgentsFault(unittest.TestCase):
+    """`files_exist` has the same two-step as the judge and nothing ran it.
+
+    `tools.list_paths` raising reports every wanted path as a check that
+    failed *and was not graded*. Flipping that `graded=False` to `True` left
+    the whole suite green -- and it is the one edit that turns a harness
+    failure back into the agent's: `staleness.answered` keeps the attempt,
+    the side reads as failing, and a baseline whose sandbox would not list
+    manufactures `earns_it` for the skill.
+    """
+
+    def _score(self, lister):
+        from inspect_ai.scorer import Score  # noqa: F401 -- import side effect
+
+        scorer = engine_scorers.expectations()
+        state = types.SimpleNamespace(
+            messages=[], metadata={engine_convert.FILES_EXIST: ["out.txt"]},
+            output=None,
+        )
+        with mock.patch.object(engine_tools, "list_paths", lister):
+            return asyncio.run(scorer(state, None))
+
+    def test_a_listing_that_failed_leaves_the_check_ungraded(self) -> None:
+        async def _raise():
+            raise engine_tools.ListingFailed("no container")
+
+        checks = self._score(_raise).metadata[engine_scorers.CHECKS]
+        self.assertEqual(len(checks), 1)
+        self.assertFalse(engine_scorers.graded(checks[0]))
+        self.assertFalse(checks[0]["passed"], "an ungraded check is not a pass")
+        self.assertIn("could not list the sandbox", checks[0]["detail"])
+
+    def test_a_listing_that_worked_grades_the_check(self) -> None:
+        # The other direction, and the one a careless fix breaks: a sandbox
+        # that listed and simply does not hold the file is the agent's
+        # failure and has to stay graded.
+        async def _empty():
+            return []
+
+        checks = self._score(_empty).metadata[engine_scorers.CHECKS]
+        self.assertTrue(engine_scorers.graded(checks[0]))
+        self.assertFalse(checks[0]["passed"])
+
+
+class TestTheRoomWalkKeepsTheFirstAnswerItFound(unittest.TestCase):
+    """Two questions, one walk, and each must keep its own first answer.
+
+    The branches exist because they shared an `if/elif` once: a second
+    `other:` hit arriving after `why` was set fell through to the `elif` and
+    was recorded as *the skill* having fired, which reads downstream as the
+    skill activating on exactly the contaminated cases that most need the
+    opposite. Both guards could be dropped with the suite green, because no
+    test ever walked more than one activating call.
+    """
+
+    @staticmethod
+    def _sample(hits):
+        calls = [_FakeCall(f"t{i}") for i, _ in enumerate(hits)]
+        for call in calls:
+            call.arguments = {"command": "echo hello"}
+        return _FakeSample(messages=[_FakeMessage("m", calls)], events=[]), hits
+
+    def _walk(self, hits):
+        from skillscope.engine import routing as routing_engine
+
+        sample, answers = self._sample(hits)
+        answers = list(answers)
+        with mock.patch.object(
+            engine_behavioral.routing_core, "detect_activation",
+            lambda *a, **k: answers.pop(0),
+        ):
+            return engine_behavioral._inspect_room(
+                routing_engine, sample, "run", "/nowhere/skills/run"
+            )
+
+    def test_a_later_contamination_does_not_replace_the_first_reason(self) -> None:
+        fired, why = self._walk(["other:alpha", "other:beta"])
+        self.assertIsNone(fired)
+        self.assertEqual(why, "another skill fired: alpha")
+
+    def test_a_contaminating_hit_is_never_recorded_as_the_skill_firing(self) -> None:
+        # The regression itself: the skill fires, then another skill does.
+        # `fired` has to stay the skill and `why` has to be set.
+        fired, why = self._walk(["run", "other:beta"])
+        self.assertEqual(fired, "run")
+        self.assertEqual(why, "another skill fired: beta")
+
+    def test_the_first_firing_is_the_one_kept(self) -> None:
+        fired, _ = self._walk(["run", "run-two"])
+        self.assertEqual(fired, "run", "a later hit must not replace the first")
 
 
 class TestASidePassesOnlyByMeetingEveryClaim(unittest.TestCase):
@@ -6790,6 +7106,81 @@ class TestASidePassesOnlyByMeetingEveryClaim(unittest.TestCase):
             self._side(True, False, False), self._side(False, False, False)
         )[0]
         self.assertEqual((case.passes_with, case.passes_without), (0, 0))
+
+    def test_a_side_asserting_nothing_has_not_met_anything(self) -> None:
+        # The other half of the conjunction. `all([])` is True, so dropping
+        # `bool(claims)` makes a case that asserts no positive claim at all
+        # read as a side that passed -- on *both* sides, since neither has
+        # claims, which is how it stays quiet. A case carrying only a guard
+        # rail is exactly that shape, and the module has a name for what it
+        # is worth: nothing to credit.
+        guard = {"kind": "unexpected_behavior", "expectation": "no sudo",
+                 "passed": True, "detail": ""}
+        nothing_asserted = _checked("c", False, [guard])
+        self.assertFalse(staleness._met(nothing_asserted))
+        self.assertEqual(
+            staleness.classify([nothing_asserted], [_checked("c", False, [guard])]),
+            "no_signal",
+        )
+
+
+class TestTheEvidenceComesOffTheAttemptTheVerdictRestsOn(unittest.TestCase):
+    """Three one-line preferences, each of which could be dropped unnoticed.
+
+    They decide which attempt's evidence the report prints, which reason it
+    gives for a dirty baseline, and whether a side's time is a figure or an
+    absence. All three mattered on the first real run of this command and
+    none of them was pinned.
+    """
+
+    def test_a_passing_attempt_that_fired_is_preferred(self) -> None:
+        # `_fired_on_pass` asks whether the skill fired on any attempt that
+        # passed; this is what keeps `fired_with` and `checks_with` pointing
+        # at that same attempt. Drop it and the report shows the checks of an
+        # attempt where nothing fired beside a note saying something did --
+        # two different runs described as one.
+        quiet = _checked("c", True, [_check("x", True)], activated=None, attempt=1)
+        fired = _checked("c", True, [_check("x", True)], activated="s", attempt=2)
+        self.assertIs(staleness._decisive([quiet, fired]), fired)
+
+    def test_a_passing_attempt_still_beats_a_failing_one(self) -> None:
+        # The control: the firing preference must not overtake the passing
+        # one, or a side that passed is reported off an attempt that failed.
+        failed = _checked("c", False, [_check("x", False)], activated="s", attempt=1)
+        passed = _checked("c", True, [_check("x", True)], activated=None, attempt=2)
+        self.assertIs(staleness._decisive([failed, passed]), passed)
+
+    def test_a_known_reason_beats_one_nobody_could_establish(self) -> None:
+        # They are different findings: one says the baseline demonstrably
+        # held something, the other that nobody could tell. A side with one
+        # attempt of each has the answer to the second in the first, so
+        # reporting "could not be checked" throws away the finding -- and
+        # `UNKNOWN_ROOM` is compared as a sentinel downstream, so the swap
+        # changes which group the case is reported in, not just its wording.
+        unknown = _outcome("c", False)
+        unknown.contaminated = engine_behavioral.UNKNOWN_ROOM
+        known = _outcome("c", False, attempt=2)
+        known.contaminated = "another skill fired: beta"
+        self.assertEqual(
+            staleness._why_dirty([unknown, known]), "another skill fired: beta"
+        )
+        self.assertEqual(
+            staleness._why_dirty([unknown]), engine_behavioral.UNKNOWN_ROOM,
+            "with nothing better it is still reported",
+        )
+
+    def test_a_side_that_recorded_no_time_reports_none_not_zero(self) -> None:
+        # The one column where reporting nothing as zero inverts the finding.
+        # Zero is what a synthesised failure carries for a case inspect never
+        # ran, and `0s` beside the graded half's `2m23s` reads as the
+        # baseline having been instant -- the exact opposite of the
+        # half-hour baseline this command exists to surface.
+        never_ran = _checked("c", False, [_check("x", False)])
+        never_ran.elapsed_s = 0.0
+        self.assertIsNone(staleness._seconds([never_ran]))
+        ran = _checked("c", False, [_check("x", False)])
+        ran.elapsed_s = 12.5
+        self.assertEqual(staleness._seconds([never_ran, ran]), 12.5)
 
 
 class TestGuardRailsAreNotJudgedAsIfTheyDiscriminated(unittest.TestCase):

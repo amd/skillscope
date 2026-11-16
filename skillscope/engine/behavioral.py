@@ -16,6 +16,7 @@ report path downstream is untouched.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -152,22 +153,36 @@ def _failed(skill: str, cases: list[Case], detail: str) -> list[BehaviorOutcome]
 
 
 def _normalise(text: str) -> str:
-    """Lowercased, separators flattened, `..` segments collapsed.
+    """Lowercased, separators flattened, no-op segments collapsed.
 
     The collapse is textual and needs no cwd: `a/b/../c` is `a/c` whoever is
-    asking. Only a `..` with a real segment in front of it is removed, so a
-    leading `../x` is left alone -- resolving that *would* need the agent's
-    cwd, which no tool-call record carries.
+    asking, and so are `a//c` and `a/./c`. Only a `..` with a real segment in
+    front of it is removed, so a leading `../x` is left alone -- resolving
+    that *would* need the agent's cwd, which no tool-call record carries.
 
     Without it, `<skills>/other/../run/SKILL.md` names the skill and matched
     nothing, and a baseline that read the skill by that spelling was reported
-    as a clean room.
+    as a clean room. `//` and `/./` are the same miss in a cheaper spelling:
+    a shell that builds a path by joining two pieces produces them without
+    anyone typing them, and both name the skill exactly.
+
+    A trailing separator goes with them, which costs nothing: `_mentions`
+    treats the end of the string as a boundary, so `<skills>/run/` and
+    `<skills>/run` match the same mark.
     """
     flat = text.replace("\\", "/").lower()
-    if "/../" not in flat:
+    # `/.` covers `/./`, `/../` and a trailing `/.` or `/..`; `//` covers a
+    # repeated separator anywhere.
+    if "//" not in flat and "/." not in flat:
         return flat
     out: list[str] = []
-    for part in flat.split("/"):
+    for index, part in enumerate(flat.split("/")):
+        # A repeated or trailing separator. The leading empty segment of an
+        # absolute path is kept: it is what makes the path absolute.
+        if part == "" and index and out:
+            continue
+        if part == "." and out:
+            continue
         if part == ".." and out and out[-1] not in ("", "..") and ":" not in out[-1]:
             out.pop()
             continue
@@ -175,22 +190,75 @@ def _normalise(text: str) -> str:
     return "/".join(out)
 
 
+# `~/x` and `$HOME/x` spell the same file as the absolute path, and a mark is
+# always absolute. Anchored so it only fires where a path can start, and only
+# where one actually follows.
+_HOME = re.compile(r"(?<![\w/~$])(?:~|\$home|\$\{home\})(?=/)")
+
+
+def _expand_home(text: str) -> str:
+    """`text` again with `~/` and `$HOME/` written out, where they appear.
+
+    Separate from `_normalise` because it is the one expansion that is not
+    context-free. It resolves against *this* process's home, which is the
+    agent's own on the live path -- `no_sandbox` runs it on this host -- and
+    is a guess on a rebuild of logs written somewhere else. Worth making
+    anyway: the alternative is reading `cat ~/dev/x/skills/run/SKILL.md` as
+    a clean room, and the answer it buys is voided-or-unknown rather than a
+    claim about the skill.
+
+    Applied to whole command strings, not just to arguments that are paths.
+    The expansion before this one fired only on a value that started with
+    `~` and had no whitespace in it, which is a bare path -- so every `~`
+    inside a Bash command line, which is where an agent actually types one,
+    went unexpanded.
+    """
+    if "~" not in text and "$" not in text:
+        return text
+    try:
+        home = _normalise(str(Path.home()))
+    except (Exception, SystemExit):  # noqa: BLE001 -- no home, nothing to do
+        return text
+    return _HOME.sub(home, text) if home else text
+
+
 # Shapes that read a whole directory rather than one named file. A call
 # carrying one of these *and* naming a directory the skill sits in has swept
 # the skill up with everything else, without ever spelling its name.
-# Lowercase only: every caller passes `_normalise(...)`, so an upper-case
-# spelling here can never match. `-R ` sat in this tuple reading as
-# case-sensitive coverage and was dead the day it was written.
-_SWEEPS = ("*", "?", "-r ", "--recursive", "find ", "**", "rglob", "ls ")
+#
+# Globs, as substrings: they are not words and can sit anywhere in a path.
+_SWEEP_GLOBS = ("*", "?", "**", "rglob")
+
+# The rest are words, and matching them as substrings was the bug twice over.
+# `-r ` is a flag an agent almost never types alone: `grep -ri`, `grep -rn`
+# and `ls -lR` all sweep and none of them contains `-r ` -- so the shapes the
+# docstring below names as the realistic ones were matched only in their
+# tidiest spelling. The flag is now any single-dash cluster containing `r`,
+# which is what those all are, and the commands are matched on a word
+# boundary so a sweep is a command somebody ran rather than two letters
+# inside another word.
+#
+# Bare `grep` is deliberately not here. `grep foo <dir>` does not read the
+# directory -- it is the recursive flag or a glob that does, and both are
+# matched already -- so listing it would void verdicts on the strength of a
+# command that never reached the skill.
+#
+# Lowercase only, deliberately: every caller passes `_normalise(...)`, so an
+# upper-case spelling here can never match. `-R ` sat in the old tuple
+# reading as case-sensitive coverage and was dead the day it was written;
+# `\w*r\w*` covers it now because the text is lowercased first.
+_SWEEP_WORDS = re.compile(
+    r"(?:^|\s)(?:-\w*r\w*|--recursive|find|ls|rg|tree|fd)(?=\s|$)"
+)
 
 
 def _swept(text: str, marks: tuple[str, ...]) -> bool:
     """Whether this call read a directory containing the skill, wholesale.
 
-    `find <skills> -name SKILL.md`, `grep -r x <skills>/`, and
-    `cat <skills>/*/SKILL.md` all read the skill and none of them spells its
-    directory, so matching the skill's own path missed every one. An agent
-    that has been told nothing and is looking for something reaches for
+    `find <skills> -name SKILL.md`, `grep -ri x <skills>/`, `rg x <skills>`
+    and `cat <skills>/*/SKILL.md` all read the skill and none of them spells
+    its directory, so matching the skill's own path missed every one. An
+    agent that has been told nothing and is looking for something reaches for
     exactly these, which made the miss likeliest on the baseline -- the one
     side whose emptiness the whole command rests on.
 
@@ -198,7 +266,7 @@ def _swept(text: str, marks: tuple[str, ...]) -> bool:
     sweep the skill and the record does not prove it did. Unknown and dirty
     void the same verdicts, so the conservative answer costs nothing here.
     """
-    if not any(sweep in text for sweep in _SWEEPS):
+    if not any(glob in text for glob in _SWEEP_GLOBS) and not _SWEEP_WORDS.search(text):
         return False
     return any(_mentions(text, ancestor) for ancestor in _ancestors(marks))
 
@@ -364,10 +432,18 @@ def _strings(value) -> list[str]:
 def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
     """Whether this call reached into the skill's own directory.
 
-    Every string argument is tested as written, and a `~`-relative one is
-    tested expanded as well. Expansion is skipped for anything with whitespace
-    in it: that is a command line rather than a path, and it is matched as
-    written.
+    Every string argument is tested as written and again with `~/` and
+    `$HOME/` written out, wherever in it they appear. The expansion before
+    this one fired only on a value that started with `~` and had no
+    whitespace -- a bare path -- so a `~` inside a Bash command line, which
+    is where an agent actually types one, was never expanded at all.
+
+    `./x` and `../x` are deliberately *not* resolved against a cwd. The agent's
+    was `no_sandbox`'s per-sample workspace and appears nowhere in the
+    tool-call record, so `resolve()` here resolved them against skillscope's
+    own instead and made the verdict depend on which directory the report was
+    run from. (`_normalise` does collapse an *interior* `/../` or `/./`,
+    which needs no cwd to be right.)
 
     The graded side reads its own installed skill by design, so a hit there is
     expected. It is the baseline where this means the room was not empty.
@@ -377,38 +453,27 @@ def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
         return None
 
     reason = f"read the skill's own files ({skill})"
+    spellings: list[str] = []
     for value in _strings(arguments):
         text = _normalise(value)
+        spellings.append(text)
+        if (expanded := _expand_home(text)) != text:
+            spellings.append(expanded)
+
+    for text in spellings:
         if any(_mentions(text, mark) for mark in marks):
             return reason
-        # `~/x` names the same file by another spelling, and expanding it is
-        # context-free: `$HOME` is the agent's own, recorded in the
-        # environment rather than inferred from where this is running.
-        #
-        # `./x` and `../x` are deliberately *not* resolved. Resolving them
-        # needs the agent's cwd, which is `no_sandbox`'s per-sample workspace
-        # and appears nowhere in the tool-call record -- so `resolve()` here
-        # resolved them against skillscope's own cwd instead, and made the
-        # verdict depend on which directory the report was run from. It never
-        # could serve the case it was written for.
-        if value.startswith("~") and not any(c.isspace() for c in value):
-            try:
-                expanded = _normalise(str(Path(value).expanduser()))
-            except (Exception, SystemExit):  # noqa: BLE001 -- not a path, then
-                continue
-            if any(_mentions(expanded, mark) for mark in marks):
-                return reason
 
     # The one mark that is not a path. `_bundled_skills` is the harness's own
     # staging directory, so its name in any argument is the agent having found
     # the staging area rather than a file of its own.
-    if any("_bundled_skills" in _normalise(v) for v in _strings(arguments)):
+    if any("_bundled_skills" in text for text in spellings):
         return reason
 
     # Last, and weaker on purpose: a call that read a directory the skill
     # sits in, wholesale. Answered after the exact matches above so a call
     # that provably named the skill keeps the reason that says so.
-    if any(_swept(_normalise(v), marks) for v in _strings(arguments)):
+    if any(_swept(text, marks) for text in spellings):
         return UNKNOWN_ROOM
     return None
 
