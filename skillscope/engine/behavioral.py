@@ -178,7 +178,10 @@ def _normalise(text: str) -> str:
 # Shapes that read a whole directory rather than one named file. A call
 # carrying one of these *and* naming a directory the skill sits in has swept
 # the skill up with everything else, without ever spelling its name.
-_SWEEPS = ("*", "?", "-r ", "-R ", "--recursive", "find ", "**", "rglob", "ls ")
+# Lowercase only: every caller passes `_normalise(...)`, so an upper-case
+# spelling here can never match. `-R ` sat in this tuple reading as
+# case-sensitive coverage and was dead the day it was written.
+_SWEEPS = ("*", "?", "-r ", "--recursive", "find ", "**", "rglob", "ls ")
 
 
 def _swept(text: str, marks: tuple[str, ...]) -> bool:
@@ -214,11 +217,34 @@ def _ancestors(marks: tuple[str, ...]) -> set[str]:
     vouch for. So `/home/u` is kept and `/home` is not. A sweep of a
     top-level directory does reach the skill, and flagging it would void
     verdicts across whole runs on the strength of a wildcard.
+
+    Where that top level is depends on the mark, and the two marks do not
+    have one in common. A single floor of three was calibrated for the
+    absolute mark and left the staged one -- `<skills_dir>/<name>`, three
+    segments on every registered harness -- with no ancestors at all, so
+    `ls .claude/skills/`, `find .claude -name SKILL.md` and `grep -r x
+    .claude/skills/` all came back as a clean room. That is the shape an
+    agent told nothing reaches for, on the one side whose emptiness the
+    whole command rests on.
+
+    So the staged mark keeps every segment and the absolute one does not.
+    The floor is not about depth, it is about what else lives there: `/home`
+    holds every user on the machine and `/tmp` holds every run, while the
+    staged mark is relative to a workspace made for one sample and each of
+    its segments is the harness's own -- `.claude` holds skills and nothing
+    else of ours. A sweep of it reaches the skill and almost nothing a
+    baseline would touch for another reason, and the answer it buys is
+    `UNKNOWN_ROOM` rather than contamination, so the conservative reading
+    costs a verdict nobody could vouch for anyway.
     """
     found: set[str] = set()
     for mark in marks:
         parts = mark.split("/")
-        while len(parts) > 3:
+        # Absolute (`/x/...`, or a drive letter after `_normalise`) spends a
+        # segment on the empty string before the root, so three there and
+        # one here leave `/home/u` and `.claude` respectively.
+        floor = 3 if (parts[0] == "" or ":" in parts[0]) else 1
+        while len(parts) > floor:
             parts = parts[:-1]
             if (parent := "/".join(parts)):
                 found.add(parent)

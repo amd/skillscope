@@ -1077,7 +1077,24 @@ def render_markdown(summary: dict) -> str:
         voided = [c for c in dirty if c["verdict"] == "ungraded"]
         standing = [c for c in dirty if c["verdict"] != "ungraded"]
         stood = [c for c in standing if c["verdict"] not in VOIDED_BY_CONTAMINATION]
-        elsewhere = [c for c in standing if c["verdict"] in VOIDED_BY_CONTAMINATION]
+        # The third group splits again on whether the baseline ever passed.
+        # `no_signal` is two findings under one name, and the both-sides-
+        # failed one reaches here too: `dirty_on_pass` fires only on an
+        # attempt that passed, so a baseline dirty on an attempt it failed
+        # is never voided and lands beside the cases that did pass clean.
+        # Told as one group, it informed a case whose baseline passed
+        # nothing at all that it had passed on a clean attempt.
+        # `passes_without` counts on the same basis `dirty_on_pass` reads --
+        # `_met` over `answered` -- so zero there means there was no passing
+        # attempt for contamination to have landed on.
+        elsewhere = [
+            c for c in standing
+            if c["verdict"] in VOIDED_BY_CONTAMINATION and c["passes_without"]
+        ]
+        never_passed = [
+            c for c in standing
+            if c["verdict"] in VOIDED_BY_CONTAMINATION and not c["passes_without"]
+        ]
         named = lambda group: ", ".join(  # noqa: E731
             f"`{c['id']}` ({c['verdict']})" for c in group
         )
@@ -1102,6 +1119,13 @@ def render_markdown(summary: dict) -> str:
                 f"({named(elsewhere)}): the baseline passed on an attempt "
                 "that was clean and was dirty on one it failed. Weaker "
                 "evidence than a run with no contamination at all."
+            )
+        if never_passed:
+            lines.append(
+                f"> {len(never_passed)} still stand ({named(never_passed)}): "
+                "the baseline passed nothing on any attempt, so no verdict "
+                "here rests on something it managed while holding more than "
+                "it should have."
             )
 
     unfired = totals["earns_it_unfired"]

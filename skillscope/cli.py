@@ -1088,8 +1088,15 @@ def cmd_staleness(args: argparse.Namespace) -> int:
     summary = staleness.summarize(
         comparisons,
         {
+            # Which agent graded, where it ran, and which build of it, the
+            # way every other graded report says it. Hand-written before,
+            # which spelled the engine without `_engine_label`'s
+            # normalisation and left out `harness` and `harness_version`
+            # altogether -- a reader holding a routing or behavioral report
+            # beside a staleness one found two keys missing and a third in
+            # a different alphabet.
+            **_leg_meta(args),
             "model": args.model,
-            "engine": args.engine,
             "effort": args.effort,
             "skills": skills,
             "extended": args.extended,

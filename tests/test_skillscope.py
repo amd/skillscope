@@ -36,7 +36,7 @@ import types
 import unittest
 from dataclasses import asdict
 import urllib.error
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 import skillscope
@@ -6462,6 +6462,50 @@ class _StubSample:
         self.epoch = epoch
 
 
+class TestARepeatIsTakenFromTheSampleThatRanIt(unittest.TestCase):
+    """`attempt` has to come off the sample's own epoch, not a constant.
+
+    Every other multi-attempt test builds `BehaviorOutcome`s by hand with
+    `attempt=i`, so the one line in production that derives the field --
+    `attempt=int(getattr(sample, "epoch", 1) or 1)` -- could have been
+    hard-coded to 1 or read the wrong attribute with the suite still green.
+    That line is what keeps `--attempts` repeats of one case apart: collapse
+    it and every repeat collides in `_no_duplicates`, and `_by_case` has one
+    attempt where the run had three.
+    """
+
+    @staticmethod
+    def _case(case_id: str):
+        return datasets.Case(
+            id=case_id, skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+
+    @staticmethod
+    def _checks():
+        return [{"kind": "expected_behavior", "expectation": "e",
+                 "passed": True, "detail": "", "graded": True}]
+
+    def test_each_repeat_carries_its_own_number(self) -> None:
+        log = types.SimpleNamespace(
+            status="success",
+            error=None,
+            samples=[_StubSample("c1", self._checks(), epoch=n)
+                     for n in (1, 2, 3)],
+        )
+        outcomes = engine_behavioral._outcomes(log, "alpha", [self._case("c1")])
+        self.assertEqual([o.attempt for o in outcomes], [1, 2, 3])
+
+    def test_a_sample_with_no_epoch_is_the_first_attempt(self) -> None:
+        # Ordinary single-pass runs, and any log written before epochs were
+        # asked for, have to read as attempt 1 rather than 0 -- `_by_case`
+        # and `_no_duplicates` both key on it.
+        sample = _StubSample("c1", self._checks())
+        del sample.epoch
+        log = types.SimpleNamespace(status="success", error=None, samples=[sample])
+        outcome = engine_behavioral._outcomes(log, "alpha", [self._case("c1")])[0]
+        self.assertEqual(outcome.attempt, 1)
+
+
 class TestASkillIsCreditedForTheHarmItPrevented(unittest.TestCase):
     """A guard the baseline broke and the skill held is the skill working.
 
@@ -6626,6 +6670,40 @@ class TestAnAgentThatWentLookingIsNotACleanRoom(unittest.TestCase):
         # A call that provably read the skill keeps the reason that says it.
         why = self._why({"command": f"cat {self.own}/SKILL.md"})
         self.assertIn("read the skill's own files", why or "")
+
+    def test_a_sweep_of_the_staged_copy_is_unknown_too(self) -> None:
+        # The other mark, and the one every test above missed. The staged
+        # copy is `<skills_dir>/<name>` -- `.claude/skills/run`, relative,
+        # three segments -- and `_ancestors` stopped above three, so it
+        # contributed nothing and every sweep of the staged directory read
+        # as a clean room. The absolute mark these other tests use is deep
+        # enough never to reach that edge.
+        #
+        # `no_sandbox` runs the agent with `cwd=workspace`, so these are the
+        # spellings an agent standing in one actually types.
+        from skillscope import harness as harnesses
+
+        skills_dir = harnesses.get().skills_dir
+        for command in (
+            f"ls {skills_dir}/",
+            f"find {PurePosixPath(skills_dir).parts[0]} -name SKILL.md",
+            f"grep -r rocm {skills_dir}/",
+            f"cat {skills_dir}/*/SKILL.md",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self._why({"command": command}),
+                    engine_behavioral.UNKNOWN_ROOM,
+                )
+
+    def test_the_top_of_the_machine_is_still_the_floor(self) -> None:
+        # What the floor is for, unchanged: the absolute mark stops short of
+        # the directory the whole machine lives under, because counting that
+        # would void verdicts across whole runs on the strength of a
+        # wildcard nowhere near the skill.
+        top = Path(self.own).parts[1]
+        self.assertIsNone(self._why({"command": f"ls -la /{top}/"}))
+        self.assertIsNone(self._why({"command": f"grep -r foo /{top}"}))
 
 
 class TestTheScorerTurnsAnUnansweredJudgeIntoAnUngradedCheck(unittest.TestCase):
@@ -7175,7 +7253,23 @@ class TestAFlagThatCannotDoAnythingIsRefused(unittest.TestCase):
         # was ever reached -- so it asserted the absence of a refusal that
         # could not have fired, and would have gone on passing had the guard
         # been written to refuse the default too.
-        self.assertNotIn("no staleness leg", self._run("--harness", "claude-code"))
+        #
+        # Stopped at the preflight rather than let through it. Past the
+        # guard the next thing `cmd_staleness` does is `_prepare_graded_run`,
+        # which probes model reachability and spawns the real `claude` CLI
+        # whenever credentials happen to be in the environment -- which they
+        # are on a developer machine and on a credentialed runner. This class
+        # is meant to start no agent and touch no network, and every sibling
+        # test is refused before reaching that call. Raising from the stub
+        # proves the guard did not fire *and* that execution got as far as
+        # the preflight.
+        with mock.patch.object(
+            cli, "_prepare_graded_run",
+            side_effect=SystemExit("error: preflight reached"),
+        ):
+            message = self._run("--harness", "claude-code")
+        self.assertNotIn("no staleness leg", message)
+        self.assertIn("preflight reached", message)
 
     def _pair(self, with_results, without_results):
         return staleness.pair(
@@ -7316,6 +7410,24 @@ class TestContaminationVoidsOnTheAttemptTheVerdictRestsOn(unittest.TestCase):
         report = staleness.render_markdown(staleness.summarize(comparisons, {}))
         self.assertIn("rest on a clean attempt", report)
         self.assertNotIn("rest on the baseline *failing*", report)
+
+    def test_a_baseline_that_passed_nothing_is_not_told_it_passed(self) -> None:
+        # The same paragraph, the other way wrong. `no_signal` covers both
+        # sides *failing* as well as both passing, and `dirty_on_pass` fires
+        # only on an attempt that passed -- so a baseline dirty on the one
+        # attempt it had, and failing it, is never voided and landed in the
+        # group whose sentence says the baseline "passed on an attempt that
+        # was clean". It passed on no attempt at all. One side one attempt:
+        # `--attempts` is not needed to reach this.
+        comparisons = staleness.pair(
+            [_outcome("c", False)],
+            [self._baseline(False, "another skill fired: beta")],
+        )
+        self.assertEqual(comparisons[0].verdict, "no_signal")
+        self.assertEqual(comparisons[0].passes_without, 0)
+        report = staleness.render_markdown(staleness.summarize(comparisons, {}))
+        self.assertNotIn("rest on a clean attempt", report)
+        self.assertIn("passed nothing on any attempt", report)
 
 
 class TestEarningItIsReportedWithWhetherTheSkillFired(unittest.TestCase):
@@ -8100,6 +8212,19 @@ class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
         with _staleness_harness(self) as harness:
             harness.run()
         self.assertTrue(all(half["finished"] for half in harness.reports[0]["meta"]["legs"]))
+
+    def test_the_report_names_the_harness_like_every_other_one(self) -> None:
+        # `cmd_staleness` hand-wrote its meta, so a staleness report was the
+        # one graded report with no `harness` or `harness_version` in it, and
+        # with the engine spelled without `_engine_label`'s normalisation.
+        # A reader holding this beside a routing or behavioral report found
+        # two keys missing and a third in a different alphabet.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        meta = harness.reports[0]["meta"]
+        self.assertEqual(meta["harness"], cli.harnesses.DEFAULT)
+        self.assertIn("harness_version", meta)
+        self.assertEqual(meta["engine"], "claude-code")
 
     def test_a_dataset_with_nothing_to_grade_runs_neither_half(self) -> None:
         with _staleness_harness(self, dataset=tier0_dataset("alpha")) as harness:
