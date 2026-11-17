@@ -54,12 +54,13 @@ credential question on Claude Code. Its baseline half has to be a room with
 **no** skills in it, so the runner's own are not noise there — they are the
 measurement. Either set one of those variables, or use `--engine
 claude-code`, whose guest has no user-level skills at all. It is Claude Code
-only: unlike `routing`, it refuses `--harness` outright rather than per
-harness, because there is no staleness leg for another one yet.
+only: unlike `routing`, which scales its refusal per harness, it refuses
+any `--harness` other than `claude-code`, because there is no staleness leg
+for another one yet.
 
 ## Run it from your CI
 
-Simply add an `evals.json` file to your skill and a workflow that points to our reusable workflow. This will triger all graders to run directly from your repo.
+Simply add an `evals.json` file to your skill and a workflow that points to our reusable workflow. This will trigger the three graders the workflow runs -- `structural`, `routing` and `behavioral` -- directly from your repo. `staleness` is not one of them: it runs both halves of every case and is meant to be asked for deliberately rather than on every push.
 
 <img src="assets/reusable_workflow.png" alt="Skillscope" width="720">
 

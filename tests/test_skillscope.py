@@ -6896,10 +6896,30 @@ class TestTheRecursiveShapesAnAgentActuallyTypes(unittest.TestCase):
             with self.subTest(spelling=spelling):
                 self.assertIn("read the skill's own files", self._why(spelling) or "")
 
-    def test_a_tilde_belonging_to_something_else_is_left_alone(self) -> None:
-        # The anchor on the expansion: `~` is a home only where a path can
-        # start. A backup file's suffix is not one.
-        self.assertIsNone(self._why("cat notes.txt~/x"))
+    def test_a_home_marker_that_is_not_one_is_left_alone(self) -> None:
+        # The anchor on the expansion: `~` or `$HOME` is a home only where a
+        # path can start, not where it continues a word.
+        #
+        # The command has to be one the expansion would turn *into* a hit if
+        # the anchor came off, or the test passes either way -- which is how
+        # the first version of this was written. `cat notes.txt~/<skill>`
+        # reads as clean with the anchor or without it, because expanding it
+        # puts the skill's path straight after `notes.txt` and `_mentions`
+        # rejects a mark that starts mid-word. For the word-character case
+        # the boundary check is what blocks the false positive and the
+        # anchor is belt and braces; these two are where the anchor is the
+        # only thing standing between the spelling and a hit, because what
+        # precedes the expansion is itself a boundary character.
+        with self._home_at(self.own.parent):
+            for command in (
+                f"cat $$HOME/{self.own.name}/SKILL.md",   # a PID, then a word
+                f"cat ~~/{self.own.name}/SKILL.md",
+            ):
+                with self.subTest(command=command):
+                    self.assertIsNone(
+                        self._why(command),
+                        "a home marker continuing another token is not a home",
+                    )
 
 
 class TestTheScorerTurnsAnUnansweredJudgeIntoAnUngradedCheck(unittest.TestCase):
@@ -7441,12 +7461,21 @@ class TestAFlakyNoSignalIsNotToldToDeleteTheCase(unittest.TestCase):
         self.assertIn("did not settle", report)
 
     def test_both_sides_managing_it_every_time_keeps_the_old_advice(self) -> None:
+        # "disagreed with itself" is the sentence this class is named for and
+        # appears nowhere in the code, so asserting its absence asserted
+        # nothing. The string the code emits is "did not settle".
         report = self._report([True, True], [True, True])
-        self.assertNotIn("disagreed with itself", report)
+        self.assertNotIn("did not settle", report)
         self.assertIn("already did this unaided", report)
 
     def test_one_attempt_a_side_can_never_read_as_unsettled(self) -> None:
-        self.assertNotIn("disagreed with itself", self._report([True], [True]))
+        # One attempt a side cannot disagree with itself, so the unsettled
+        # advice must not fire -- and the positive assertion is what makes
+        # this test capable of failing at all: without it the only check was
+        # for a string nothing emits.
+        report = self._report([True], [True])
+        self.assertNotIn("did not settle", report)
+        self.assertIn("already did this unaided", report)
 
 
 class TestAReportWithNothingGradedAssertsNothingAboutGradedCases(unittest.TestCase):
@@ -7469,7 +7498,12 @@ class TestAReportWithNothingGradedAssertsNothingAboutGradedCases(unittest.TestCa
             [_checked("c", True, [self._guard(True)])],
             [_checked("c", True, [self._guard(True)])],
         ))
-        self.assertNotIn("Every graded case either", report)
+        # The string the code emits is "Every graded case needed the skill";
+        # "Every graded case either" appears nowhere in it, so asserting the
+        # absence of that one asserted nothing at all. The positive
+        # assertion below is what this test rests on either way -- it is the
+        # sentence the branch under test prints.
+        self.assertNotIn("Every graded case needed the skill", report)
         self.assertIn("Every case here only forbids things", report)
 
     def test_a_broken_guard_is_not_followed_by_nothing_to_look_at(self) -> None:
@@ -8598,6 +8632,38 @@ class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
         legs = harness.reports[0]["meta"]["legs"]
         self.assertFalse(legs[0]["finished"])
         self.assertFalse(legs[1]["finished"])
+
+    def test_a_baseline_that_never_started_is_not_called_the_slow_one(self) -> None:
+        # The state above, read. The two halves share one bound, so a graded
+        # half that spends all of it leaves the baseline none: every baseline
+        # case returns failed without an agent starting. `_spend_lead` read
+        # only the baseline's flag, so the headline said it "was still going
+        # 0s in" -- a half that never ran, reported as the slow exploring one
+        # this whole command exists to find. Asserting the flags alone left
+        # that green, which is why this asserts the sentence.
+        with _staleness_harness(self) as harness:
+            bound = deadline.Deadline(seconds=600)
+            bound.interrupted = True
+            with mock.patch.object(deadline, "active", lambda: bound):
+                harness.run()
+        report = staleness.render_markdown(harness.reports[0])
+        self.assertIn("before the baseline could start", report)
+        self.assertNotIn("The baseline never finished", report)
+        self.assertNotIn("was still going 0s in", report)
+
+    def test_a_baseline_the_bound_stopped_partway_is_still_a_floor(self) -> None:
+        # The control, and the sentence that must survive: the graded half
+        # finished, the baseline was stopped mid-run. That is the half-hour
+        # baseline the command was written for, and it is still said as one.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        summary = harness.reports[0]
+        graded, baseline = summary["meta"]["legs"]
+        graded.update(finished=True, wall_time_s=143.0)
+        baseline.update(finished=False, wall_time_s=1800.0)
+        report = staleness.render_markdown(summary)
+        self.assertIn("The baseline never finished", report)
+        self.assertNotIn("before the baseline could start", report)
 
     def test_an_unhurried_run_marks_both_halves_finished(self) -> None:
         with _staleness_harness(self) as harness:

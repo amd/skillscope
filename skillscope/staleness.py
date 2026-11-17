@@ -767,12 +767,31 @@ def _spend_lead(halves: list[dict]) -> list[str]:
     against a baseline still going half an hour later, and the report said
     nothing about it.
 
-    Three shapes, because the honest sentence differs. A baseline that was
-    stopped is a floor and is said as one. A graded half slower than its
-    baseline is a finding and is said plainly rather than suppressed: a skill
-    that costs the agent time is something its author wants to know.
+    Four shapes, because the honest sentence differs. A baseline that was
+    stopped is a floor and is said as one -- but only where it ran at all. A
+    graded half slower than its baseline is a finding and is said plainly
+    rather than suppressed: a skill that costs the agent time is something
+    its author wants to know.
+
+    The halves share one bound, so the graded half can spend all of it and
+    leave the baseline none: every baseline case then returns failed without
+    an agent ever starting. Both halves are marked unfinished, which is true,
+    and reading only the baseline's flag told the reader it "was still going
+    0s in" -- a baseline that never ran, reported as the slow exploring one
+    this command exists to find. The graded half's flag is what tells the two
+    apart.
     """
     graded, baseline = halves
+    if not graded["finished"]:
+        return [
+            "> **The bound ran out before the baseline could start.** The "
+            f"graded half used the whole {_duration(graded['wall_time_s'])} "
+            "and was stopped partway, so there is no baseline to compare it "
+            "against -- the cases below are reported against a half that "
+            "never ran. Raise `--timeout`, or cut the run down with "
+            "`--max-cases`, and read the verdicts only after that.",
+            "",
+        ]
     if not baseline["finished"]:
         return [
             f"> **The baseline never finished.** The graded half took "

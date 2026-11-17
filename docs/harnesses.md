@@ -148,4 +148,5 @@ Claude Code, and a harness other than it cannot yet use them:
   than a harness's own `skills_dir`;
 * **`staleness`**: its baseline is only a measurement if the room is empty, and
   the check that establishes that reads Claude Code's credentials and no other
-  harness's, so it refuses `--harness` outright rather than per harness.
+  harness's, so it refuses any `--harness` other than `claude-code` rather
+  than scaling the refusal per harness.

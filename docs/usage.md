@@ -448,9 +448,9 @@ routing leg at all unless one of the harness's credential variables is set
 config dir away from the runner's own.
 
 `staleness` is stricter, and not on the same terms. It has no leg for any
-harness but Claude Code yet, so it refuses `--harness` outright whatever
-credentials are present, rather than scaling the refusal per harness the way
-routing does. On Claude Code it then asks routing's question as well, because
+harness but Claude Code yet, so it refuses any `--harness` other than
+`claude-code` whatever credentials are present, rather than scaling the
+refusal per harness the way routing does. On Claude Code it then asks routing's question as well, because
 there the empty room is not one input to the measurement, it is the
 measurement. Refusing beats being quietly wrong about every case.
 
