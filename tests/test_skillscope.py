@@ -6470,8 +6470,8 @@ class TestARepeatIsTakenFromTheSampleThatRanIt(unittest.TestCase):
     `attempt=int(getattr(sample, "epoch", 1) or 1)` -- could have been
     hard-coded to 1 or read the wrong attribute with the suite still green.
     That line is what keeps `--attempts` repeats of one case apart: collapse
-    it and every repeat collides in `_no_duplicates`, and `_by_case` has one
-    attempt where the run had three.
+    it and `_by_case` has one attempt where the run had three, with the
+    others silently dropped.
     """
 
     @staticmethod
@@ -6498,7 +6498,7 @@ class TestARepeatIsTakenFromTheSampleThatRanIt(unittest.TestCase):
     def test_a_sample_with_no_epoch_is_the_first_attempt(self) -> None:
         # Ordinary single-pass runs, and any log written before epochs were
         # asked for, have to read as attempt 1 rather than 0 -- `_by_case`
-        # and `_no_duplicates` both key on it.
+        # keys on it.
         sample = _StubSample("c1", self._checks())
         del sample.epoch
         log = types.SimpleNamespace(status="success", error=None, samples=[sample])
@@ -7478,6 +7478,87 @@ class TestAFlakyNoSignalIsNotToldToDeleteTheCase(unittest.TestCase):
         self.assertIn("already did this unaided", report)
 
 
+class TestTheCaveatsTheReportCarries(unittest.TestCase):
+    """Report branches that each survived being turned off.
+
+    All of them are prose or a key in the JSON rather than a verdict, so
+    none of them can make the command reach a wrong answer. What they can do
+    is let a reader take a partial run for a whole one, or compare two runs
+    that are not comparable, which is the one way this report misleads
+    without being wrong.
+    """
+
+    @staticmethod
+    def _summary(comparisons, **meta):
+        return staleness.summarize(comparisons, meta)
+
+    def _report(self, comparisons, **meta):
+        return staleness.render_markdown(self._summary(comparisons, **meta))
+
+    @staticmethod
+    def _pair(**kwargs):
+        return staleness.pair(
+            [_outcome("c", True, **kwargs)], [_outcome("c", False, **kwargs)]
+        )
+
+    def test_a_capped_run_says_it_covered_only_part_of_the_suite(self) -> None:
+        self.assertIn("covered only the first 2 case(s)",
+                      self._report(self._pair(), max_cases=2))
+        self.assertNotIn("covered only the first", self._report(self._pair()))
+
+    def test_a_multi_attempt_run_says_what_it_compares_with(self) -> None:
+        # The verdict's meaning moves with the attempt count, and nothing
+        # else in the report says so.
+        many = staleness.pair(
+            [_outcome("c", True, attempt=1), _outcome("c", True, attempt=2)],
+            [_outcome("c", False, attempt=1), _outcome("c", False, attempt=2)],
+        )
+        self.assertIn("not with runs at a different count", self._report(many))
+        self.assertNotIn("not with runs at a different count",
+                         self._report(self._pair()))
+
+    def test_a_room_nobody_could_check_is_named_as_such(self) -> None:
+        comparisons = self._pair()
+        comparisons[0].baseline_contaminated = engine_behavioral.UNKNOWN_ROOM
+        self.assertIn("could not be checked for a clean baseline",
+                      self._report(comparisons))
+        self.assertEqual(
+            self._summary(comparisons)["totals"]["baseline_unknown"], 1
+        )
+
+    def test_errored_attempts_are_said_out_loud(self) -> None:
+        # A reader comparing `2/2` against `3/3` on the next case cannot
+        # otherwise tell the first was asked three times.
+        comparisons = staleness.pair(
+            [_outcome("c", True, attempt=1),
+             _outcome("c", False, attempt=2, error="boom")],
+            [_outcome("c", False, attempt=1)],
+        )
+        self.assertIn("attempt(s) errored and are out of", self._report(comparisons))
+        self.assertNotIn("errored and are out of", self._report(self._pair()))
+
+    def test_a_detail_cannot_break_the_table_it_sits_in(self) -> None:
+        # A pipe closes the cell and a newline closes the row, so either one
+        # turns the rest of the report into something the reader cannot
+        # parse. Both come from a judge's own words.
+        self.assertEqual(
+            staleness._detail(
+                {"passed": False, "detail": "it ran `a | b`\nthen stopped"}
+            ),
+            "it ran `a \\| b` then stopped",
+        )
+
+    def test_the_summary_counts_each_skill_separately(self) -> None:
+        comparisons = staleness.pair(
+            [_outcome("a", True, skill="one"), _outcome("b", True, skill="two")],
+            [_outcome("a", False, skill="one"), _outcome("b", True, skill="two")],
+        )
+        per_skill = self._summary(comparisons)["per_skill"]
+        self.assertEqual(sorted(per_skill), ["one", "two"])
+        self.assertEqual(per_skill["one"]["earns_it"], 1)
+        self.assertEqual(per_skill["two"]["earns_it"], 0)
+
+
 class TestAReportWithNothingGradedAssertsNothingAboutGradedCases(unittest.TestCase):
     """Sentences whose condition is not the thing they assert.
 
@@ -7660,10 +7741,8 @@ class TestTheCostControlsBindBothHalvesEqually(unittest.TestCase):
 class TestAFlagThatCannotDoAnythingIsRefused(unittest.TestCase):
     """The repo's habit: refuse an argument rather than accept and ignore it.
 
-    A `--from-logs` rebuild starts no agent. The attempts, the cap and the
-    concurrency are properties of the run that wrote the logs, so accepting
-    them would let somebody believe they had re-measured at three attempts
-    when they had reread one.
+    A flag the command cannot act on is refused rather than accepted and
+    ignored, so nobody believes they measured something they did not.
     """
 
     def _run(self, *argv):
@@ -7676,7 +7755,11 @@ class TestAFlagThatCannotDoAnythingIsRefused(unittest.TestCase):
         self.assertIn("would run nothing", self._run("--attempts", "0"))
 
     def test_a_negative_count_is_refused(self) -> None:
+        # Both halves of the condition. Only `--concurrency` was covered, so
+        # dropping `--max-cases` from it left a cap of -1 to reach
+        # `_gradable_cases`, where a negative slice silently selects nothing.
         self.assertIn("cannot be negative", self._run("--concurrency", "-1"))
+        self.assertIn("cannot be negative", self._run("--max-cases", "-1"))
 
     def test_a_harness_with_no_staleness_leg_is_refused(self) -> None:
         # The baseline half is only a measurement if the room is empty, and
@@ -7694,10 +7777,10 @@ class TestAFlagThatCannotDoAnythingIsRefused(unittest.TestCase):
         # The refusal is about the room check, not about the flag. Naming the
         # default explicitly has to behave exactly like not naming it.
         #
-        # This used to pass `--from-logs`, which returned before the guard
-        # was ever reached -- so it asserted the absence of a refusal that
-        # could not have fired, and would have gone on passing had the guard
-        # been written to refuse the default too.
+        # This used to pass a flag that returned before the guard was ever
+        # reached -- so it asserted the absence of a refusal that could not
+        # have fired, and would have gone on passing had the guard been
+        # written to refuse the default too.
         #
         # Stopped at the preflight rather than let through it. Past the
         # guard the next thing `cmd_staleness` does is `_prepare_graded_run`,
@@ -8413,8 +8496,9 @@ class TestAWalkThatDidNotFinishCannotVouchForTheRoom(unittest.TestCase):
 
     `_activation_event` reaches `call.function` with no `getattr` guard,
     unlike every other accessor on this path, so an unexpected call shape is
-    the realistic way in -- and `--from-logs`, reading logs this code did not
-    write, is exactly where an unexpected shape would come from.
+    the realistic way in -- and the offline reader this round scoped out,
+    which will read logs this code did not write, is exactly where an
+    unexpected shape would come from.
     """
 
     def setUp(self) -> None:
@@ -8785,6 +8869,22 @@ class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
         with _staleness_harness(self) as harness:
             harness.run()
         self.assertTrue(all(half["finished"] for half in harness.reports[0]["meta"]["legs"]))
+
+    def test_the_caps_that_bound_a_run_are_recorded_in_its_report(self) -> None:
+        # The report's own caveat about a partial run is driven off these
+        # keys, so dropping them silently turns a capped run into one that
+        # reads as whole. Recorded only when they bound: a `0` would read as
+        # a cap of nothing rather than as no cap.
+        with _staleness_harness(self) as harness:
+            harness.run(extra=["--max-cases", "2", "--concurrency", "4"])
+        meta = harness.reports[0]["meta"]
+        self.assertEqual(meta["max_cases"], 2)
+        self.assertEqual(meta["concurrency"], 4)
+
+        with _staleness_harness(self) as plain:
+            plain.run()
+        self.assertNotIn("max_cases", plain.reports[0]["meta"])
+        self.assertNotIn("concurrency", plain.reports[0]["meta"])
 
     def test_the_report_names_the_harness_like_every_other_one(self) -> None:
         # `cmd_staleness` hand-wrote its meta, so a staleness report was the

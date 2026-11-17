@@ -346,9 +346,11 @@ def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | N
     run.
 
     `recorded` is `SKILL_DIR_KEY` off the log: where the skill was on the
-    machine that ran the agent. Preferred over resolving it here, because
-    resolving it here resolves it against *this* process. A reader standing
-    somewhere else is not evidence about where the agent stood.
+    machine that ran the agent. It has no caller in the package yet, for the
+    reason `_inspect_room`'s `skill_dir` has none -- the offline reader is
+    scoped out of this round -- and exists because resolving the path here
+    resolves it against *this* process. A reader standing somewhere else is
+    not evidence about where the agent stood.
 
     `None` when neither source can say where the skill was, which is an
     unknown room rather than a clean one. Returning the staged mark alone
@@ -483,9 +485,15 @@ def _inspect_room(
 ) -> tuple[str | None, str | None]:
     """`(the skill that fired, why the room was not what it claimed)`.
 
-    `skill_dir` is `SKILL_DIR_KEY` off the log, passed by a reader rebuilding
-    someone else's run. A live run leaves it `None` and resolves the skill
-    where it already knows it is.
+    `skill_dir` is `SKILL_DIR_KEY` off the log. Nothing in the package passes
+    it today: the offline reader it is for -- `--from-logs`, which rebuilt a
+    comparison from logs on disk -- was cut from this round and comes back on
+    its own. The parameter and the key are kept together deliberately, because
+    the key is written to every log from now on and a reader that arrives to
+    find the seam missing would have to resolve the skill against *itself*,
+    which is the one answer that is always wrong for somebody else's run. A
+    live run leaves it `None` and resolves the skill where it already knows it
+    is; the tests cover the other branch until that reader lands.
 
     One walk over the tool calls, answering both questions, because the second
     is only meaningful beside the first. `detect_activation` reports a skill
@@ -803,8 +811,9 @@ def run(
                 # Repeats are inspect's epochs: one task, one log, each case
                 # sampled `attempts` times with the epoch on every sample.
                 # Running the leg twice over would have written two logs a
-                # side, which is the shape `staleness._no_duplicates` refuses
-                # precisely because it cannot tell it from a collision.
+                # side, which a reader pairing them cannot tell from two logs
+                # that collided -- so the repeats stay inside one log and the
+                # epoch on each sample is what tells them apart.
                 epochs=attempts,
                 **({"max_samples": concurrency} if concurrency else {}),
                 # A sample that raises is that case's failure, not the batch's.
