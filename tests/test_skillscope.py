@@ -7618,6 +7618,26 @@ class TestTheCostControlsBindBothHalvesEqually(unittest.TestCase):
         self.assertEqual(seen.get("epochs"), 3)
         self.assertEqual(seen.get("max_samples"), 8)
 
+    def test_which_half_it_is_reaches_the_task(self) -> None:
+        # `baseline` names the task, stamps `BASELINE_KEY` and tags the log.
+        # Dropping it from this call builds a graded task out of a baseline
+        # run, so the two halves land in the log directory under one name
+        # and the metadata says both were graded.
+        seen = {}
+        with mock.patch.object(engine_behavioral, "sandbox_spec"), \
+                mock.patch.object(engine_behavioral, "stop_requested", lambda: False), \
+                mock.patch.object(engine_behavioral, "build_task",
+                                  lambda *a, **k: seen.update(k) or "task"), \
+                mock.patch.object(engine_behavioral, "models", mock.MagicMock()), \
+                mock.patch.object(engine_behavioral, "run_eval",
+                                  lambda ev, task, **kw: []), \
+                contextlib.redirect_stdout(io.StringIO()):
+            engine_behavioral.run(
+                ["alpha"], self._cases()[:1], "mockllm/model", "high",
+                solver_factory=None, baseline=True,
+            )
+        self.assertTrue(seen.get("baseline"))
+
     def test_an_ordinary_run_asks_for_nothing_extra(self) -> None:
         # `behavioral` and `routing` must be untouched by flags only
         # `staleness` carries.
@@ -8073,6 +8093,7 @@ class TestTheRoomIsJudgedWhereTheRunWasNotWhereTheReaderIs(unittest.TestCase):
             "SKILL_DIR_KEY", inspect.getsource(engine_verify.build_task)
         )
 
+
     def test_the_verdict_is_the_same_from_any_directory(self) -> None:
         # The property, asserted as a property. A relative path resolves
         # against whoever is running, so resolving one here made the answer a
@@ -8167,6 +8188,81 @@ class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
         )["totals"]
         self.assertEqual(totals["earns_it_unfired"], 1)
         self.assertEqual(totals["earns_it"], 1)
+
+
+class TestTheSandboxedBaselineIsGivenNoSkill(unittest.TestCase):
+    """The baseline half of the `claude-code` leg, built and read.
+
+    `install` was asserted by grepping this function's source, so the whole
+    of what it controls -- the staging solver, the agent's own `skills`
+    argument, the task name, the metadata and the tags -- could be wired to
+    the graded value with the suite green. That failure is silent in the
+    worst way: the baseline becomes a second graded run, every case comes
+    out `no_signal`, and the report says the skill earns nothing.
+
+    `inspect_swe` is not installed in the unit job, so `claude_code` is
+    stubbed the way `TestEveryLegThinksAsHardAsItWasTold` stubs it. The stub
+    returns a real solver so `chain` still builds.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        # The behavioural dataset, not `tier0_dataset`: `verify.run` skips a
+        # skill with no case asserting a behaviour, so the graded leg would
+        # never be built.
+        self.repo.skill("run", dataset=_behavioral_dataset("run"))
+        self.repo.activate()
+        self.cases = [c for c in datasets.load_all_cases()
+                      if c.skill == "run" and c.has_behavior][:1]
+
+    def _task(self, install: bool):
+        seen: dict = {}
+        fake = types.ModuleType("inspect_swe")
+        fake.claude_code = lambda **k: seen.update(agent=k) or engine_verify._ensure_workdir()
+        staging = lambda skills: seen.update(staged=skills) or engine_verify._ensure_workdir()  # noqa: E731
+        with mock.patch.dict(sys.modules, {"inspect_swe": fake}), \
+                mock.patch.object(engine_verify, "complete_skills_solver", staging):
+            task = engine_verify.build_task(
+                "run", self.cases, "mockllm/model", effort="high", install=install,
+            )
+        return task, seen
+
+    def test_the_baseline_stages_nothing_and_is_told_nothing(self) -> None:
+        task, seen = self._task(install=False)
+        self.assertEqual(seen["staged"], {}, "the baseline staged the skill")
+        self.assertEqual(seen["agent"]["skills"], [], "the agent was given the skill")
+        self.assertTrue(task.metadata[engine_behavioral.BASELINE_KEY])
+        self.assertIn("baseline", task.tags)
+        self.assertTrue(task.name.endswith("-baseline"))
+
+    def test_the_graded_half_gets_the_skill_both_ways(self) -> None:
+        # The control. Each assertion above reads the same on both halves
+        # unless the other half is built too.
+        task, seen = self._task(install=True)
+        self.assertEqual(list(seen["staged"]), ["run"])
+        self.assertEqual(len(seen["agent"]["skills"]), 1)
+        self.assertFalse(task.metadata[engine_behavioral.BASELINE_KEY])
+        self.assertIn("graded", task.tags)
+        self.assertFalse(task.name.endswith("-baseline"))
+
+    def test_the_runner_hands_its_half_down_to_the_task(self) -> None:
+        # The join: `run(install=False)` has to reach `build_task`. Dropping
+        # it there builds a graded task from a baseline run, which no
+        # assertion above can see.
+        seen: dict = {}
+        with mock.patch.object(engine_verify, "require", lambda: None), \
+                mock.patch.object(engine_verify.sandbox_spec, "require_provider",
+                                  lambda: None), \
+                mock.patch.object(engine_verify, "build_task",
+                                  lambda *a, **k: seen.update(k) or "task"), \
+                mock.patch.object(engine_verify.behavioral, "run_eval",
+                                  lambda ev, task, **kw: seen.update(kw) or []):
+            engine_verify.run(
+                ["run"], self.cases, "mockllm/model", "high",
+                install=False, attempts=3,
+            )
+        self.assertFalse(seen["install"])
+        self.assertEqual(seen["epochs"], 3)
 
 
 class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
@@ -8596,6 +8692,26 @@ class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
             harness.run()
         self.assertEqual(harness.calls[0]["cases"], harness.calls[1]["cases"])
         self.assertTrue(harness.calls[0]["cases"])
+
+    def test_the_baseline_half_is_given_a_config_dir_of_its_own(self) -> None:
+        # The dir the comment calls what the whole command rests on: without
+        # it the runner's own `~/.claude/skills` are registered beside the
+        # staged ones and the baseline is this machine's skills minus the one
+        # under test. The harness recorded it and nothing read it, so handing
+        # both halves the same dir -- or `None` -- was green.
+        # The isolation check reads the environment, which another test in
+        # the suite may have cleared, so it is answered here rather than left
+        # to whatever ran before this. Its own refusal is covered by
+        # `test_the_command_refuses_an_unisolatable_host_run`.
+        with _staleness_harness(self) as harness:
+            with mock.patch.object(cli.routing, "can_isolate_config", lambda: True):
+                harness.run(engine="claude-code-no-sandbox")
+        graded, baseline = harness.calls
+        self.assertIsNotNone(baseline["config_dir"], "the baseline shares the host's")
+        self.assertNotEqual(
+            graded["config_dir"], baseline["config_dir"],
+            "one dir between the halves is one room between them",
+        )
 
     def test_the_two_halves_are_billed_apart_in_the_report(self) -> None:
         # End to end, through the real `cmd_staleness`. The stub spends a
