@@ -91,11 +91,13 @@ SHARED_NEGATIVES = PACKAGE_DIR / "data" / "negatives.json"
 # What a new skill copies to start.
 TEMPLATE = PACKAGE_DIR / "data" / "TEMPLATE.json"
 
-# Tier 0, the bar every skill clears before it can ship. Cheap to meet (five
-# prompts, no hardware, no assertions) and enforced structurally so a thin
-# dataset fails the structural checks without spending a single token.
-MIN_POSITIVE_CASES = 3
-MIN_NEGATIVE_CASES = 2
+# Tier 0, the bar every skill clears before it can ship. Cheap to meet by
+# default (five prompts, no hardware, no assertions) and enforced structurally
+# so a thin dataset fails without spending a single token. The numbers live on
+# the config rather than here, because a repo adopting this harness over a
+# catalogue that predates it needs to lower them and ratchet them back up; see
+# `min_positive` on `config.Config` for why the command line is the only place
+# that decision can be made.
 
 # A dataset is one array of evaluations, and every evaluation answers the
 # routing question outright rather than leaving it to be inferred.
@@ -504,33 +506,44 @@ def structural_errors(skills: list[str] | None = None) -> list[str]:
 
 
 def tier0_errors(skill: str, cases: list[Case]) -> list[str]:
-    """Whether `skill` meets the mandatory coverage bar.
+    """Whether `skill` meets this repo's coverage bar.
 
-    Counted over the required dataset alone (evals.json).
+    Counted over the required dataset alone (evals.json). The bar is
+    `min_positive` and `min_negative` on the active config, which only the
+    command line sets; both at zero is a repo saying datasets are not required
+    of it yet, and then a skill without one is not a finding.
     """
+    cfg = config.active()
+    required = cfg.min_positive or cfg.min_negative
+
     if not dataset_path(skill).is_file():
+        if not required:
+            return []
         return [
             f"{skill}: no eval dataset. Every skill needs "
             f"`{DATASET_RELPATH.as_posix()}` in its folder with at least "
-            f"{MIN_POSITIVE_CASES} evaluations where `{TRIGGER_KEY}` is true "
-            f"and {MIN_NEGATIVE_CASES} where it is false. "
+            f"{cfg.min_positive} evaluations where `{TRIGGER_KEY}` is true "
+            f"and {cfg.min_negative} where it is false. "
             "Copy the template from `skillscope template` to start."
         ]
 
+    # A dataset that exists is still read against the bar, whatever the bar is.
+    # A repo that has turned the requirement off has said it does not yet
+    # expect every skill to ship one, not that the ones that do may be empty.
     errors: list[str] = []
     positive = sum(1 for c in cases if c.skill_should_trigger)
     negative = len(cases) - positive
-    if positive < MIN_POSITIVE_CASES:
+    if positive < cfg.min_positive:
         errors.append(
             f"{skill}: {positive} evaluation(s) with `{TRIGGER_KEY}: true`; "
-            f"Tier 0 needs at least {MIN_POSITIVE_CASES}. Add prompts a real "
-            "user would type."
+            f"this repo asks for at least {cfg.min_positive}. Add prompts a "
+            "real user would type."
         )
-    if negative < MIN_NEGATIVE_CASES:
+    if negative < cfg.min_negative:
         errors.append(
             f"{skill}: {negative} evaluation(s) with `{TRIGGER_KEY}: false`; "
-            f"Tier 0 needs at least {MIN_NEGATIVE_CASES}. Add prompts close to "
-            "this skill's domain that should NOT trigger it."
+            f"this repo asks for at least {cfg.min_negative}. Add prompts "
+            "close to this skill's domain that should NOT trigger it."
         )
     return errors
 

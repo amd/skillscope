@@ -299,12 +299,32 @@ def routing_gate(totals: dict, min_accuracy: float) -> str | None:
 
 def cmd_structural(args: argparse.Namespace) -> int:
     """Structural checks over every skill folder, dataset, and reference."""
+    # Before the gate, not after it: a run that fails still has to say which
+    # bar it was holding skills to. Printing this only on success would hide
+    # exactly the case worth seeing -- a repo whose datasets are not required,
+    # failing on something else -- behind a passing run.
+    cfg = config.active()
+    # Flushed, because the failures below go to stderr: unflushed stdout is
+    # block-buffered down a pipe, and the line would land after the report it
+    # is meant to frame in every CI log that captures both.
+    if cfg.min_positive or cfg.min_negative:
+        print(
+            f"[evals] dataset bar: {cfg.min_positive} positive, "
+            f"{cfg.min_negative} negative per skill.",
+            flush=True,
+        )
+    else:
+        print(
+            "[evals] dataset bar: off. Skills are not required to ship "
+            "`evals/evals.json`; the ones that do are still read.",
+            flush=True,
+        )
+
     found = _structural_or_exit()
     skills = datasets.skills_with_datasets()
     # Extended datasets are checked regardless of --extended, so count them
     # here too rather than reporting fewer cases than were checked.
     cases = datasets.load_all_cases(extended=True)
-    cfg = config.active()
     print(f"[evals] OK: {len(cfg.skills)} skill folder(s) in shape.")
     print(
         f"[evals] OK: {len(cases)} case(s) across {len(skills)} skill(s) "
@@ -882,6 +902,37 @@ def _add_skills_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dataset_bar_arguments(parser: argparse.ArgumentParser) -> None:
+    """How much of a dataset this repo asks of a skill.
+
+    A flag and nothing else. The bar a skill is measured against is the repo's
+    policy, not the skill author's, so it has to live somewhere a skill cannot
+    reach: see `min_positive` on `config.Config`.
+    """
+    parser.add_argument(
+        "--min-positive",
+        default="",
+        metavar="N",
+        help=(
+            "Evaluations a skill needs with `skill_should_trigger: true`. "
+            f"Default: {config.DEFAULT_MIN_POSITIVE}. Lower it to adopt these "
+            "checks over a catalogue that predates them, then raise it as the "
+            "datasets land."
+        ),
+    )
+    parser.add_argument(
+        "--min-negative",
+        default="",
+        metavar="N",
+        help=(
+            "Evaluations a skill needs with `skill_should_trigger: false`. "
+            f"Default: {config.DEFAULT_MIN_NEGATIVE}. Zero for both this and "
+            "--min-positive means a skill need not ship a dataset at all; the "
+            "folder, frontmatter and reference checks still run."
+        ),
+    )
+
+
 def _add_docs_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--docs",
@@ -924,6 +975,10 @@ def _add_routing_room_argument(
 def _add_graded_arguments(parser: argparse.ArgumentParser) -> None:
     """Flags shared by the routing and behavioral commands."""
     _add_skills_argument(parser)
+    # A graded run gates on the same dataset bar before it spends anything, so
+    # it takes the same flags. Without them a workflow that lowered the bar for
+    # `structural` would still be refused by `routing` on the next line.
+    _add_dataset_bar_arguments(parser)
     parser.add_argument(
         "--skill",
         default="",
@@ -1114,6 +1169,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_skills_argument(structural_parser)
+    _add_dataset_bar_arguments(structural_parser)
     _add_docs_argument(structural_parser)
     structural_parser.add_argument(
         "--skill-files",
@@ -1341,6 +1397,8 @@ def _configure(args: argparse.Namespace) -> None:
             "behavior_runner",
             "behavior_os",
             "scoped_runner",
+            "min_positive",
+            "min_negative",
         )
     }
     settings["scoped_gate"] = getattr(args, "scoped_gate", "") or ""

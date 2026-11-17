@@ -29,6 +29,27 @@ Every skill ships one dataset at `<skill>/evals/evals.json`. A prompt alone
 grades routing; add expectations and it also runs end to end. How to write one
 is in [authoring-evals.md](authoring-evals.md).
 
+By default a skill needs three evaluations that expect it to fire and two that
+expect it not to, and a skill with no dataset at all fails the structural
+check. That is the bar a new catalogue should hold, and it is the wrong bar for
+an existing one: a repo adopting skillscope over fifty skills written before it
+cannot write two hundred and fifty prompts before its first green run, and the
+alternative it reaches for is to not run the checks. `--min-positive` and
+`--min-negative` lower the bar so the folder, frontmatter and reference checks
+can start working immediately, and get raised as the datasets land. Zero for
+both turns the dataset requirement off; a skill that ships a dataset anyway is
+still read against whatever the bar is.
+
+**Where that bar may be set is the point.** It is a flag, so under CI it is a
+line in the workflow, which is a path a repo can put behind branch protection
+and code owners. There is no file in the repo under test, none inside a skill,
+and no environment variable the CLI will read. The bar a skill is measured
+against is not the skill author's to set: were it a file beside the skill, the
+same pull request that adds a thin dataset could lower the number it is judged
+by, and a reviewer would have to notice the second change to understand the
+first. The applied bar is printed at the top of every structural run, passing
+or failing, so a report always says what it was holding skills to.
+
 ## Configuring the repo under test
 
 There is no config file. Everything about your repo is a CLI flag, or the same
@@ -46,6 +67,8 @@ places to disagree.
 | `--exclude-url` | `excluded_urls` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
 | `--skill-files` | `skill_files` | none | Files every skill must ship beside its `SKILL.md`, such as a governance card. |
 | `--skill-sections` | `skill_sections` | none | `##` headings each of those markdown files must have something under, such as `Description,Owner,License`. |
+| `--min-positive` | `min_positive` | `3` | Evaluations a skill needs with `skill_should_trigger: true`. |
+| `--min-negative` | `min_negative` | `2` | Evaluations it needs with `skill_should_trigger: false`. Zero for both means a skill need not ship a dataset at all. |
 | `--behavior-runner` | `behavior_runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavioral leg. |
 | `--behavior-os` | `behavior_os` | `Linux` | Platforms a skill runs on when its `machine.yml` does not narrow them. |
 | `--scoped-runner` | `scoped_runner` | reuses `behavior_runner` | Base labels for a leg whose skill asks for hardware labels. |
@@ -410,6 +433,8 @@ Naming several, and holding them to different bars:
 | `behavioral` | `required` | `required`, `optional`, or `off`. |
 | `runner` | `ubuntu-latest` | `runs-on` for every job: one label, or a JSON array of them. |
 | `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
+| `min_positive` | (skillscope's own) | Evaluations a skill needs with `skill_should_trigger: true`. |
+| `min_negative` | (skillscope's own) | Evaluations it needs with `skill_should_trigger: false`. Zero for both means a skill need not ship a dataset. |
 | `api_key` | (none) | The model API key, mapped from the caller's vault. One secret, not the whole set. |
 | `api_key_secret` | `ANTHROPIC_API_KEY` | Name to look up under `secrets: inherit`, if you would rather pass the vault than map one key. |
 | `api_base_url` | (none) | Base URL of the gateway that issued the key. Blank talks to the provider directly. |

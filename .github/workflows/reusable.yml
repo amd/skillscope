@@ -107,6 +107,22 @@ on:
         description: "`runs-on` for every job: one label, or a JSON array of them."
         type: string
         default: ubuntu-latest
+      min_positive:
+        description: >-
+          Evaluations a skill needs with `skill_should_trigger: true`. Blank
+          uses skillscope's own default. Zero for both this and min_negative
+          means a skill need not ship a dataset at all, which is how a
+          catalogue adopts these checks before it has written one. It lives
+          here, in the workflow, because the bar a skill is measured against is
+          not the skill author's to set.
+        type: string
+        default: ""
+      min_negative:
+        description: >-
+          Evaluations a skill needs with `skill_should_trigger: false`. Blank
+          uses skillscope's own default. See min_positive.
+        type: string
+        default: ""
       min_accuracy:
         description: >-
           Fail a routing leg below this accuracy (0-1). The default fails on any
@@ -285,6 +301,13 @@ jobs:
         uses: ./.skillscope-action
         with:
           command: structural
+          # `!= ''` rather than the bare truthiness the inputs above use:
+          # `0` is a meaningful value for these two, and the condition
+          # should say "the caller filled it in" rather than rely on a
+          # cast that happens to agree.
+          args: >-
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ needs.discover.outputs.globs }}
 
   routing:
@@ -337,6 +360,8 @@ jobs:
           args: >-
             --routing-room '${{ matrix.skill }}'
             --min-accuracy '${{ inputs.min_accuracy }}'
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
             --output routing-report.json
             --keep-logs routing-logs
           skills: ${{ needs.discover.outputs.globs }}
@@ -394,6 +419,8 @@ jobs:
           args: >-
             --skill '${{ matrix.skill }}'
             --output behavioral-report.json
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ needs.discover.outputs.globs }}
           install-claude: "true"
 
