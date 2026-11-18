@@ -360,17 +360,6 @@ without it explores. Three flags decide what a run costs.
 | `--max-cases N` | every case | Grade only the first N cases of each selected skill, after `--only` and `--extended` have chosen them. Both sides run the same N, and the report says the run did not cover the whole suite. |
 | `--concurrency N` | inspect's default | How many cases may be in flight at once. Where the wall clock goes on the baseline half. Raise it as far as the engine's sandboxes and the model's rate limits allow. |
 
-Both halves write which side they were, whose skill they were about, and where
-that skill was on disk into their inspect log metadata (`skillscope_baseline`,
-`skillscope_skill`, `skillscope_skill_dir`).
-
-`skillscope_skill_dir` is the load-bearing one. It is what lets the baseline be
-judged empty: the check recognises a tool call that reached the skill by
-comparing against the skill's absolute path, so a reader working that path out
-for itself would be working out its own rather than the run's, and would report
-a baseline the run had voided as a clean one. A log written without the key is
-read as an unknown room rather than an empty one.
-
 Budget more wall clock than a `behavioral` run of the same cases, and more
 than double it. `--timeout` defaults to twice what the single-pass commands
 use for that reason. Both passes share one `--timeout`, and the baseline is

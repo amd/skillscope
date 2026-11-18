@@ -118,12 +118,6 @@ def build_task(
     bound = deadline.active()
     return Task(
         name=f"behavioral-{skill}" + ("-baseline" if baseline else ""),
-        metadata={
-            BASELINE_KEY: baseline,
-            SKILL_KEY: skill,
-            # Resolved here, where it is known to be right. See `SKILL_DIR_KEY`.
-            SKILL_DIR_KEY: str(Path(skill_dir).resolve()),
-        },
         tags=["skillscope", "baseline" if baseline else "graded"],
         dataset=samples,
         setup=hooks.setup_solver(hook, skill, cases),
@@ -252,6 +246,24 @@ _SWEEP_WORDS = re.compile(
 )
 
 
+# Tools whose whole job is to walk a tree. A call to one of these is a sweep
+# whatever its arguments say, because the recursion is the tool rather than
+# something the agent spelled out: `Grep(pattern="deploy", path=".claude")`
+# reads every file under `.claude` and carries no wildcard, no `-r` and no
+# path that names the skill.
+#
+# Matched on the function name, loosely, because the same two tools are
+# spelled differently by different harnesses and an MCP server may wrap them
+# under a name of its own.
+_SEARCH_TOOLS = ("glob", "grep", "search")
+
+
+def _searches(call) -> bool:
+    """Whether this call is a directory search by virtue of which tool it is."""
+    name = _normalise(str(getattr(call, "function", "") or ""))
+    return any(tool in name for tool in _SEARCH_TOOLS)
+
+
 def _swept(text: str, marks: tuple[str, ...]) -> bool:
     """Whether this call read a directory containing the skill, wholesale.
 
@@ -328,7 +340,7 @@ UNKNOWN_ROOM = (
 )
 
 
-def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | None:
+def _skill_marks(skill: str) -> tuple[str, ...] | None:
     """The paths that reading makes a room dirty, lowercased and separator-flat.
 
     Two of them. The skill's own directory, absolute, which is where an agent
@@ -339,24 +351,23 @@ def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | N
     so this asks it rather than spelling one harness's answer in, which would
     read every other harness's staged copy as untouched.
 
-    It asks the *default* harness, which is right while that is the only one
-    registered. Once a run can name another, the staged mark has to come off
-    the log beside `recorded`, for the reason `recorded` exists: a reader
-    standing on a different harness than the run is not evidence about the
-    run.
+    It asks the *default* harness, which is right while that is the only
+    harness this command will run on -- `staleness` refuses any other, and
+    `behavioral` on another harness stages its skill somewhere this would not
+    recognise. Worth revisiting the day that refusal lifts.
 
-    `recorded` is `SKILL_DIR_KEY` off the log: where the skill was on the
-    machine that ran the agent. It has no caller in the package yet, for the
-    reason `_inspect_room`'s `skill_dir` has none -- the offline reader is
-    scoped out of this round -- and exists because resolving the path here
-    resolves it against *this* process. A reader standing somewhere else is
-    not evidence about where the agent stood.
+    The absolute mark is resolved here, against this process. That is right
+    for every caller there is: the check runs in the same process as the run
+    it is judging. It would be wrong for a reader rebuilding somebody else's
+    logs, which is why that reader will have to carry the path in the log
+    rather than work it out -- but no such reader exists yet, and a parameter
+    kept warm for one is a parameter nothing tests against reality.
 
-    `None` when neither source can say where the skill was, which is an
-    unknown room rather than a clean one. Returning the staged mark alone
-    looked like an answer and was not: it is the subset of the check that
-    cannot fail, so every tool call that reached the skill by its real path
-    came back clean and the case was credited. See `SKILL_DIR_KEY`.
+    `None` when it cannot say where the skill was, which is an unknown room
+    rather than a clean one. Returning the staged mark alone looked like an
+    answer and was not: it is the subset of the check that cannot fail, so
+    every tool call that reached the skill by its real path came back clean
+    and the case was credited.
 
     The staged mark carries no leading separator on purpose. `no_sandbox` runs
     the agent with `cwd=workspace`, which makes `cat .claude/skills/foo/...`
@@ -364,15 +375,13 @@ def _skill_marks(skill: str, recorded: str | None = None) -> tuple[str, ...] | N
     exactly that. `_mentions` supplies the boundary instead, which is what
     keeps the mark from matching the middle of a longer name.
     """
-    home = recorded
-    if home is None:
-        try:
-            home = str(Path(config.active().skill_path(skill)).resolve())
-        except (Exception, SystemExit):  # noqa: BLE001 -- see below
-            # `skill_path` raises `SystemExit` rather than returning, so
-            # catching `Exception` alone let a rebuild of someone else's logs
-            # take the whole command down.
-            return None
+    try:
+        home = str(Path(config.active().skill_path(skill)).resolve())
+    except (Exception, SystemExit):  # noqa: BLE001 -- see below
+        # `skill_path` raises `SystemExit` rather than returning, so catching
+        # `Exception` alone let a skill the config cannot place take the
+        # whole command down.
+        return None
     staged = f"{harnesses.get().skills_dir}/{skill}"
     return (_normalise(home), _normalise(staged))
 
@@ -475,25 +484,36 @@ def _read_the_skill(call, marks: tuple[str, ...], skill: str) -> str | None:
     # Last, and weaker on purpose: a call that read a directory the skill
     # sits in, wholesale. Answered after the exact matches above so a call
     # that provably named the skill keeps the reason that says so.
-    if any(_swept(text, marks) for text in spellings):
+    #
+    # Asked of the call, not of each argument on its own. A Bash sweep is one
+    # string holding both halves -- the sweep word and the directory -- but
+    # Glob and Grep take them as separate arguments, `pattern` and `path`,
+    # and those are the tools an agent that has been told nothing reaches for
+    # first. Tested per argument, `{"pattern": "**/SKILL.md", "path":
+    # "<ancestor>"}` had a sweep word in one string and an ancestor in
+    # another and matched in neither, so the same sweep that was caught as a
+    # shell command came back as a clean room through the structured tool.
+    # A call to a search tool needs no sweep word at all: the recursion is
+    # the tool. `Grep` with `path` set to a directory walks everything under
+    # it, and `{"pattern": "deploy", "path": ".claude"}` carries no marker
+    # any string test could find -- the only evidence that this read the
+    # whole tree is which tool was called.
+    swept = _searches(call) or any(
+        glob in text for text in spellings for glob in _SWEEP_GLOBS
+    ) or any(_SWEEP_WORDS.search(text) for text in spellings)
+    if swept and any(
+        _mentions(text, ancestor)
+        for text in spellings
+        for ancestor in _ancestors(marks)
+    ):
         return UNKNOWN_ROOM
     return None
 
 
 def _inspect_room(
-    routing_engine, sample, skill: str, skill_dir: str | None = None
+    routing_engine, sample, skill: str
 ) -> tuple[str | None, str | None]:
     """`(the skill that fired, why the room was not what it claimed)`.
-
-    `skill_dir` is `SKILL_DIR_KEY` off the log. Nothing in the package passes
-    it today: the offline reader it is for -- `--from-logs`, which rebuilt a
-    comparison from logs on disk -- was cut from this round and comes back on
-    its own. The parameter and the key are kept together deliberately, because
-    the key is written to every log from now on and a reader that arrives to
-    find the seam missing would have to resolve the skill against *itself*,
-    which is the one answer that is always wrong for somebody else's run. A
-    live run leaves it `None` and resolves the skill where it already knows it
-    is; the tests cover the other branch until that reader lands.
 
     One walk over the tool calls, answering both questions, because the second
     is only meaningful beside the first. `detect_activation` reports a skill
@@ -521,7 +541,7 @@ def _inspect_room(
     """
     fired: str | None = None
     why: str | None = None
-    marks = _skill_marks(skill, skill_dir)
+    marks = _skill_marks(skill)
     # Nowhere to check against, so the read half of the check cannot run. Said
     # out loud rather than passed over: this lands the case `ungraded`, which
     # is what an unanswerable question is worth. Applied after the walk, not
@@ -552,6 +572,35 @@ def _inspect_room(
         # direction this check must never fail in.
         return fired, why or UNKNOWN_ROOM
     return fired, why or (UNKNOWN_ROOM if unknown else None)
+
+
+# Limits that stop an agent mid-answer rather than deciding anything about
+# it. `operator` and `custom` are left out deliberately: one is somebody
+# cancelling and the other is a task's own rule, and neither is the clock.
+_CUT_SHORT = {
+    "time": "stopped at the sample's time limit",
+    "working": "stopped at the sample's working-time limit",
+    "message": "stopped at the message limit",
+    "token": "stopped at the token limit",
+}
+
+
+def _cut_short(sample) -> str | None:
+    """Why this sample was stopped before it finished, if it was.
+
+    inspect records a limit as `sample.limit`, separately from `sample.error`,
+    so a run the clock ended arrives looking exactly like one the agent
+    finished and failed. Read defensively: `limit` is absent on older logs and
+    its shape is inspect's rather than ours.
+    """
+    limit = getattr(sample, "limit", None)
+    if limit is None:
+        return None
+    kind = str(getattr(limit, "type", None) or limit).lower()
+    for name, reason in _CUT_SHORT.items():
+        if name in kind:
+            return reason
+    return None
 
 
 def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
@@ -590,6 +639,16 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
 
         if sample.error is not None:
             error = f"{sample.error.message}"
+        elif (cut := _cut_short(sample)) is not None:
+            # An agent the clock stopped did not answer the question; it ran
+            # out of room to answer it. inspect reports that as `sample.limit`
+            # and leaves `error` unset, so the attempt arrived as an ordinary
+            # failure -- which on the baseline is the dangerous direction. The
+            # baseline runs second, on whatever budget the graded half left,
+            # and is the half that explores longest, so it is the one the
+            # limits cut. A case the skill never earned then reads `earns_it`,
+            # off a baseline that was interrupted rather than beaten.
+            error = cut
         elif not checks:
             error = "case has no behavioral assertions to grade"
         elif ungraded := [c for c in checks if not scorers.graded(c)]:
@@ -647,28 +706,6 @@ def _outcomes(log, skill: str, cases: list[Case]) -> list[BehaviorOutcome]:
 CALL_TOKEN = "skillscope_call"
 
 # Which half of a staleness comparison a log is, and whose skill it is about.
-# The task name says the same thing, but a name is a string somebody has to
-# parse; inspect filters on metadata and tags, and so can anything reading a
-# log directory afterwards. Written by both engines, so a reader does not have
-# to know which one produced the log it is holding.
-BASELINE_KEY = "skillscope_baseline"
-SKILL_KEY = "skillscope_skill"
-
-# Where the skill was on the machine that ran the agent.
-#
-# `_skill_marks` needs an absolute directory to recognise a tool call that
-# reached into the skill. Deriving it at read time derives it from whoever is
-# *reading*: a rebuild in another directory, or on a machine where the skill
-# is not checked out, built a quietly weaker mark set and reported a baseline
-# the live run had voided as `ungraded` back as `no_signal`. That is the
-# "a rebuild is more permissive than the run it rebuilds" failure this module
-# closes everywhere else; contamination was the one place it was still open.
-#
-# So the run records where the skill actually was, and the reader uses that
-# rather than its own cwd. Written by both engines for the same reason
-# `SKILL_KEY` is: a reader should not have to know which one produced the log.
-SKILL_DIR_KEY = "skillscope_skill_dir"
-
 
 def stop_requested() -> bool:
     """Whether the deadline's graceful stage has asked the command to stop."""

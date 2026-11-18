@@ -6330,7 +6330,22 @@ def _staleness_harness(test, *, dataset=None):
             output_tokens=1 if install else 20,
             calls=1 if install else 7,
         )
-        return []
+        # Outcomes that differ by half, so the verdict the command computes
+        # is one only the right pairing can produce. Returning `[]` from both
+        # halves -- which this did -- meant no verdict was ever compared, so
+        # `pair(with_skill, without)` could be called with its arguments
+        # swapped and every test stayed green, while every real report had
+        # `earns_it` and `harmful` the wrong way round.
+        return [
+            behavior.BehaviorOutcome(
+                id=case.id, skill=case.skill, prompt=case.prompt,
+                passed=install, elapsed_s=1.0 if install else 9.0,
+                checks=[{"kind": "expected_behavior", "expectation": "e",
+                         "passed": install, "detail": ""}],
+                activated="alpha" if install else None,
+            )
+            for case in gradable
+        ]
 
     reports: list[dict] = []
     harness = types.SimpleNamespace(repo=repo, calls=calls, reports=reports)
@@ -6437,7 +6452,10 @@ class TestBothSidesReasonsSurviveIntoTheReport(unittest.TestCase):
         summary = staleness.summarize(comparisons, {"model": "m", "effort": "e"})
         report = staleness.render_markdown(summary)
         self.assertEqual(summary["totals"]["no_signal"], 1)
-        self.assertNotIn("every case needed the skill", report)
+        # The string the code emits is "Every graded case needed the skill";
+        # the lower-cased paraphrase this used to assert the absence of
+        # appears nowhere, so that line could not fail.
+        self.assertNotIn("Every graded case needed the skill", report)
         self.assertIn("every claim came out the same", report)
 
     def test_a_check_only_one_side_graded_is_still_shown(self) -> None:
@@ -6623,9 +6641,7 @@ class TestAnAgentThatWentLookingIsNotACleanRoom(unittest.TestCase):
         call = _FakeCall("t", function=function)
         call.arguments = arguments
         sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
-        return engine_behavioral._inspect_room(
-            routing_engine, sample, "run", self.own
-        )[1]
+        return engine_behavioral._inspect_room(routing_engine, sample, "run")[1]
 
     def test_a_parent_traversal_names_the_skill_and_is_contamination(self) -> None:
         # Provable: the path resolves to the skill with no cwd needed.
@@ -6790,6 +6806,157 @@ class TestWhatTheHalvesAskTheEngineFor(unittest.TestCase):
         self.assertEqual(seen["concurrency"], 4)
 
 
+class TestTheRoomCheckIsWiredIntoTheOutcome(unittest.TestCase):
+    """`_outcomes` calling `_inspect_room` was itself untested.
+
+    Every test drove `_inspect_room` directly or hand-built a
+    `BehaviorOutcome`, so the call could be replaced with `None, None`, or
+    `activated=`/`contaminated=` dropped from the constructor, and the whole
+    suite stayed green -- with the room check still passing its own tests
+    while nothing downstream ever saw its answer.
+    """
+
+    @staticmethod
+    def _case(case_id: str):
+        return datasets.Case(
+            id=case_id, skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+
+    def test_what_the_room_check_found_reaches_the_outcome(self) -> None:
+        sample = types.SimpleNamespace(
+            id="c1",
+            scores={"s": types.SimpleNamespace(metadata={engine_scorers.CHECKS: [
+                {"kind": "expected_behavior", "expectation": "e",
+                 "passed": True, "detail": "", "graded": True},
+            ]})},
+            error=None, limit=None, total_time=1.0,
+        )
+        log = types.SimpleNamespace(status="success", error=None, samples=[sample])
+        with mock.patch.object(
+            engine_behavioral, "_inspect_room",
+            lambda *a, **k: ("alpha", "another skill fired: beta"),
+        ):
+            outcome = engine_behavioral._outcomes(log, "alpha", [self._case("c1")])[0]
+        self.assertEqual(outcome.activated, "alpha")
+        self.assertEqual(outcome.contaminated, "another skill fired: beta")
+
+
+class TestASweepSplitAcrossArgumentsIsStillASweep(unittest.TestCase):
+    """Glob and Grep carry the sweep and the directory as separate arguments.
+
+    Every test was testing each string argument on its own, so a sweep needed
+    its word and an ancestor directory in one string. A Bash command is one
+    string and was caught; `Glob(pattern="**/SKILL.md", path=<ancestor>)` put
+    the two halves in different arguments and matched in neither, so the same
+    sweep came back a clean room through the structured tool. Those are the
+    tools an agent that has been told nothing reaches for first, on the side
+    whose emptiness the verdict rests on.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        self.repo.skill("run", dataset=tier0_dataset("run"))
+        self.repo.activate()
+        self.own = Path(config.active().skill_path("run"))
+
+    def _why(self, function, arguments):
+        from skillscope.engine import routing as routing_engine
+
+        call = _FakeCall("t", function=function)
+        call.arguments = arguments
+        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
+        return engine_behavioral._inspect_room(routing_engine, sample, "run")[1]
+
+    def test_a_glob_over_an_ancestor_is_an_unknown_room(self) -> None:
+        self.assertEqual(
+            self._why("Glob", {"pattern": "**/SKILL.md",
+                               "path": str(self.own.parent)}),
+            engine_behavioral.UNKNOWN_ROOM,
+        )
+
+    def test_a_grep_needs_no_sweep_word_at_all(self) -> None:
+        # The half no string test could reach: neither `deploy` nor the
+        # directory carries a wildcard, an `-r` or the skill's name. That the
+        # whole tree was read is a fact about which tool was called.
+        self.assertEqual(
+            self._why("Grep", {"pattern": "deploy", "path": str(self.own.parent)}),
+            engine_behavioral.UNKNOWN_ROOM,
+        )
+
+    def test_a_search_somewhere_else_is_still_clean(self) -> None:
+        # The false positive this must not buy: being a search tool is not
+        # enough on its own, the path still has to reach the skill.
+        self.assertIsNone(self._why("Grep", {"pattern": "deploy", "path": "/etc"}))
+        self.assertIsNone(
+            self._why("Glob", {"pattern": "**/*.py", "path": "build/out"})
+        )
+
+    def test_a_bash_sweep_is_unaffected(self) -> None:
+        self.assertEqual(
+            self._why("Bash", {"command": f"grep -ri foo {self.own.parent}/"}),
+            engine_behavioral.UNKNOWN_ROOM,
+        )
+
+
+class TestAnAgentTheClockStoppedDidNotAnswerTheQuestion(unittest.TestCase):
+    """A sample inspect cut short is not a case the agent failed.
+
+    inspect records a limit on `sample.limit` and leaves `sample.error`
+    unset, so the attempt arrived as an ordinary failure. The baseline runs
+    second on whatever budget the graded half left and is the half that
+    explores longest, so it is the one the limits cut -- and a baseline that
+    was interrupted rather than beaten reads as a case the skill earned.
+    """
+
+    @staticmethod
+    def _case(case_id: str):
+        return datasets.Case(
+            id=case_id, skill="alpha", prompt="p", skill_should_trigger=True,
+        )
+
+    @staticmethod
+    def _log(limit):
+        sample = types.SimpleNamespace(
+            id="c1",
+            scores={"s": types.SimpleNamespace(metadata={engine_scorers.CHECKS: [
+                {"kind": "expected_behavior", "expectation": "e",
+                 "passed": False, "detail": "did not", "graded": True},
+            ]})},
+            error=None,
+            limit=limit,
+            total_time=1.0,
+        )
+        return types.SimpleNamespace(status="success", error=None, samples=[sample])
+
+    def _attempt(self, limit):
+        return engine_behavioral._outcomes(
+            self._log(limit), "alpha", [self._case("c1")]
+        )[0]
+
+    def test_a_sample_the_clock_stopped_is_ungraded_not_failed(self) -> None:
+        outcome = self._attempt(types.SimpleNamespace(type="time"))
+        self.assertIn("time limit", outcome.error or "")
+        self.assertEqual(staleness.answered([outcome]), [],
+                         "an interrupted attempt is evidence about nothing")
+
+    def test_the_message_limit_counts_too(self) -> None:
+        outcome = self._attempt(types.SimpleNamespace(type="message"))
+        self.assertIn("message limit", outcome.error or "")
+
+    def test_a_sample_that_simply_failed_is_still_a_failure(self) -> None:
+        # The other direction, and the one a careless fix breaks: a case the
+        # agent genuinely failed must stay a failure rather than become an
+        # error the comparison then declines to count.
+        outcome = self._attempt(None)
+        self.assertIsNone(outcome.error)
+        self.assertFalse(outcome.passed)
+
+    def test_a_limit_shape_this_does_not_know_is_not_invented(self) -> None:
+        # `operator` is somebody cancelling, not the clock. Read defensively
+        # because the shape is inspect's rather than ours.
+        self.assertIsNone(self._attempt(types.SimpleNamespace(type="operator")).error)
+
+
 class TestTheRecursiveShapesAnAgentActuallyTypes(unittest.TestCase):
     """The sweep detector matched the tidiest spelling of each shape only.
 
@@ -6819,9 +6986,7 @@ class TestTheRecursiveShapesAnAgentActuallyTypes(unittest.TestCase):
         call = _FakeCall("t", function="Bash")
         call.arguments = {"command": command}
         sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
-        return engine_behavioral._inspect_room(
-            routing_engine, sample, "run", str(self.own)
-        )[1]
+        return engine_behavioral._inspect_room(routing_engine, sample, "run")[1]
 
     def test_a_recursive_flag_in_any_cluster_is_a_sweep(self) -> None:
         above = self.own.parent
@@ -7061,10 +7226,11 @@ class TestTheRoomWalkKeepsTheFirstAnswerItFound(unittest.TestCase):
         with mock.patch.object(
             engine_behavioral.routing_core, "detect_activation",
             lambda *a, **k: answers.pop(0),
+        ), mock.patch.object(
+            engine_behavioral, "_skill_marks",
+            lambda name: (f"/nowhere/skills/{name}", f".claude/skills/{name}"),
         ):
-            return engine_behavioral._inspect_room(
-                routing_engine, sample, "run", "/nowhere/skills/run"
-            )
+            return engine_behavioral._inspect_room(routing_engine, sample, "run")
 
     def test_a_later_contamination_does_not_replace_the_first_reason(self) -> None:
         fired, why = self._walk(["other:alpha", "other:beta"])
@@ -7548,6 +7714,47 @@ class TestTheCaveatsTheReportCarries(unittest.TestCase):
             "it ran `a \\| b` then stopped",
         )
 
+    def test_a_run_that_graded_nothing_says_so(self) -> None:
+        # Every case ungraded. The verdict table is all zeroes and true, and
+        # the banner is the only thing that tells a reader why.
+        errored = staleness.pair(
+            [_outcome("c", False, error="boom")], [_outcome("c", False, error="boom")]
+        )
+        report = self._report(errored)
+        self.assertEqual(self._summary(errored)["totals"]["graded"], 0)
+        self.assertIn("Nothing was graded both ways", report)
+        self.assertIn("No case was graded both ways", report)
+        self.assertNotIn("graded cases needed the skill", report)
+
+    def test_a_harmful_case_is_one_worth_a_look(self) -> None:
+        # The strongest negative finding the command makes. A `harmful` case
+        # missing from the table is the one omission a reader cannot
+        # recover from the counts.
+        harmful = staleness.pair([_outcome("c", False)], [_outcome("c", True)])
+        self.assertEqual(harmful[0].verdict, "harmful")
+        report = self._report(harmful)
+        self.assertIn("Cases worth a look", report)
+        self.assertIn("`c`", report)
+
+    def test_a_case_only_the_baseline_ran_is_still_reported(self) -> None:
+        # Dropping it would shrink the denominator instead, so a case the
+        # graded half never reached would quietly improve the headline.
+        only_baseline = staleness.pair([], [_outcome("c", False)])
+        self.assertEqual(len(only_baseline), 1)
+        self.assertEqual(only_baseline[0].verdict, "ungraded")
+        self.assertIn("`c`", self._report(only_baseline))
+
+    def test_an_unknown_room_is_not_counted_as_a_dirty_one(self) -> None:
+        # Two different findings: one says the baseline demonstrably held
+        # something, the other that nobody could tell. Folding them together
+        # would report a room nobody checked as one that was checked and
+        # found dirty.
+        comparisons = self._pair()
+        comparisons[0].baseline_contaminated = engine_behavioral.UNKNOWN_ROOM
+        totals = self._summary(comparisons)["totals"]
+        self.assertEqual(totals["baseline_contaminated"], 0)
+        self.assertEqual(totals["baseline_unknown"], 1)
+
     def test_the_summary_counts_each_skill_separately(self) -> None:
         comparisons = staleness.pair(
             [_outcome("a", True, skill="one"), _outcome("b", True, skill="two")],
@@ -7700,10 +7907,10 @@ class TestTheCostControlsBindBothHalvesEqually(unittest.TestCase):
         self.assertEqual(seen.get("max_samples"), 8)
 
     def test_which_half_it_is_reaches_the_task(self) -> None:
-        # `baseline` names the task, stamps `BASELINE_KEY` and tags the log.
-        # Dropping it from this call builds a graded task out of a baseline
-        # run, so the two halves land in the log directory under one name
-        # and the metadata says both were graded.
+        # `baseline` names the task and tags the log. Dropping it from this
+        # call builds a graded task out of a baseline run, so the two halves
+        # land in the log directory under one name and both are tagged as
+        # the graded one.
         seen = {}
         with mock.patch.object(engine_behavioral, "sandbox_spec"), \
                 mock.patch.object(engine_behavioral, "stop_requested", lambda: False), \
@@ -8115,89 +8322,8 @@ class TestTheBaselineRunIsTheSameRunWithoutTheSkill(unittest.TestCase):
         )
         self.assertFalse(graded.name.endswith("-baseline"))
         self.assertTrue(baseline.name.endswith("-baseline"))
-        self.assertFalse(graded.metadata[engine_behavioral.BASELINE_KEY])
-        self.assertTrue(baseline.metadata[engine_behavioral.BASELINE_KEY])
-
-
-class TestTheRoomIsJudgedWhereTheRunWasNotWhereTheReaderIs(unittest.TestCase):
-    """A rebuilt contamination verdict must not depend on who is reading.
-
-    `_skill_marks` recognises a tool call that reached the skill by comparing
-    against the skill's absolute path. Worked out at read time it is the
-    *reader's* answer: rebuilt from another directory, or on a machine without
-    the skill checked out, the mark went missing and a baseline the run had
-    voided as `ungraded` came back `no_signal` -- stated in the report as
-    fact. So the run records where the skill was and the reader uses that.
-
-    This is the same hazard `test_a_rebuild_is_no_more_permissive_than_the_run_
-    it_rebuilds` guards for the no-checks branch, in the one place it was
-    still open.
-    """
-
-    def setUp(self) -> None:
-        self.repo = Repo(self)
-        self.repo.skill("run", dataset=tier0_dataset("run"))
-        self.repo.activate()
-        self.cases = [c for c in datasets.load_all_cases() if c.skill == "run"][:1]
-
-    def _why(self, arguments, skill_dir=None):
-        from skillscope.engine import routing as routing_engine
-
-        call = _FakeCall("toolu_1", function="Read")
-        call.arguments = arguments
-        sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
-        return engine_behavioral._inspect_room(
-            routing_engine, sample, "run", skill_dir
-        )[1]
-
-    def test_the_run_records_where_the_skill_was(self) -> None:
-        # Without this the reader has only its own cwd to go on, and the
-        # rebuild silently returns to deriving the weaker answer -- which on
-        # the machine that wrote the logs looks exactly right.
-        own = str(config.active().skill_path("run").resolve())
-        for baseline in (False, True):
-            task = engine_behavioral.build_task(
-                "run", self.cases, "mockllm/model",
-                solver_factory=lambda d: None, baseline=baseline,
-            )
-            self.assertIn(
-                engine_behavioral.SKILL_DIR_KEY, task.metadata,
-                "the log does not say where the skill was",
-            )
-            self.assertEqual(task.metadata[engine_behavioral.SKILL_DIR_KEY], own)
-
-    def test_the_other_engine_records_it_too(self) -> None:
-        # `verify.build_task` needs `inspect_swe`, which the unit job does not
-        # install, so this is read rather than called -- the same compromise
-        # `test_the_behavioral_leg_completes_its_skill_too` makes for it. A
-        # log is paired without knowing which engine wrote it, so a key only
-        # one of them writes is a key the reader cannot rely on.
-        self.assertIn(
-            "SKILL_DIR_KEY", inspect.getsource(engine_verify.build_task)
-        )
-
-
-    def test_the_verdict_is_the_same_from_any_directory(self) -> None:
-        # The property, asserted as a property. A relative path resolves
-        # against whoever is running, so resolving one here made the answer a
-        # fact about the reader's cwd. Standing in the repo root used to say
-        # contaminated and standing anywhere else said clean, for the same
-        # recorded call.
-        own = str(config.active().skill_path("run").resolve())
-        argument = {"file_path": "run/SKILL.md"}
-
-        here = os.getcwd()
-        self.addCleanup(os.chdir, here)
-
-        os.chdir(self.repo.root)
-        from_the_repo_root = self._why(argument, skill_dir=own)
-        os.chdir(here)
-        from_anywhere_else = self._why(argument, skill_dir=own)
-
-        self.assertEqual(
-            from_the_repo_root, from_anywhere_else,
-            "the contamination verdict moved with the reader's cwd",
-        )
+        self.assertIn("graded", graded.tags)
+        self.assertIn("baseline", baseline.tags)
 
 
 class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
@@ -8227,12 +8353,14 @@ class TestTheDetectorKeepsItsTwoAnswersApart(unittest.TestCase):
     def _inspect(self, sample, skill="alpha"):
         from skillscope.engine import routing as routing_engine
 
-        # A directory for the skill, so the room is knowable and `why` reports
+        # Marks for the skill, so the room is knowable and `why` reports
         # what this class is about rather than `UNKNOWN_ROOM`. No case here
-        # names a path, so nothing can match it.
-        return engine_behavioral._inspect_room(
-            routing_engine, sample, skill, f"/nonexistent/skills/{skill}"
-        )
+        # names a path, so nothing can match them.
+        with mock.patch.object(
+            engine_behavioral, "_skill_marks",
+            lambda name: (f"/nonexistent/skills/{name}", f".claude/skills/{name}"),
+        ):
+            return engine_behavioral._inspect_room(routing_engine, sample, skill)
 
     def test_a_contamination_marker_is_never_reported_as_the_skill(self) -> None:
         # Two `other:` hits. The first sets `why`; the second used to find it
@@ -8314,7 +8442,6 @@ class TestTheSandboxedBaselineIsGivenNoSkill(unittest.TestCase):
         task, seen = self._task(install=False)
         self.assertEqual(seen["staged"], {}, "the baseline staged the skill")
         self.assertEqual(seen["agent"]["skills"], [], "the agent was given the skill")
-        self.assertTrue(task.metadata[engine_behavioral.BASELINE_KEY])
         self.assertIn("baseline", task.tags)
         self.assertTrue(task.name.endswith("-baseline"))
 
@@ -8324,7 +8451,6 @@ class TestTheSandboxedBaselineIsGivenNoSkill(unittest.TestCase):
         task, seen = self._task(install=True)
         self.assertEqual(list(seen["staged"]), ["run"])
         self.assertEqual(len(seen["agent"]["skills"]), 1)
-        self.assertFalse(task.metadata[engine_behavioral.BASELINE_KEY])
         self.assertIn("graded", task.tags)
         self.assertFalse(task.name.endswith("-baseline"))
 
@@ -8369,15 +8495,13 @@ class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
         self.repo.skill("run", dataset=tier0_dataset("run"))
         self.repo.activate()
 
-    def _why(self, arguments, skill="run", skill_dir=None):
+    def _why(self, arguments, skill="run"):
         from skillscope.engine import routing as routing_engine
 
         call = _FakeCall("toolu_1", function="Read")
         call.arguments = arguments
         sample = _FakeSample(messages=[_FakeMessage("m", [call])], events=[])
-        return engine_behavioral._inspect_room(
-            routing_engine, sample, skill, skill_dir
-        )[1]
+        return engine_behavioral._inspect_room(routing_engine, sample, skill)[1]
 
     def test_an_unrelated_path_sharing_the_skills_name_is_not_contamination(self) -> None:
         self.assertIsNone(self._why({"file_path": "/run/user/1000/bus"}))
@@ -8471,18 +8595,6 @@ class TestContaminationIsJudgedOnTheSkillsRealPath(unittest.TestCase):
         why = self._why({"file_path": "/tmp/x"}, skill="not-a-skill")
         self.assertEqual(why, engine_behavioral.UNKNOWN_ROOM)
 
-    def test_a_recorded_directory_answers_it_without_the_skill_on_this_machine(
-        self,
-    ) -> None:
-        # The point of recording it: the same log, read where the skill is not.
-        own = str(config.active().skill_path("run"))
-        self.assertIn(
-            "read the skill's own files",
-            self._why(
-                {"file_path": f"{own}/SKILL.md"}, skill="not-a-skill", skill_dir=own
-            ),
-        )
-
 
 class TestAWalkThatDidNotFinishCannotVouchForTheRoom(unittest.TestCase):
     """An interrupted walk inspected only the calls it got to.
@@ -8529,9 +8641,7 @@ class TestAWalkThatDidNotFinishCannotVouchForTheRoom(unittest.TestCase):
             messages=[_FakeMessage("m", [innocuous, _Unwalkable(), unread])],
             events=[],
         )
-        _fired, why = engine_behavioral._inspect_room(
-            routing_engine, sample, "run", None
-        )
+        _fired, why = engine_behavioral._inspect_room(routing_engine, sample, "run")
         self.assertEqual(why, engine_behavioral.UNKNOWN_ROOM)
 
 
@@ -8647,6 +8757,38 @@ class TestTheTwoHalvesAreBilledSeparately(unittest.TestCase):
         with usage.leg("graded"):
             usage.record(input_tokens=10, calls=1)
         self.assertIsNone(usage.snapshot().cost_usd)
+
+    def test_a_half_that_raised_still_hands_the_global_back(self) -> None:
+        # The `finally`, which nothing pinned: every other test here reads
+        # the leg's own accumulator, which is correct whether or not the
+        # global was restored. Without it a raising half leaves `_current`
+        # pointing at that half for the rest of the process, so the second
+        # half's spend lands in the first half's figures and the command
+        # total silently stops being the sum.
+        # Asserted by identity, not by a total. Both ways the number comes
+        # out the same: the fold-back adds exactly what the leaked
+        # accumulator already holds, so `snapshot().input_tokens` is 15
+        # whether the global was restored or left pointing at the half. What
+        # differs is *which object* it is.
+        held = []
+        with self.assertRaises(RuntimeError):
+            with usage.leg("graded") as graded:
+                held.append(graded)
+                usage.record(input_tokens=10, calls=1)
+                raise RuntimeError("the engine fell over")
+        self.assertIsNot(usage.snapshot(), held[0].usage,
+                         "the global was left pointing at the half that raised")
+        usage.record(input_tokens=5, calls=1)
+        self.assertEqual(usage.snapshot().input_tokens, 15)
+
+    def test_the_wall_clock_and_the_rest_fold_back_too(self) -> None:
+        # `wall_time_s` is set in the same `finally`, and the report's floor
+        # marker and spend table both read it.
+        with usage.leg("graded") as graded:
+            usage.record(input_tokens=10, output_tokens=3, calls=1)
+        self.assertGreaterEqual(graded.wall_time_s, 0.0)
+        self.assertEqual(graded.usage.output_tokens, 3)
+        self.assertEqual(usage.snapshot().output_tokens, 3)
 
     def test_an_engine_recording_from_a_log_lands_in_the_enclosing_half(self) -> None:
         # How the real thing records: `stats.record_log` is called deep inside
@@ -8776,6 +8918,29 @@ class TestBothHalvesRunAndOnlyTheInstallFlagDiffers(unittest.TestCase):
             harness.run()
         self.assertEqual(harness.calls[0]["cases"], harness.calls[1]["cases"])
         self.assertTrue(harness.calls[0]["cases"])
+
+    def test_the_half_with_the_skill_is_the_one_credited(self) -> None:
+        # The orientation of the whole command. The harness's graded half
+        # passes and its baseline fails, so every case must be `earns_it`;
+        # swapping `pair`'s arguments turns all of them into `harmful`, and
+        # nothing caught that because both halves used to return no outcomes
+        # at all.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        totals = harness.reports[0]["totals"]
+        self.assertTrue(totals["earns_it"], "the graded half passed and was not credited")
+        self.assertFalse(totals["harmful"])
+        for case in harness.reports[0]["cases"]:
+            self.assertEqual(case["verdict"], "earns_it")
+
+    def test_the_time_each_half_spent_is_not_swapped_either(self) -> None:
+        # The same orientation, on the column where a swap reads as the
+        # finding this command exists to report: the baseline is the slow
+        # half, so `seconds_without` must be the larger number.
+        with _staleness_harness(self) as harness:
+            harness.run()
+        case = harness.reports[0]["cases"][0]
+        self.assertGreater(case["seconds_without"], case["seconds_with"])
 
     def test_the_baseline_half_is_given_a_config_dir_of_its_own(self) -> None:
         # The dir the comment calls what the whole command rests on: without
