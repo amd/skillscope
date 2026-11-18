@@ -12,7 +12,9 @@ this module is the contract for answering it.
 The engines drive a harness as a subprocess, so the contract is small: how to
 find it, where it looks for skills, how to start one case, what environment to
 start it in, and how to read what it prints. Everything else -- staging, the
-stop rule, usage, grading -- stays in the engine, once, for every harness.
+stop rule, usage, and deciding what a verdict means -- stays in the engine, once,
+for every harness. The one part of grading a harness does take is `complete`: a raw
+answer to one question, for a judge with no API of its own to call.
 
 Adding a harness is one subclass of `Harness`, registered in
 `skillscope/harness/__init__.py`, plus recorded output for the contract test in
@@ -21,6 +23,7 @@ Adding a harness is one subclass of `Harness`, registered in
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -36,6 +39,10 @@ from .. import deadline
 # only there so the reply is short.
 PREFLIGHT_PROMPT = "Reply with the single word: ok"
 PREFLIGHT_TIMEOUT_S = 60.0
+
+# How long a harness gets to answer one judge question. A verdict is a sentence;
+# anything near this is a CLI that is stuck, not one that is thinking.
+COMPLETE_TIMEOUT_S = 180.0
 
 # `--version` output by executable, so a report names the build once however
 # many cases ask.
@@ -110,6 +117,14 @@ class RunSpec:
     config_dir: str | None = None
     # The harness's own spend or session controls, already built by the caller.
     extra_flags: tuple[str, ...] = ()
+    # Ask the model a question and nothing else: no tool may run, and nothing is
+    # pre-approved. Used for the judge, whose job is to read evidence, never to
+    # act on the machine it is reading about.
+    tool_free: bool = False
+
+
+class CompletionError(RuntimeError):
+    """The CLI could not answer a question: it failed, or printed no answer."""
 
 
 class Harness(ABC):
@@ -223,6 +238,90 @@ class Harness(ABC):
             detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
             return False, detail[:500]
         return True, "ok"
+
+    def complete(
+        self, prompt: str, model: str | None, timeout: float = COMPLETE_TIMEOUT_S
+    ) -> str:
+        """Ask the model one question, with no tools, and return its answer.
+
+        What the judge needs from a harness that has no API of its own to call:
+        the same CLI, the same credential and the same model as the agent, run
+        once with nothing allowed. The answer is read the way a case's closing
+        answer is, through the harness's own translator, so a harness that can
+        run a case can answer a question without more code.
+        """
+        executable = shutil.which(self.binary)
+        if executable is None:
+            raise CompletionError(f"'{self.binary}' CLI not found on PATH")
+
+        bound = deadline.active()
+        if bound is not None:
+            leftover = bound.remaining()
+            if leftover <= 0:
+                raise CompletionError(bound.message())
+            timeout = min(timeout, leftover)
+
+        with tempfile.TemporaryDirectory(prefix="skillscope-judge-") as workspace, \
+                tempfile.TemporaryDirectory(prefix="skillscope-judge-home-") as home:
+            spec = RunSpec(
+                workspace=workspace, prompt=prompt, model=model,
+                config_dir=home, tool_free=True,
+            )
+            try:
+                proc = _run_bounded(
+                    self.host_command(spec),
+                    stdin=prompt if self.prompt_on_stdin else "",
+                    cwd=workspace, env=self.host_env(spec), timeout=timeout,
+                )
+            except NotImplementedError as exc:
+                # A harness that is judged some other way refuses the tool-free
+                # command; for the caller that is a completion that failed.
+                raise CompletionError(str(exc)) from None
+            except subprocess.TimeoutExpired:
+                raise CompletionError(
+                    f"{self.binary} gave no answer within {timeout:g}s"
+                ) from None
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+            raise CompletionError(detail[:500])
+
+        normalize = self.normalizer()
+        answer = None
+        for line in (proc.stdout or "").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                # Any JSON value is a legal line, and a translator may not guard it.
+                continue
+            for canonical in normalize(event):
+                if canonical.get("type") == "result":
+                    answer = canonical.get("result")
+        if not isinstance(answer, str) or not answer.strip():
+            raise CompletionError(f"{self.binary} printed no answer")
+        return answer
+
+    def room(self, workspace: str, env: Mapping[str, str]) -> list[str] | None:
+        """The skills a session started in `workspace` would be given, if known.
+
+        For a harness that does not announce them at session start. It must not
+        cost a model call. `None` means this harness cannot say, which the
+        engine reports as "the room was not verified" rather than as an empty
+        room. Skills that belong to the harness itself are not part of what was
+        staged and are left out.
+
+        Host only. Unlike `command` and `env`, which stay neutral about where
+        the agent runs, this resolves the harness's executable on the host's
+        `PATH` and runs it there, so a leg that starts the agent elsewhere must
+        not reuse it as it stands.
+
+        An implementation bounds its own run: stop at the command's deadline and
+        kill what it started. The engine does not wrap this call in a timeout, so
+        a `room` that can hang blocks its worker thread for the case's whole time
+        limit.
+        """
+        return None
 
     def require(self) -> None:
         """Refuse to start on the host when the harness is not installed there.
