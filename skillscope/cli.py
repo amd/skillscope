@@ -84,7 +84,7 @@ from . import (
 )
 from . import selection as select_module
 from . import harness as harnesses
-from .agent import check_api_reachable
+from .agent import _safe_print, check_api_reachable
 
 # The engines a graded run can be driven by.
 #   claude-code             -- the real CLI in a sandbox, via inspect_swe (Linux only)
@@ -221,8 +221,8 @@ def _write_report(summary: dict, report: str, args: argparse.Namespace, label: s
     output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print()
-    print(report)
-    print(f"[evals] JSON report: {output}")
+    _safe_print(report)
+    _safe_print(f"[evals] JSON report: {output}")
 
     summary_path = args.summary or os.environ.get("GITHUB_STEP_SUMMARY", "")
     if summary_path:

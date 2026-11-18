@@ -311,7 +311,7 @@ def run(
             outcomes.extend(_failed(skill, skill_cases, deadline.active().message()))
             continue
 
-        print(f"[behavioral] {skill}: {len(skill_cases)} case(s)", flush=True)
+        agent._safe_print(f"[behavioral] {skill}: {len(skill_cases)} case(s)")
         try:
             logs = run_eval(
                 inspect_eval,
@@ -354,10 +354,9 @@ def run(
 
     for outcome in outcomes:
         passed = sum(1 for c in outcome.checks if c["passed"])
-        print(
+        agent._safe_print(
             f"  [{'PASS' if outcome.passed else 'FAIL'}] {outcome.id}: "
             f"{passed}/{len(outcome.checks)} checks in {outcome.elapsed_s}s"
             + (f" -- {outcome.error}" if outcome.error else ""),
-            flush=True,
         )
     return outcomes
