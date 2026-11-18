@@ -3682,6 +3682,37 @@ class TestTheBehavioralReportActuallyRenders(unittest.TestCase):
         }
         return behavior.summarize([], {**base, **meta})
 
+    def test_case_error_survives_a_cp1252_console(self) -> None:
+        error = "runner returned an invalid character: \ufffd"
+        cases = [
+            datasets.Case(name, "check", "alpha", True, files_exist=["out"])
+            for name in ("first", "second")
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "result.json"
+            summary = Path(tmp) / "summary.md"
+            with (
+                io.TextIOWrapper(io.BytesIO(), encoding="cp1252") as console,
+                contextlib.redirect_stdout(console),
+                mock.patch.object(cli, "_prepare_graded_run", return_value=["alpha"]),
+                mock.patch.object(datasets, "load_dataset", return_value=cases),
+                mock.patch.object(engine_no_sandbox, "require_local"),
+                mock.patch.object(engine_sandbox, "require_provider"),
+                mock.patch.object(engine_behavioral, "build_task", side_effect=SystemExit(error)),
+            ):
+                code = cli.main([
+                    "behavioral", "--engine", "claude-code-no-sandbox", "--model", "mockllm/model",
+                    "--output", str(output), "--summary", str(summary),
+                ])
+                console.flush()
+                text = console.buffer.getvalue().decode("cp1252")
+            self.assertEqual(code, 1)
+            for case in cases:
+                self.assertIn(f"[FAIL] {case.id}", text)
+            self.assertEqual([case["error"] for case in json.loads(output.read_text())["cases"]],
+                             [error, error])
+            self.assertIn(error, summary.read_text(encoding="utf-8"))
+
     def test_it_renders_for_a_sandboxed_run(self) -> None:
         out = behavior.render_markdown(
             self.summary(sandbox="podman", sandbox_isolated=True)
