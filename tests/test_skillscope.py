@@ -1025,6 +1025,48 @@ class TestActionLauncher(unittest.TestCase):
             with mock.patch.dict(os.environ, {"SKILLSCOPE_ACTION_PATH": str(root)}):
                 self.assertEqual(self.module.action_root(), root)
 
+    def test_a_command_that_needs_no_agent_installs_without_the_engine(self) -> None:
+        # The point of the split: a repo running only these installed the
+        # whole eval stack to check that markdown links resolve.
+        for command in ("structural", "select", "list-skills", "template"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    "/action", self.module.install_source(Path("/action"), command)
+                )
+
+    def test_a_graded_command_asks_for_the_engine(self) -> None:
+        for command in ("routing", "behavioral", "staleness"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    "/action[inspect]",
+                    self.module.install_source(Path("/action"), command),
+                )
+
+    def test_a_command_this_has_never_heard_of_gets_the_engine(self) -> None:
+        # Which way the default points is the whole safety argument. A command
+        # added later, or one the set forgets, installs more than it needs and
+        # runs. The other way round it would stop on a missing wheel.
+        self.assertEqual(
+            "/action[inspect]",
+            self.module.install_source(Path("/action"), "some-future-command"),
+        )
+
+    def test_arguments_beside_the_command_do_not_change_the_install(self) -> None:
+        self.assertEqual(
+            "/action", self.module.install_source(Path("/action"), "structural --external")
+        )
+
+    def test_every_light_command_is_a_real_subcommand(self) -> None:
+        # Keeps the set honest: a renamed command would otherwise sit here
+        # forever, silently installing the engine it does not need.
+        actions = [
+            action
+            for action in cli.build_parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ]
+        known = set(actions[0].choices)
+        self.assertEqual(set(), self.module.LIGHT_COMMANDS - known)
+
 
 class TestSelection(unittest.TestCase):
     """What CI runs for a change, and what it is right to skip."""
