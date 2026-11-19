@@ -111,6 +111,22 @@ on:
           that answer a runner's IP with a 403.
         type: string
         default: ""
+      min_positive:
+        description: >-
+          Evaluations a skill needs with `skill_should_trigger: true`. Blank
+          uses skillscope's own default. Zero for both this and min_negative
+          means a skill need not ship a dataset at all, which is how a
+          catalogue adopts these checks before it has written one. It lives
+          here, in the workflow, because the bar a skill is measured against is
+          not the skill author's to set.
+        type: string
+        default: ""
+      min_negative:
+        description: >-
+          Evaluations a skill needs with `skill_should_trigger: false`. Blank
+          uses skillscope's own default. See min_positive.
+        type: string
+        default: ""
       skill_files:
         description: >-
           Files every skill must ship beside its SKILL.md, comma-separated and
@@ -349,10 +365,16 @@ jobs:
         uses: ./.skillscope-action
         with:
           command: structural
+          # `!= ''` rather than the bare truthiness the inputs above use:
+          # `0` is a meaningful value for these two, and the condition
+          # should say "the caller filled it in" rather than rely on a
+          # cast that happens to agree.
           args: >-
             ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
             ${{ inputs.skill_files && format('--skill-files ''{0}''', inputs.skill_files) || '' }}
             ${{ inputs.skill_sections && format('--skill-sections ''{0}''', inputs.skill_sections) || '' }}
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
 
@@ -504,6 +526,8 @@ jobs:
             --external
             ${{ inputs.doc_globs && format('--docs ''{0}''', inputs.doc_globs) || '' }}
             ${{ inputs.excluded_urls && format('--exclude-url ''{0}''', inputs.excluded_urls) || '' }}
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
 
@@ -565,6 +589,8 @@ jobs:
             ${{ inputs.only && format('--only ''{0}''', inputs.only) || '' }}
             --output routing-report.json
             --keep-logs routing-logs
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
@@ -627,7 +653,10 @@ jobs:
         uses: ./.skillscope-action
         with:
           command: behavioral
-          args: --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+          args: >-
+            --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
@@ -684,7 +713,10 @@ jobs:
         uses: ./.skillscope-action
         with:
           command: behavioral
-          args: --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+          args: >-
+            --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
+            ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
+            ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"

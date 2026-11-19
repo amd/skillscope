@@ -104,11 +104,11 @@ def tier0_dataset(slug: str, **extra) -> dict:
     """The smallest dataset that clears the mandatory coverage bar."""
     evaluations = [
         {"id": f"{slug}-yes-{i}", TRIGGER_KEY: True, "prompt": f"please do {slug} work {i}"}
-        for i in range(datasets.MIN_POSITIVE_CASES)
+        for i in range(config.DEFAULT_MIN_POSITIVE)
     ]
     evaluations += [
         {"id": f"{slug}-no-{i}", TRIGGER_KEY: False, "prompt": f"nothing to do with {slug} {i}"}
-        for i in range(datasets.MIN_NEGATIVE_CASES)
+        for i in range(config.DEFAULT_MIN_NEGATIVE)
     ]
     return {EVALUATIONS_KEY: evaluations, **extra}
 
@@ -1391,6 +1391,142 @@ class TestTier0(unittest.TestCase):
         errors = datasets.tier0_errors("bare-skill", [])
         self.assertEqual(len(errors), 1)
         self.assertIn("no eval dataset", errors[0])
+
+
+class TestTheDatasetBarIsTheRepos(unittest.TestCase):
+    """The coverage bar is configuration, and only the command line sets it.
+
+    A repo adopting these checks over a catalogue written before them has to be
+    able to lower the bar, or it runs none of the checks at all. What that must
+    never become is a number the skill under review can move: the point of the
+    bar is that something outside the skill decides it.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+
+    def test_a_lowered_bar_accepts_what_the_default_rejects(self) -> None:
+        self.repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        self.repo.activate()
+        thin, _ = parse(
+            {
+                EVALUATIONS_KEY: [
+                    {"id": "yes", TRIGGER_KEY: True, "prompt": "do demo work"},
+                    {"id": "no", TRIGGER_KEY: False, "prompt": "unrelated"},
+                ]
+            },
+            skill="demo-skill",
+        )
+        self.assertNotEqual(datasets.tier0_errors("demo-skill", thin), [])
+        self.repo.reactivate(min_positive=1, min_negative=1)
+        self.assertEqual(datasets.tier0_errors("demo-skill", thin), [])
+
+    def test_a_raised_bar_rejects_what_the_default_accepts(self) -> None:
+        self.repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        self.repo.activate(min_positive=99)
+        cases, _ = parse(tier0_dataset("demo"), skill="demo-skill")
+        errors = datasets.tier0_errors("demo-skill", cases)
+        self.assertTrue(any("at least 99" in e for e in errors), errors)
+
+    def test_zero_for_both_stops_requiring_a_dataset(self) -> None:
+        self.repo.skill("bare-skill")
+        self.repo.activate()
+        self.assertNotEqual(datasets.tier0_errors("bare-skill", []), [])
+        self.repo.reactivate(min_positive=0, min_negative=0)
+        self.assertEqual(datasets.tier0_errors("bare-skill", []), [])
+
+    def test_one_bar_still_standing_still_requires_a_dataset(self) -> None:
+        """Only *both* at zero means "not required"; one of them does not."""
+        self.repo.skill("bare-skill")
+        self.repo.activate(min_positive=0, min_negative=1)
+        errors = datasets.tier0_errors("bare-skill", [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no eval dataset", errors[0])
+
+    def test_a_dataset_that_exists_is_read_even_with_the_bar_off(self) -> None:
+        """Off means "not required of every skill", not "unread where present"."""
+        self.repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        self.repo.activate(min_positive=0, min_negative=0)
+        self.assertIn("demo-skill", datasets.skills_with_datasets())
+        cases = datasets.routing_cases(["demo-skill"])
+        self.assertTrue(cases)
+
+    def test_the_bar_is_not_settable_from_inside_a_skill(self) -> None:
+        """The governance property, asserted rather than assumed.
+
+        A file a skill author can edit must not move the number their own
+        skill is judged by, whatever it is called or wherever in the skill it
+        sits. Nothing reads these; the test exists so that stays true.
+        """
+        folder = self.repo.skill("bare-skill")
+        for name in ("skillscope.json", "config.yml", "evals/skillscope.yml"):
+            path = folder / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                '{"min_positive": 0, "min_negative": 0}', encoding="utf-8"
+            )
+        self.repo.activate()
+        errors = datasets.tier0_errors("bare-skill", [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no eval dataset", errors[0])
+
+    def test_the_bar_is_not_settable_from_the_environment(self) -> None:
+        """No environment fallback, unlike SKILLSCOPE_SKILLS.
+
+        A self-hosted runner's environment is set by whoever administers the
+        machine, who is not the person reviewing the workflow diff. Adding a
+        fallback here would quietly widen who can lower the bar.
+        """
+        self.repo.skill("bare-skill")
+        for key in ("SKILLSCOPE_MIN_POSITIVE", "SKILLSCOPE_MIN_NEGATIVE"):
+            os.environ[key] = "0"
+            self.addCleanup(os.environ.pop, key, None)
+        self.repo.activate()
+        errors = datasets.tier0_errors("bare-skill", [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no eval dataset", errors[0])
+
+    def test_a_bar_that_is_not_a_count_is_refused(self) -> None:
+        for value in ("-1", "two", "1.5"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit) as caught:
+                    config.build(self.repo.root, min_positive=value)
+                self.assertIn("--min-positive", str(caught.exception))
+
+    def test_a_blank_bar_is_the_default(self) -> None:
+        """A workflow input nobody filled in is the same as no flag at all."""
+        cfg = config.build(self.repo.root, min_positive="", min_negative=None)
+        self.assertEqual(cfg.min_positive, config.DEFAULT_MIN_POSITIVE)
+        self.assertEqual(cfg.min_negative, config.DEFAULT_MIN_NEGATIVE)
+
+    def _structural_stdout(self, *flags: str) -> str:
+        """Run `structural` the way CI does, through argparse, and read stdout."""
+        previous = config.use(None)
+        self.addCleanup(config.use, previous)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = cli.main(["--repo", str(self.repo.root), "structural", *flags])
+        self.assertEqual(code, 0, stdout.getvalue())
+        return stdout.getvalue()
+
+    def test_the_applied_bar_is_printed_whether_it_is_on_or_off(self) -> None:
+        """The one test here that goes in at the flags rather than the config.
+
+        Every other test in this class calls `config.build` directly, so all
+        of them would keep passing if the flags stopped reaching it. This one
+        takes the path CI takes, and reads back the line that tells a reviewer
+        which bar a given run was holding its skills to.
+        """
+        self.repo.skill("demo-skill", dataset=tier0_dataset("demo"))
+        self.assertIn(
+            f"dataset bar: {config.DEFAULT_MIN_POSITIVE} positive, "
+            f"{config.DEFAULT_MIN_NEGATIVE} negative",
+            self._structural_stdout(),
+        )
+        self.assertIn(
+            "dataset bar: off",
+            self._structural_stdout("--min-positive", "0", "--min-negative", "0"),
+        )
 
 
 class TestExtendedDataset(unittest.TestCase):
