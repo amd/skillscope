@@ -78,8 +78,12 @@ def searchable(state) -> str:
     return "\n".join(parts)
 
 
-def expectations():
-    """Grade every expectation on the case and report each one."""
+def expectations(complete=None):
+    """Grade every expectation on the case and report each one.
+
+    `complete` replaces the inspect model for the judged expectations; see
+    `judge.grade`.
+    """
     from inspect_ai.scorer import CORRECT, INCORRECT, Score, accuracy, scorer, stderr
 
     @scorer(metrics=[accuracy(), stderr()])
@@ -133,7 +137,8 @@ def expectations():
                 for statement in meta.get(key, []):
                     try:
                         ok, reason = await judge.grade(
-                            statement, state, must_happen=must_happen
+                            statement, state,
+                            must_happen=must_happen, complete=complete,
                         )
                     except judge.Ungradable as exc:
                         # The polarity is why this cannot be left as a False.

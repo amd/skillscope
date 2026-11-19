@@ -87,6 +87,8 @@ def build_task(
     *,
     solver_factory,
     baseline: bool = False,
+    complete=None,
+    message_limit: int | None = None,
 ):
     """One inspect `Task` per skill: its cases, its skill installed, its scorer.
 
@@ -123,9 +125,13 @@ def build_task(
         setup=hooks.setup_solver(hook, skill, cases),
         solver=solver_factory(skill_dir),
         cleanup=hooks.cleanup_fn(hook, skill, cases),
-        scorer=scorers.expectations(),
+        scorer=scorers.expectations(complete),
         sandbox=sandbox_spec.for_skill(skill),
-        message_limit=message_limit_for(model),
+        # The limit belongs to what drives the agent, not to the inspect model:
+        # a harness whose agent is a subprocess hands inspect a placeholder
+        # model, and that model's limit is a test value that a single real run
+        # exceeds.
+        message_limit=message_limit if message_limit is not None else message_limit_for(model),
         time_limit=task_time_limit(bound),
     )
 
@@ -794,6 +800,8 @@ def run(
     baseline: bool = False,
     attempts: int = 1,
     concurrency: int = 0,
+    complete=None,
+    message_limit: int | None = None,
 ) -> list[BehaviorOutcome]:
     """Run every behavioral case, grouped by skill. Mirrors `behavior.run`.
 
@@ -840,6 +848,8 @@ def run(
                     model,
                     solver_factory=solver_factory,
                     baseline=baseline,
+                    complete=complete,
+                    message_limit=message_limit,
                 ),
                 model=model,
                 model_args=models.model_args(model),
