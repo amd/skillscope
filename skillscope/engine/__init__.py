@@ -17,6 +17,8 @@ to turn a missing wheel into an actionable message rather than a traceback.
 
 from __future__ import annotations
 
+from .. import install
+
 def install_hint(engine: str) -> str:
     """Why this run cannot start, naming the engine that was actually asked for.
 
@@ -30,7 +32,7 @@ def install_hint(engine: str) -> str:
     return (
         f"error: --engine {engine} needs inspect_ai, which skillscope "
         "requires but could not import. Reinstall with:\n"
-        "    pip install --force-reinstall skillscope"
+        f"    {install.install_command(force=True)}"
     )
 
 

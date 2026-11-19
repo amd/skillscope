@@ -86,6 +86,7 @@ from . import (
     datasets,
     deadline,
     engine,
+    install,
     references,
     routing,
     staleness,
@@ -1318,7 +1319,7 @@ def _add_graded_arguments(
             "Where the agent runs, under inspect_ai. `host` runs it on the "
             "host, on any platform. `sandbox` runs it inside a container via "
             "inspect_swe, which needs a POSIX guest and so is Linux only, and "
-            "additionally needs `pip install 'skillscope[verify]'`; only a "
+            f"additionally needs `{install.install_command('verify')}`; only a "
             "harness with a sandboxed leg can use it. `claude-code-no-sandbox` "
             "and `claude-code` are the older names for those two and mean "
             "Claude Code. Default: host, or $SKILLSCOPE_ENGINE."

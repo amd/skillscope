@@ -49,6 +49,7 @@ from skillscope import (
     datasets,
     deadline,
     engine as engine_module,
+    install as install_module,
     references,
     routing,
     staleness,
@@ -2584,6 +2585,39 @@ class TestEngineInstallHint(unittest.TestCase):
         self.assertIn("reinstall", hint.lower())
 
 
+class TestEveryInstallHintNamesTheRepository(unittest.TestCase):
+    """The `skillscope` name on PyPI belongs to an unrelated project.
+
+    A hint naming the bare package sends a reader to install that project.
+    The hints and the docs drifted apart once already: `docs/usage.md` named
+    the repository while three hints in the code still named the bare
+    package, and nothing failed. So this is asserted over the source rather
+    than over the three messages a test happens to remember, because the next
+    hint will be written somewhere this file does not know about.
+    """
+
+    def test_no_module_tells_anyone_to_pip_install_this_tool(self) -> None:
+        root = Path(skillscope.__file__).parent
+        offenders = [
+            f"{path.relative_to(root)}:{number}: {line.strip()}"
+            for path in sorted(root.rglob("*.py"))
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            )
+            if re.search(r"pip install\S*\s[^\n]*skillscope", line)
+        ]
+        self.assertEqual([], offenders, "\n".join(offenders))
+
+    def test_the_command_names_the_repository_the_extra_and_the_force(self) -> None:
+        self.assertEqual(
+            "uv tool install 'skillscope[podman] @ "
+            "git+https://github.com/amd/skillscope'",
+            install_module.install_command("podman"),
+        )
+        self.assertNotIn("[", install_module.install_command())
+        self.assertIn("--force ", install_module.install_command(force=True))
+
+
 class TestEngineWorkdirPath(unittest.TestCase):
     """The working directory has to be knowable before a sandbox exists."""
 
@@ -2754,9 +2788,12 @@ class TestClaudeCodeRefusesTheHostsFilesystem(unittest.TestCase):
         try:
             engine_verify.require()
         except SystemExit as exc:
-            # Whatever it stopped on, it was not the sandbox.
+            # Whatever it stopped on, it was not the sandbox. Asserted on what
+            # the refusal is about rather than on the install syntax it
+            # happens to print: pinning `pip install` here meant that
+            # correcting the install hint failed a test about sandboxes.
             self.assertNotIn("settings.json", str(exc))
-            self.assertIn("pip install", str(exc))
+            self.assertIn("needs the verify extra", str(exc))
 
 
 class TestEngineNoSandboxGuard(unittest.TestCase):
@@ -3092,7 +3129,7 @@ class TestEngineSandboxSelection(unittest.TestCase):
             engine_sandbox.require_provider(resolve=unresolvable)
         message = str(caught.exception)
         self.assertIn(engine_sandbox.SANDBOX_ENV, message)
-        self.assertIn("skillscope[podman]", message)
+        self.assertIn(install_module.install_command("podman"), message)
 
     def test_a_named_compose_file_that_is_missing_is_an_error(self) -> None:
         self._skill(machine="sandbox: nope.yaml\n")

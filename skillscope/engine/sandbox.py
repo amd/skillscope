@@ -29,6 +29,8 @@ from __future__ import annotations
 import os
 import sys
 
+from .. import install
+
 from .. import datasets
 
 # Which provider to use. Set it to what the runner actually has: `podman` on a
@@ -63,7 +65,7 @@ def describe() -> dict:
 # entry point, so the binary being installed proves nothing -- the Python
 # package has to be there too, and the failure otherwise is a ValueError from
 # inspect's registry that says nothing about how to fix it.
-PROVIDER_PACKAGES = {"podman": "skillscope[podman]"}
+PROVIDER_EXTRAS = {"podman": "podman"}
 
 
 def is_windows() -> bool:
@@ -85,11 +87,11 @@ def require_provider(resolve=None) -> None:
     try:
         resolve(name)
     except Exception as exc:  # noqa: BLE001 -- inspect raises a bare ValueError
-        hint = PROVIDER_PACKAGES.get(name)
-        install = f"\n    pip install '{hint}'" if hint else ""
+        extra = PROVIDER_EXTRAS.get(name)
+        hint = f"\n    {install.install_command(extra)}" if extra else ""
         raise SystemExit(
             f"error: {SANDBOX_ENV}={name!r} but inspect cannot resolve that "
-            f"sandbox provider.{install}\n"
+            f"sandbox provider.{hint}\n"
             f"    ({exc})"
         ) from exc
 
