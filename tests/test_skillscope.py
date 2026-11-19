@@ -7050,6 +7050,18 @@ class TestASweepSplitAcrossArgumentsIsStillASweep(unittest.TestCase):
             engine_behavioral.UNKNOWN_ROOM,
         )
 
+    def test_a_bare_home_as_the_path_argument_is_a_sweep(self) -> None:
+        # The structured half of the same gap: a search tool needs no sweep
+        # word, so `~` alone in `path` was the whole of the evidence, and it
+        # was not expanded.
+        with mock.patch.object(
+            engine_behavioral.Path, "home", classmethod(lambda cls: self.own.parent)
+        ):
+            self.assertEqual(
+                self._why("Grep", {"pattern": "deploy", "path": "~"}),
+                engine_behavioral.UNKNOWN_ROOM,
+            )
+
 
 class TestAnAgentTheClockStoppedDidNotAnswerTheQuestion(unittest.TestCase):
     """A sample inspect cut short is not a case the agent failed.
@@ -7203,6 +7215,51 @@ class TestTheRecursiveShapesAnAgentActuallyTypes(unittest.TestCase):
                 self._why(f"find ~/{self.own.parent.name} -name SKILL.md"),
                 engine_behavioral.UNKNOWN_ROOM,
             )
+
+    def test_a_bare_home_is_the_directory_it_names(self) -> None:
+        # Home is itself a directory the skill sits under, and each of these
+        # sweeps it while naming it with nothing after it. The lookahead
+        # wanted a `/`, so all of them read as a clean room while the same
+        # sweep written `find ~/ ...` was caught.
+        with self._home_at(self.own.parent):
+            for spelling in (
+                "find ~ -name SKILL.md",
+                "grep -r pattern ~",
+                "find $HOME -name SKILL.md",
+                "find ${HOME} -name SKILL.md",
+                'grep -r pattern "~"',
+                "cd ~; find . -name SKILL.md",
+                "(cd ~) && grep -r pattern .",
+            ):
+                with self.subTest(spelling=spelling):
+                    self.assertEqual(
+                        self._why(spelling), engine_behavioral.UNKNOWN_ROOM
+                    )
+
+    def test_a_tilde_that_names_no_home_is_left_alone(self) -> None:
+        # The false positives the wider lookahead must not buy. Each is a
+        # sweep already, so the `~` not being expanded is the only thing
+        # keeping it a clean room: a separator in front makes `s/~/-/` a sed
+        # script rather than a path, and a word character after it makes
+        # `~5` arithmetic and `~someone` another user's home.
+        with self._home_at(self.own.parent):
+            self.assertIsNone(self._why("grep -r 's/~/-/' notes.txt"))
+            self.assertIsNone(self._why("grep -r '~5' notes.txt"))
+            self.assertIsNone(self._why("find ~someone -name SKILL.md"))
+
+    def test_a_tilde_after_punctuation_is_not_a_home_reference(self) -> None:
+        # What the lookbehind is for, and why accepting the end of a word
+        # after the `~` is safe. Each of these already sweeps, so expanding
+        # the `~` would void a case the agent never took near home: `=~` is
+        # bash's match operator, `!~` is awk's, and `*~` is an editor backup
+        # glob. None of the three is a path, and none was expanded while a
+        # `/` had to follow.
+        with self._home_at(self.own.parent):
+            self.assertIsNone(
+                self._why("if [[ $name =~ ^run ]]; then grep -r x notes.txt; fi")
+            )
+            self.assertIsNone(self._why("grep -r '$1 !~ /x/' notes.txt"))
+            self.assertIsNone(self._why("find . -name '*~' -delete"))
 
     def test_a_doubled_or_dotted_separator_still_names_the_skill(self) -> None:
         parent, name = self.own.parent, self.own.name

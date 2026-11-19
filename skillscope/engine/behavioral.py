@@ -191,9 +191,28 @@ def _normalise(text: str) -> str:
 
 
 # `~/x` and `$HOME/x` spell the same file as the absolute path, and a mark is
-# always absolute. Anchored so it only fires where a path can start, and only
-# where one actually follows.
-_HOME = re.compile(r"(?<![\w/~$])(?:~|\$home|\$\{home\})(?=/)")
+# always absolute.
+#
+# What follows is a separator, a shell one included, or the end of the word,
+# because home is itself a directory the skill sits under: `find ~ -name
+# SKILL.md`, `grep -r pattern ~` and `cd ~; ls` all sweep it and name it with
+# nothing after it, and `/home/u` is an ancestor `_ancestors` keeps. Requiring
+# `/` read every one of those as a clean room -- on the baseline, the side
+# whose emptiness the verdict rests on -- while the same sweep written
+# `find ~/ ...` was caught.
+#
+# What comes *before* has to be whitespace, a quote, or the start of the
+# string, and that is the half which makes the rest safe. Anything-but-a-word-
+# character was enough while a `/` had to follow, and stopped being enough the
+# moment the end of a word would do: `[[ $x =~ ^run ]]`, `awk '$1 !~ /p/'` and
+# `find . -name '*~'` each put a `~` after punctuation, and each would expand
+# to home and void a case the agent never took near it. A word character after
+# the `~` still rules out `~5` and `~user`.
+#
+# `grep -r 'a ~ b'` is the shape no anchoring catches: a bare `~` between
+# spaces in text that was never a path. It voids a case rather than inverting
+# a verdict, and it is the string matcher's standing limit, not this rule's.
+_HOME = re.compile(r"(?<![^\s'\"])(?:~|\$home|\$\{home\})(?=[/\s'\";&|()]|$)")
 
 
 def _expand_home(text: str) -> str:
@@ -268,25 +287,6 @@ def _searches(call) -> bool:
     """Whether this call is a directory search by virtue of which tool it is."""
     name = _normalise(str(getattr(call, "function", "") or ""))
     return any(tool in name for tool in _SEARCH_TOOLS)
-
-
-def _swept(text: str, marks: tuple[str, ...]) -> bool:
-    """Whether this call read a directory containing the skill, wholesale.
-
-    `find <skills> -name SKILL.md`, `grep -ri x <skills>/`, `rg x <skills>`
-    and `cat <skills>/*/SKILL.md` all read the skill and none of them spells
-    its directory, so matching the skill's own path missed every one. An
-    agent that has been told nothing and is looking for something reaches for
-    exactly these, which made the miss likeliest on the baseline -- the one
-    side whose emptiness the whole command rests on.
-
-    Reported as an unknown room rather than as contamination: the call could
-    sweep the skill and the record does not prove it did. Unknown and dirty
-    void the same verdicts, so the conservative answer costs nothing here.
-    """
-    if not any(glob in text for glob in _SWEEP_GLOBS) and not _SWEEP_WORDS.search(text):
-        return False
-    return any(_mentions(text, ancestor) for ancestor in _ancestors(marks))
 
 
 def _ancestors(marks: tuple[str, ...]) -> set[str]:
