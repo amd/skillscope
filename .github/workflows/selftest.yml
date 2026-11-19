@@ -62,7 +62,10 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install
-        run: python -m pip install --upgrade pip && python -m pip install .
+        # The suite needs the engine: it exercises both graded engines
+        # end to end. `structural` on a default install is covered by
+        # the light job below instead.
+        run: python -m pip install --upgrade pip && python -m pip install ".[inspect]"
 
       - name: Run the suite
         run: python -m unittest discover -s tests -t . --verbose

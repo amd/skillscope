@@ -2576,13 +2576,16 @@ class TestEngineInstallHint(unittest.TestCase):
         self.assertIn("--engine claude-code-no-sandbox", engine_module.install_hint("claude-code-no-sandbox"))
 
     def test_it_points_at_a_command_that_would_actually_help(self) -> None:
-        # It used to say `pip install 'skillscope[inspect]'`. inspect_ai is a
-        # required dependency now, so that extra is empty and following the
-        # advice would change nothing -- reaching this error means a broken or
-        # partial install, and reinstalling is the fix.
+        # It said "reinstall" while the engine was a required dependency,
+        # because reaching this meant a broken install rather than a missing
+        # extra. The engine is the `inspect` extra again, so the fix is to ask
+        # for it: against the repository, because the bare name is somebody
+        # else's project, and with `--force`, because the tool is already
+        # installed and `uv tool install` would otherwise do nothing.
         hint = engine_module.install_hint("claude-code")
-        self.assertNotIn("skillscope[inspect]", hint)
-        self.assertIn("reinstall", hint.lower())
+        self.assertIn(
+            install_module.install_command("inspect", force=True), hint
+        )
 
 
 class TestEveryInstallHintNamesTheRepository(unittest.TestCase):

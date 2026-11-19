@@ -75,8 +75,10 @@ def is_windows() -> bool:
 def require_provider(resolve=None) -> None:
     """Fail early, and legibly, when the chosen provider cannot be resolved.
 
-    `resolve` is injectable so this can be tested without the inspect extra
-    installed, which the unit suite deliberately runs without.
+    `resolve` is injectable so this can be tested without reaching inspect's
+    registry. The unit suite installs the `inspect` extra -- it has needed the
+    engine since the harness-independent one went -- so the injection is about
+    not depending on a live registry, not about the extra being absent.
     """
     name = provider()
     if resolve is None:
