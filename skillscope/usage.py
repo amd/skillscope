@@ -17,7 +17,9 @@ scope is right even if the shape is blunt; `reset()` exists for tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -71,6 +73,76 @@ def record(
     _current.calls += int(calls or 0)
     if cost_usd is not None:
         _current.cost_usd = (_current.cost_usd or 0.0) + float(cost_usd)
+
+
+@dataclass
+class Leg:
+    """What one half of a paired run spent, and how long it took.
+
+    One object rather than two loose numbers, because both cover exactly the
+    same interval. That is the only thing that entitles them to share a row.
+
+    `finished` is the caller's to set. A half the deadline stopped reports a
+    floor rather than a measurement, and a report that cannot tell the two
+    apart turns "the baseline was still going after half an hour" into "the
+    baseline took half an hour", which is a weaker claim than the truth.
+    """
+
+    label: str
+    usage: Usage = field(default_factory=Usage)
+    wall_time_s: float = 0.0
+    finished: bool = True
+
+    def as_meta(self) -> dict:
+        return {
+            "label": self.label,
+            "wall_time_s": round(self.wall_time_s, 1),
+            "finished": self.finished,
+            **self.usage.as_meta(),
+        }
+
+
+@contextmanager
+def leg(label: str):
+    """Account one half of a paired run on its own, then fold it into the run.
+
+    The global is *swapped*, not snapshotted and subtracted. `snapshot()`
+    hands back `_current` itself rather than a copy, so the obvious idiom --
+    hold a snapshot, subtract it afterwards -- subtracts the totals from
+    themselves and reports every half as having spent nothing. That failure
+    produces plausible zeros rather than an error, which is the kind that
+    survives review.
+
+    Everything that records does so by name off this module at call time
+    (`stats.record_log`, `record_stream_event`), so the swap reaches them
+    without either having to know a leg exists. Nothing records after the
+    engine returns, and the host leg's stream events run on the event loop
+    rather than a worker thread, so a scope around the call captures exactly
+    that half's spend even with several cases in flight.
+
+    Folded back on the way out, so `snapshot()` still answers for the whole
+    command: the `**usage.snapshot().as_meta()` that every report already
+    splices stays the sum of the halves, and no existing report changes.
+    """
+    global _current
+    outer, inner = _current, Usage()
+    half = Leg(label=label, usage=inner)
+    _current = inner
+    started = time.monotonic()
+    try:
+        yield half
+    finally:
+        half.wall_time_s = time.monotonic() - started
+        _current = outer
+        # Through `record` rather than by hand, so one place knows how to add
+        # one `Usage` into another -- including the rule that an unknown cost
+        # stays unknown rather than becoming zero.
+        record(
+            input_tokens=inner.input_tokens,
+            output_tokens=inner.output_tokens,
+            cost_usd=inner.cost_usd,
+            calls=inner.calls,
+        )
 
 
 def record_stream_event(event: dict) -> None:

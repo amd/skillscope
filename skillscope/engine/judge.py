@@ -46,6 +46,24 @@ Answer with a single line of JSON and nothing else:
 """
 
 
+class Ungradable(Exception):
+    """The judge could not reach a verdict. The run's failure, not the skill's.
+
+    Raised rather than returned as `(False, reason)`. A `False` here is a
+    statement about what the agent did, and an infrastructure fault wearing
+    that shape is not a neutral mistake -- it is one that reliably produces
+    the most alarming reading available. `skillscope staleness` compares two
+    runs, so a baseline whose judge never answered reads as a case the skill
+    was needed for, and a graded run whose judge never answered reads as a
+    skill that did harm. Both are conclusions about a skill drawn from a
+    sandbox that would not list or a grader that returned prose.
+
+    An exception rather than a third return value because the caller has to
+    do something different with it, and a `bool | None` invites being read as
+    falsy by every caller that does not know yet.
+    """
+
+
 def is_image(path: str) -> bool:
     return PurePosixPath(path).suffix.lower() in IMAGE_SUFFIXES
 
@@ -275,7 +293,7 @@ async def grade(
         # Say so rather than presenting an empty workspace as fact. A judge told
         # "no files" will confidently report the agent did nothing, which reads
         # as the skill failing when the sandbox is what failed.
-        return False, f"judge skipped: could not list the sandbox -- {exc}"
+        raise Ungradable(f"could not list the sandbox -- {exc}") from exc
 
     described, images = await artifacts(paths, read_images=complete is None)
 
@@ -327,10 +345,14 @@ async def grade(
         try:
             completion = await complete(question)
         except Exception as exc:  # noqa: BLE001 -- the CLI failed or printed no answer
-            # Reported against this expectation, like a sandbox that could not be
-            # listed: the judge failing says nothing about whether the agent did
-            # what was asked, and one expectation should not end the whole run.
-            return False, f"judge failed: {exc}"
+            # Reported against this expectation, like a sandbox that could not
+            # be listed -- which is to say `Ungradable`, not a failed check.
+            # The intent is the one this branch already acts on everywhere
+            # else: a judge that fell over says nothing about whether the
+            # agent did what was asked. Returning `False` here says something,
+            # and on a `must_happen=False` expectation what it says is that
+            # the forbidden thing happened.
+            raise Ungradable(f"judge failed: {exc}") from exc
     else:
         model = get_model(grader) if grader else get_model()
         output = await model.generate([ChatMessageUser(content=content)])
@@ -338,7 +360,9 @@ async def grade(
 
     parsed = parse_verdict(completion)
     if parsed is None:
-        return False, f"judge gave no JSON verdict: {completion[:200]!r}"
+        raise Ungradable(
+            f"judge gave no JSON verdict: {completion[:200]!r}"
+        )
     satisfied, reason = parsed
     return satisfied, f"judge: {reason}"
 

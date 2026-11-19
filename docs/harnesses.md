@@ -148,4 +148,8 @@ check. Three things still assume Claude Code:
   each agent is defined once. Until it does, a harness other than Claude Code has no
   sandboxed leg;
 * **`.claude/skills`** is the path routing treats as a skills inspection, rather
-  than a harness's own `skills_dir`.
+  than a harness's own `skills_dir`;
+* **`staleness`**: its baseline is only a measurement if the room is empty, and
+  the check that establishes that reads Claude Code's credentials and no other
+  harness's, so it refuses any `--harness` other than `claude-code` rather
+  than scaling the refusal per harness.

@@ -38,6 +38,12 @@ is a prompt nobody maintains, and a behavioral test that re-asserts routing
 with a substring match is a worse version of a check this module already
 models as a field.
 
+``staleness`` adds no third thing to write. It grades the behavioral cases
+above a second time with the skill withheld, which makes it a check on this
+dataset as much as on the skill: a case that passes either way is not
+evidence about the skill, whether because the skill stopped mattering or
+because the case was never evidence in the first place.
+
 ``skill_should_trigger: false`` makes the evaluation routing-only. No skill
 loads for it, so there is no behavioral phase to hang an assertion or a staged
 workspace off, and those fields are rejected rather than silently ignored:
