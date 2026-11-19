@@ -289,25 +289,6 @@ def _searches(call) -> bool:
     return any(tool in name for tool in _SEARCH_TOOLS)
 
 
-def _swept(text: str, marks: tuple[str, ...]) -> bool:
-    """Whether this call read a directory containing the skill, wholesale.
-
-    `find <skills> -name SKILL.md`, `grep -ri x <skills>/`, `rg x <skills>`
-    and `cat <skills>/*/SKILL.md` all read the skill and none of them spells
-    its directory, so matching the skill's own path missed every one. An
-    agent that has been told nothing and is looking for something reaches for
-    exactly these, which made the miss likeliest on the baseline -- the one
-    side whose emptiness the whole command rests on.
-
-    Reported as an unknown room rather than as contamination: the call could
-    sweep the skill and the record does not prove it did. Unknown and dirty
-    void the same verdicts, so the conservative answer costs nothing here.
-    """
-    if not any(glob in text for glob in _SWEEP_GLOBS) and not _SWEEP_WORDS.search(text):
-        return False
-    return any(_mentions(text, ancestor) for ancestor in _ancestors(marks))
-
-
 def _ancestors(marks: tuple[str, ...]) -> set[str]:
     """Every directory the skill sits under, by its own spelling.
 
