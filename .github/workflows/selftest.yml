@@ -62,10 +62,108 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install
-        run: python -m pip install --upgrade pip && python -m pip install .
+        # The suite needs the engine: it exercises both graded engines
+        # end to end. `structural` on a default install is covered by
+        # the light job below instead.
+        run: python -m pip install --upgrade pip && python -m pip install ".[inspect]"
 
       - name: Run the suite
         run: python -m unittest discover -s tests -t . --verbose
+
+  light:
+    # The default install, and the commands that are supposed to run on it.
+    #
+    # The unit job installs the `inspect` extra, because the suite exercises
+    # both graded engines, so nothing else here ever runs on a default
+    # install. Without this job the first module-scope `import inspect_ai` on
+    # the `structural` path breaks exactly the repos the split is for, and CI
+    # stays green. Which is how the imports came to be deferred and the
+    # dependencies required at the same time.
+    #
+    # Asserts the package count as well as the exit code: the commands would
+    # go on passing if the engine quietly came back as a dependency, and the
+    # weight is the thing being defended.
+    name: Default install stays light
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the default, and nothing else
+        run: python -m pip install --upgrade pip && python -m pip install .
+
+      - name: The eval stack is absent
+        shell: python
+        run: |
+          import importlib.util
+          import sys
+
+          present = [
+              name
+              # `acp` is what agent-client-protocol imports as; the
+              # distribution name finds nothing and the check would be dead.
+              for name in ("inspect_ai", "anthropic", "acp")
+              if importlib.util.find_spec(name) is not None
+          ]
+          if present:
+              sys.exit(
+                  "A default install carries the eval stack again: "
+                  f"{', '.join(present)}. Keep it in the `inspect` extra, or "
+                  "this job is the only thing that would have told you."
+              )
+          print("default install carries none of the eval stack")
+
+      - name: Build a repo to test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fixture/demo-skill/evals
+          cat > fixture/demo-skill/SKILL.md <<'EOF'
+          ---
+          name: demo-skill
+          description: Does demonstrable things, for a test that needs a skill.
+          ---
+          EOF
+          cat > fixture/demo-skill/evals/evals.json <<'EOF'
+          {
+            "evaluations": [
+              {"id": "demo-a", "skill_should_trigger": true, "prompt": "do the demo thing"},
+              {"id": "demo-b", "skill_should_trigger": true, "prompt": "another way to ask"},
+              {"id": "demo-c", "skill_should_trigger": true, "prompt": "a third phrasing"},
+              {"id": "demo-d", "skill_should_trigger": false, "prompt": "something adjacent"},
+              {"id": "demo-e", "skill_should_trigger": false, "prompt": "something else entirely"}
+            ]
+          }
+          EOF
+
+      - name: The commands that need no agent run on it
+        run: |
+          skillscope --repo fixture structural --skills-dir '*'
+          skillscope --repo fixture list-skills --skills-dir '*'
+          skillscope --repo fixture select --all --skills-dir '*'
+
+      - name: A graded command says how to add the engine
+        shell: python
+        run: |
+          import subprocess
+          import sys
+
+          done = subprocess.run(
+              ["skillscope", "--repo", "fixture", "routing",
+               "--skills-dir", "*", "--routing-room", "demo-skill"],
+              capture_output=True, text=True,
+          )
+          output = done.stdout + done.stderr
+          print(output)
+          if done.returncode == 0:
+              sys.exit("routing succeeded without the engine, which cannot be right.")
+          for wanted in ("`inspect` extra", "skillscope[inspect]", "git+https://github.com/amd/skillscope"):
+              if wanted not in output:
+                  sys.exit(f"the refusal does not name {wanted!r}:\n{output}")
+          print("a graded command refuses, and names the extra and the repository")
 
   sandbox:
     name: Sandbox machinery (${{ matrix.os }})

@@ -49,6 +49,7 @@ from skillscope import (
     datasets,
     deadline,
     engine as engine_module,
+    install as install_module,
     references,
     routing,
     staleness,
@@ -1023,6 +1024,55 @@ class TestActionLauncher(unittest.TestCase):
             (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
             with mock.patch.dict(os.environ, {"SKILLSCOPE_ACTION_PATH": str(root)}):
                 self.assertEqual(self.module.action_root(), root)
+
+    # A checkout, spelled by the platform the test runs on. Written out as
+    # `"/action"` these pinned the separator rather than the branch, because
+    # `str(Path("/action"))` is `\action` on Windows, and the four tests
+    # below failed there for a reason none of them is about.
+    ROOT = Path("/action")
+
+    def test_a_command_that_needs_no_agent_installs_without_the_engine(self) -> None:
+        # The point of the split: a repo running only these installed the
+        # whole eval stack to check that markdown links resolve.
+        for command in ("structural", "select", "list-skills", "template"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    str(self.ROOT), self.module.install_source(self.ROOT, command)
+                )
+
+    def test_a_graded_command_asks_for_the_engine(self) -> None:
+        for command in ("routing", "behavioral", "staleness"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    f"{self.ROOT}[inspect]",
+                    self.module.install_source(self.ROOT, command),
+                )
+
+    def test_a_command_this_has_never_heard_of_gets_the_engine(self) -> None:
+        # Which way the default points is the whole safety argument. A command
+        # added later, or one the set forgets, installs more than it needs and
+        # runs. The other way round it would stop on a missing wheel.
+        self.assertEqual(
+            f"{self.ROOT}[inspect]",
+            self.module.install_source(self.ROOT, "some-future-command"),
+        )
+
+    def test_arguments_beside_the_command_do_not_change_the_install(self) -> None:
+        self.assertEqual(
+            str(self.ROOT),
+            self.module.install_source(self.ROOT, "structural --external"),
+        )
+
+    def test_every_light_command_is_a_real_subcommand(self) -> None:
+        # Keeps the set honest: a renamed command would otherwise sit here
+        # forever, silently installing the engine it does not need.
+        actions = [
+            action
+            for action in cli.build_parser()._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ]
+        known = set(actions[0].choices)
+        self.assertEqual(set(), self.module.LIGHT_COMMANDS - known)
 
 
 class TestSelection(unittest.TestCase):
@@ -2575,13 +2625,49 @@ class TestEngineInstallHint(unittest.TestCase):
         self.assertIn("--engine claude-code-no-sandbox", engine_module.install_hint("claude-code-no-sandbox"))
 
     def test_it_points_at_a_command_that_would_actually_help(self) -> None:
-        # It used to say `pip install 'skillscope[inspect]'`. inspect_ai is a
-        # required dependency now, so that extra is empty and following the
-        # advice would change nothing -- reaching this error means a broken or
-        # partial install, and reinstalling is the fix.
+        # It said "reinstall" while the engine was a required dependency,
+        # because reaching this meant a broken install rather than a missing
+        # extra. The engine is the `inspect` extra again, so the fix is to ask
+        # for it: against the repository, because the bare name is somebody
+        # else's project, and with `--force`, because the tool is already
+        # installed and `uv tool install` would otherwise do nothing.
         hint = engine_module.install_hint("claude-code")
-        self.assertNotIn("skillscope[inspect]", hint)
-        self.assertIn("reinstall", hint.lower())
+        self.assertIn(
+            install_module.install_command("inspect", force=True), hint
+        )
+
+
+class TestEveryInstallHintNamesTheRepository(unittest.TestCase):
+    """The `skillscope` name on PyPI belongs to an unrelated project.
+
+    A hint naming the bare package sends a reader to install that project.
+    The hints and the docs drifted apart once already: `docs/usage.md` named
+    the repository while three hints in the code still named the bare
+    package, and nothing failed. So this is asserted over the source rather
+    than over the three messages a test happens to remember, because the next
+    hint will be written somewhere this file does not know about.
+    """
+
+    def test_no_module_tells_anyone_to_pip_install_this_tool(self) -> None:
+        root = Path(skillscope.__file__).parent
+        offenders = [
+            f"{path.relative_to(root)}:{number}: {line.strip()}"
+            for path in sorted(root.rglob("*.py"))
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            )
+            if re.search(r"pip install\S*\s[^\n]*skillscope", line)
+        ]
+        self.assertEqual([], offenders, "\n".join(offenders))
+
+    def test_the_command_names_the_repository_the_extra_and_the_force(self) -> None:
+        self.assertEqual(
+            "uv tool install 'skillscope[podman] @ "
+            "git+https://github.com/amd/skillscope'",
+            install_module.install_command("podman"),
+        )
+        self.assertNotIn("[", install_module.install_command())
+        self.assertIn("--force ", install_module.install_command(force=True))
 
 
 class TestEngineWorkdirPath(unittest.TestCase):
@@ -2754,9 +2840,12 @@ class TestClaudeCodeRefusesTheHostsFilesystem(unittest.TestCase):
         try:
             engine_verify.require()
         except SystemExit as exc:
-            # Whatever it stopped on, it was not the sandbox.
+            # Whatever it stopped on, it was not the sandbox. Asserted on what
+            # the refusal is about rather than on the install syntax it
+            # happens to print: pinning `pip install` here meant that
+            # correcting the install hint failed a test about sandboxes.
             self.assertNotIn("settings.json", str(exc))
-            self.assertIn("pip install", str(exc))
+            self.assertIn("needs the verify extra", str(exc))
 
 
 class TestEngineNoSandboxGuard(unittest.TestCase):
@@ -3092,7 +3181,7 @@ class TestEngineSandboxSelection(unittest.TestCase):
             engine_sandbox.require_provider(resolve=unresolvable)
         message = str(caught.exception)
         self.assertIn(engine_sandbox.SANDBOX_ENV, message)
-        self.assertIn("skillscope[podman]", message)
+        self.assertIn(install_module.install_command("podman"), message)
 
     def test_a_named_compose_file_that_is_missing_is_an_error(self) -> None:
         self._skill(machine="sandbox: nope.yaml\n")

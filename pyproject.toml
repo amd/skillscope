@@ -17,35 +17,44 @@ authors = [{ name = "Advanced Micro Devices, Inc." }]
 
 # Every engine runs under inspect_ai, so it is required rather than optional.
 #
-# It was an extra while `legacy` existed: that engine was standard library only,
-# so a repo that had not migrated installed nothing new. `legacy` is gone, and
-# keeping the extra would ship a tool whose graded commands all fail on a
-# plain `pip install` -- which is what CI found, by running the suite without
-# extras and getting `ModuleNotFoundError: inspect_ai` from the default engine.
+# Only PyYAML is required. The commands that need no agent -- `structural`,
+# `select`, `list-skills`, `template` -- import none of the eval stack, so a
+# repo running only those installed 86 packages to use 2. That is the normal
+# adoption order now that the dataset bar is configurable: the folder,
+# frontmatter and reference checks come first and the datasets come later, and
+# such a repo spends no tokens and still pulled an HTTP stack and a model
+# client to check that markdown links resolve.
 #
-# The static commands -- `structural`, `references`, `select`, `list-skills` --
-# still import none of it; they are just no longer the only thing that works
-# out of the box.
+# The eval stack was an extra once, while the `legacy` engine existed, and was
+# promoted to required when `legacy` went: keeping it an extra then shipped a
+# tool whose graded commands all failed on a plain install with a bare
+# `ModuleNotFoundError`. That reasoning still holds, and is now answered by a
+# message rather than by a dependency. `engine.require` names the extra, and
+# `bootstrap/launch.py` installs it for the commands that need it, so nobody
+# arrives at the traceback the promotion was protecting against.
+dependencies = ["pyyaml>=6.0"]
+
+[project.optional-dependencies]
+# The eval engine: everything the graded commands need and the light ones
+# never import. `bootstrap/launch.py` asks for it by command, so a consumer
+# workflow names no extra and nothing downstream changes.
 #
 # `anthropic` is listed explicitly: inspect-ai treats every model provider as
 # optional, so installing it alone gets you a harness that cannot reach a model.
-# PyYAML reads the optional evals/machine.yml, which only CI planning touches.
 #
 # `agent-client-protocol` is inspect-ai's own dependency, bounded here because its
 # 1.0.0 dropped `acp.helpers`, which inspect-ai imports whenever `eval()` runs
 # (https://github.com/UKGovernmentBEIS/inspect_ai/issues/6417). Remove the bound
 # once an inspect-ai release supports 1.0.
-dependencies = [
-    "pyyaml>=6.0",
+#
+# The name is the one it had before the promotion, so `skillscope[inspect]` in
+# a downstream pin keeps resolving, and `podman` and `verify` go on chaining
+# through it unchanged.
+inspect = [
     "inspect-ai>=0.3.263",
     "agent-client-protocol<1",
     "anthropic>=0.40",
 ]
-
-[project.optional-dependencies]
-# Kept as a name so `skillscope[inspect]` in a downstream workflow or a pinned
-# requirements file keeps resolving. It adds nothing now.
-inspect = []
 
 # For a runner that has podman rather than docker. The provider registers
 # itself through an `inspect_ai` entry point, so installing it is the whole

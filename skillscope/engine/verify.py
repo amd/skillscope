@@ -29,7 +29,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .. import config, deadline
+from .. import config, deadline, install
 from ..behavior import BehaviorOutcome
 from ..datasets import Case
 from . import (
@@ -45,7 +45,7 @@ from . import (
 
 INSTALL_HINT = (
     "error: --engine claude-code needs the verify extra. Install it with:\n"
-    "    pip install 'skillscope[verify]'"
+    f"    {install.install_command('verify')}"
 )
 
 
@@ -98,7 +98,7 @@ def require() -> None:
             "claude_code(effort=). Without it this leg runs at the model's "
             "default reasoning effort while the others run at the effort they "
             "were given, so the two are not comparable. Upgrade with:\n"
-            "    pip install --upgrade 'inspect-swe>=0.2.71'"
+            f"    {install.install_command('verify', force=True)}"
         )
 
 

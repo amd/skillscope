@@ -81,6 +81,30 @@ def packaged_version(checkout: Path) -> str:
     return found.group(1) if found else ""
 
 
+# Commands that import none of the eval engine, so they do not need the
+# `inspect` extra. Everything else does.
+#
+# Named as exceptions rather than listing the graded commands, because the two
+# fail differently. A command missing from this set gets an install larger than
+# it needs and still runs. The reverse would stop a command this list had never
+# heard of on a missing wheel, and `staleness` is recent enough to show that
+# the list is the thing that goes stale.
+LIGHT_COMMANDS = frozenset({"structural", "select", "list-skills", "template"})
+
+
+def install_source(source: Path, command: str) -> str:
+    """`source`, asking for the `inspect` extra unless `command` needs none.
+
+    The command is already declared at every call site in the workflows, so
+    nothing downstream names an extra and no consumer workflow changes. The
+    chosen source is printed with the command, so a log says which install a
+    run got.
+    """
+    words = shlex.split(command)
+    first = words[0] if words else command
+    return str(source) if first in LIGHT_COMMANDS else f"{source}[inspect]"
+
+
 def main() -> int:
     repo = Path(_env("SKILLSCOPE_REPO", ".") or ".").expanduser().resolve()
     command = _env("SKILLSCOPE_COMMAND")
@@ -98,7 +122,7 @@ def main() -> int:
     cmd = [
         "uvx",
         "--from",
-        str(source),
+        install_source(source, command),
         "skillscope",
         *shlex.split(command),
         *shlex.split(_env("SKILLSCOPE_ARGS")),
