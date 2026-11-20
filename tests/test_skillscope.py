@@ -1025,21 +1025,27 @@ class TestActionLauncher(unittest.TestCase):
             with mock.patch.dict(os.environ, {"SKILLSCOPE_ACTION_PATH": str(root)}):
                 self.assertEqual(self.module.action_root(), root)
 
+    # A checkout, spelled by the platform the test runs on. Written out as
+    # `"/action"` these pinned the separator rather than the branch, because
+    # `str(Path("/action"))` is `\action` on Windows, and the four tests
+    # below failed there for a reason none of them is about.
+    ROOT = Path("/action")
+
     def test_a_command_that_needs_no_agent_installs_without_the_engine(self) -> None:
         # The point of the split: a repo running only these installed the
         # whole eval stack to check that markdown links resolve.
         for command in ("structural", "select", "list-skills", "template"):
             with self.subTest(command=command):
                 self.assertEqual(
-                    "/action", self.module.install_source(Path("/action"), command)
+                    str(self.ROOT), self.module.install_source(self.ROOT, command)
                 )
 
     def test_a_graded_command_asks_for_the_engine(self) -> None:
         for command in ("routing", "behavioral", "staleness"):
             with self.subTest(command=command):
                 self.assertEqual(
-                    "/action[inspect]",
-                    self.module.install_source(Path("/action"), command),
+                    f"{self.ROOT}[inspect]",
+                    self.module.install_source(self.ROOT, command),
                 )
 
     def test_a_command_this_has_never_heard_of_gets_the_engine(self) -> None:
@@ -1047,13 +1053,14 @@ class TestActionLauncher(unittest.TestCase):
         # added later, or one the set forgets, installs more than it needs and
         # runs. The other way round it would stop on a missing wheel.
         self.assertEqual(
-            "/action[inspect]",
-            self.module.install_source(Path("/action"), "some-future-command"),
+            f"{self.ROOT}[inspect]",
+            self.module.install_source(self.ROOT, "some-future-command"),
         )
 
     def test_arguments_beside_the_command_do_not_change_the_install(self) -> None:
         self.assertEqual(
-            "/action", self.module.install_source(Path("/action"), "structural --external")
+            str(self.ROOT),
+            self.module.install_source(self.ROOT, "structural --external"),
         )
 
     def test_every_light_command_is_a_real_subcommand(self) -> None:
