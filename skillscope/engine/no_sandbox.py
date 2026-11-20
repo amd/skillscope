@@ -411,6 +411,39 @@ def _record_room(state, event: dict, room_names: list[str] | None) -> None:
     state.store.set(EXTRA_SKILLS_KEY, routing_core.init_extra_skills(event, room_names))
 
 
+def behavioral_solver_factory(
+    model: str | None,
+    effort: str | None,
+    harness: harnesses.Harness | None = None,
+    config_dir: Path | None = None,
+    install: bool = True,
+):
+    """The `solver_factory` the behavioral leg is run with on this engine.
+
+    `behavioral.build_task` calls it per skill with the skill's directory and
+    the env its prerequisites produced; both go to the solver, the env as
+    `extra_env` so it reaches this skill's agent and no other. `harness` is the
+    agent the run was asked for, Claude Code when none is named. `config_dir`
+    and `install` go to `harness_solver` as they are: `install` False is the
+    baseline half of a staleness run, which still gets the prerequisites, so
+    the skill is the only thing the two halves differ by.
+    """
+    chosen = harness or harnesses.get(harnesses.DEFAULT)
+
+    def factory(skill_dir: Path, env: dict[str, str]):
+        return harness_solver(
+            chosen,
+            model,
+            effort,
+            skill_dir,
+            config_dir,
+            install=install,
+            extra_env=env,
+        )
+
+    return factory
+
+
 def harness_solver(
     harness: harnesses.Harness,
     model: str | None,
@@ -421,6 +454,7 @@ def harness_solver(
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
     install: bool = True,
+    extra_env: dict[str, str] | None = None,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
 
@@ -430,6 +464,12 @@ def harness_solver(
     owns the rest, and owns it once for every harness. `claude_code_no_sandbox`
     is this with Claude Code, which is what every caller used before there was
     a choice.
+
+    `extra_env` is set for the CLI on top of this process's environment: what
+    the skill's prerequisites need the agent to see (`prerequisites.on_host`).
+    Passed here rather than written into ``os.environ``, so it reaches this
+    skill's agent and nothing else. What the harness itself sets still wins
+    over it, so a prerequisite cannot undo the config-dir isolation.
 
     `extra_flags` are the CLI's own controls -- `--max-budget-usd` and
     `--no-session-persistence` -- built by `routing.host_cost_flags`, which
@@ -492,9 +532,17 @@ def harness_solver(
                 extra_flags=tuple(extra_flags or ()),
             )
             # Started on the host, so the executable is looked up here and the
-            # runner's environment goes under what the harness sets.
+            # runner's environment goes under what the harness sets. The
+            # skill's prerequisites go between the two: over the runner's
+            # environment, under the harness's own settings and isolation.
+            # `host_env` already holds `env(spec)`; it is applied again last
+            # so that it wins over `extra_env`, not because it was missing.
             cmd = harness.host_command(spec)
-            env = harness.host_env(spec)
+            env = {
+                **harness.host_env(spec),
+                **(extra_env or {}),
+                **harness.env(spec),
+            }
             # Closed either way: a CLI that is not given its prompt on stdin
             # can still sit waiting on it.
             stdin_text = prompt if harness.prompt_on_stdin else ""
@@ -578,6 +626,7 @@ def claude_code_no_sandbox(
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
     install: bool = True,
+    extra_env: dict[str, str] | None = None,
 ):
     """`harness_solver` with Claude Code, the harness every caller has used."""
     return harness_solver(
@@ -590,4 +639,5 @@ def claude_code_no_sandbox(
         stop_when_factory,
         room_names,
         install,
+        extra_env,
     )
