@@ -127,6 +127,15 @@ on:
           uses skillscope's own default. See min_positive.
         type: string
         default: ""
+      max_body_lines:
+        description: >-
+          Lines a SKILL.md body may run to. Blank uses skillscope's own
+          default; `0` says nothing about length at all. Unlike the name and
+          description ceilings, this one is not the format's, so what a repo
+          will carry is the repo's call. It lives here for the same reason the
+          dataset bars do: a skill does not set what it is measured by.
+        type: string
+        default: ""
       skill_files:
         description: >-
           Files every skill must ship beside its SKILL.md, comma-separated and
@@ -375,6 +384,7 @@ jobs:
             ${{ inputs.skill_sections && format('--skill-sections ''{0}''', inputs.skill_sections) || '' }}
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
 
@@ -528,6 +538,7 @@ jobs:
             ${{ inputs.excluded_urls && format('--exclude-url ''{0}''', inputs.excluded_urls) || '' }}
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
 
@@ -591,6 +602,7 @@ jobs:
             --keep-logs routing-logs
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
@@ -657,6 +669,7 @@ jobs:
             --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"
@@ -717,6 +730,7 @@ jobs:
             --skill '${{ matrix.skill }}' ${{ needs.discover.outputs.extended }}
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ inputs.skill_globs }}
           python-version: ${{ inputs.python_version }}
           setup-python: "false"

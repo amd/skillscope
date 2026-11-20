@@ -70,6 +70,14 @@ DEFAULT_BEHAVIOR_OS = ("Linux",)
 DEFAULT_MIN_POSITIVE = 3
 DEFAULT_MIN_NEGATIVE = 2
 
+# How long a SKILL.md body may be. Unlike the name and description ceilings in
+# structure.py, this one is not the format's: nothing truncates a long body, and
+# the cost it describes -- an agent reading the whole body on every activation --
+# is real but gradual rather than a cliff. It is a repo's judgement about its own
+# skills, so it lives here with the other policy rather than there with the
+# format.
+DEFAULT_MAX_BODY_LINES = 500
+
 # The two answers `--routing-room` takes instead of a list of names: every
 # skill in the repo that ships a dataset, and no routing run at all. Both are
 # words rather than shapes of an empty flag, because saying nothing means "work
@@ -149,6 +157,12 @@ class Config:
     # machine, which is not the same set of people who review a workflow diff.
     min_positive: int = DEFAULT_MIN_POSITIVE
     min_negative: int = DEFAULT_MIN_NEGATIVE
+
+    # Lines a SKILL.md body may run to, or 0 to say nothing about length. Set
+    # from the command line only, for the same reason as the bars above: a repo
+    # decides what it asks of its skills, and a skill does not decide what it is
+    # measured by.
+    max_body_lines: int = DEFAULT_MAX_BODY_LINES
 
     @property
     def skills(self) -> dict[str, Path]:
@@ -355,6 +369,7 @@ def build(
     scoped_environment: str = "",
     min_positive: object = None,
     min_negative: object = None,
+    max_body_lines: object = None,
     dataset_skills: list[str] | None = None,
 ) -> Config:
     """A Config from loose values: what the CLI hands over after parsing.
@@ -403,6 +418,7 @@ def build(
         scoped_environment=(scoped_environment or "").strip(),
         min_positive=_bar(min_positive, "--min-positive", DEFAULT_MIN_POSITIVE),
         min_negative=_bar(min_negative, "--min-negative", DEFAULT_MIN_NEGATIVE),
+        max_body_lines=_bar(max_body_lines, "--max-body-lines", DEFAULT_MAX_BODY_LINES),
     )
 
 
