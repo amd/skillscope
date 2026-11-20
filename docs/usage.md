@@ -70,6 +70,7 @@ places to disagree.
 | `--skill-sections` | `skill_sections` | none | `##` headings each of those markdown files must have something under, such as `Description,Owner,License`. |
 | `--min-positive` | `min_positive` | `3` | Evaluations a skill needs with `skill_should_trigger: true`. |
 | `--min-negative` | `min_negative` | `2` | Evaluations it needs with `skill_should_trigger: false`. Zero for both means a skill need not ship a dataset at all. |
+| `--max-body-lines` | `max_body_lines` | `500` | Lines a `SKILL.md` body may run to. `0` says nothing about length. |
 | `--behavior-runner` | `behavior_runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavioral leg. |
 | `--behavior-os` | `behavior_os` | `Linux` | Platforms a skill runs on when its `machine.yml` does not narrow them. |
 | `--scoped-runner` | `scoped_runner` | reuses `behavior_runner` | Base labels for a leg whose skill asks for hardware labels. |
@@ -177,13 +178,28 @@ agent that simply never uses the skill. So every `SKILL.md` is read first:
 | frontmatter | opens the file, is valid YAML, and is a mapping |
 | `name` | non-empty, at most 64 characters, lowercase-with-hyphens, free of `anthropic` and `claude`, and equal to the folder name |
 | `description` | non-empty, at most 1024 characters |
-| body | at most 500 lines — past that it is reference material, and an agent reads it in full every time the skill loads |
+| body | at most `--max-body-lines` lines, 500 by default — past that it is reference material, and an agent reads it in full every time the skill loads |
 
 A directory that holds no `SKILL.md` is simply not a skill, and is passed over
 without a word. Matching *no* skill at all is the case that is reported, since
 a run that graded nothing and called itself green is the one way this harness
 can lie about a repo; a run given `--docs` is exempt, having been asked to
 check a repo's own prose.
+
+The first three of those are the format's, and a repo does not get to differ
+from them: a name over 64 characters or a description over 1024 is truncated by
+the runtime that reads it, whatever any checker thinks. The body limit is not
+like that. Nothing truncates a long body; what it costs is an agent reading the
+whole thing on every activation, which is real but gradual, and how much of it a
+repo will carry is a judgement rather than a rule. So it is `--max-body-lines`,
+defaulting to the same 500, and `0` turns it off.
+
+Turning it off is a bigger decision than it looks, and worth making on purpose.
+The check is easy to satisfy without improving anything: move the same content
+into a sibling file that the skill always reads, and the line count falls while
+the tokens stay, plus a tool call. That is an argument for not gating a merge on
+it, not for ignoring length, so a repo that stops failing on it should still
+have somewhere the number is seen.
 
 Whatever else your repo asks of a skill is policy rather than format, so it is
 configuration:

@@ -329,6 +329,10 @@ def cmd_structural(args: argparse.Namespace) -> int:
             "`evals/evals.json`; the ones that do are still read.",
             flush=True,
         )
+    if cfg.max_body_lines:
+        print(f"[evals] body limit: {cfg.max_body_lines} lines.", flush=True)
+    else:
+        print("[evals] body limit: off.", flush=True)
 
     found = _structural_or_exit()
     skills = datasets.skills_with_datasets()
@@ -1211,6 +1215,25 @@ def _add_dataset_bar_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_body_limit_argument(parser: argparse.ArgumentParser) -> None:
+    """How long a SKILL.md body may run to, in this repo.
+
+    A flag rather than a constant because, alone among the limits the
+    structural check applies, this one is not the format's. See
+    `config.DEFAULT_MAX_BODY_LINES`.
+    """
+    parser.add_argument(
+        "--max-body-lines",
+        default="",
+        metavar="N",
+        help=(
+            "Lines a SKILL.md body may run to, blank lines at either end not "
+            f"counted. Default: {config.DEFAULT_MAX_BODY_LINES}. `0` says "
+            "nothing about length at all."
+        ),
+    )
+
+
 def _add_docs_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--docs",
@@ -1263,6 +1286,7 @@ def _add_graded_arguments(
     # it takes the same flags. Without them a workflow that lowered the bar for
     # `structural` would still be refused by `routing` on the next line.
     _add_dataset_bar_arguments(parser)
+    _add_body_limit_argument(parser)
     parser.add_argument(
         "--skill",
         default="",
@@ -1464,6 +1488,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_skills_argument(structural_parser)
     _add_dataset_bar_arguments(structural_parser)
+    _add_body_limit_argument(structural_parser)
     _add_docs_argument(structural_parser)
     structural_parser.add_argument(
         "--skill-files",
@@ -1767,6 +1792,7 @@ def _configure(args: argparse.Namespace) -> None:
             "scoped_runner",
             "min_positive",
             "min_negative",
+            "max_body_lines",
         )
     }
     settings["scoped_gate"] = getattr(args, "scoped_gate", "") or ""

@@ -123,6 +123,15 @@ on:
           uses skillscope's own default. See min_positive.
         type: string
         default: ""
+      max_body_lines:
+        description: >-
+          Lines a SKILL.md body may run to. Blank uses skillscope's own
+          default; `0` says nothing about length at all. Unlike the name and
+          description ceilings, this one is not the format's, so what a repo
+          will carry is the repo's call. It lives here for the same reason the
+          dataset bars do: a skill does not set what it is measured by.
+        type: string
+        default: ""
       min_accuracy:
         description: >-
           Fail a routing leg below this accuracy (0-1). The default fails on any
@@ -308,6 +317,7 @@ jobs:
           args: >-
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ needs.discover.outputs.globs }}
 
   routing:
@@ -362,6 +372,7 @@ jobs:
             --min-accuracy '${{ inputs.min_accuracy }}'
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
             --output routing-report.json
             --keep-logs routing-logs
           skills: ${{ needs.discover.outputs.globs }}
@@ -421,6 +432,7 @@ jobs:
             --output behavioral-report.json
             ${{ inputs.min_positive != '' && format('--min-positive ''{0}''', inputs.min_positive) || '' }}
             ${{ inputs.min_negative != '' && format('--min-negative ''{0}''', inputs.min_negative) || '' }}
+            ${{ inputs.max_body_lines != '' && format('--max-body-lines ''{0}''', inputs.max_body_lines) || '' }}
           skills: ${{ needs.discover.outputs.globs }}
           install-claude: "true"
 
