@@ -19,6 +19,7 @@ to tick through, see [checklist.md](checklist.md).
 * [References](#references)
 * [Routing, and the bar it is held to](#routing-and-the-bar-it-is-held-to)
 * [Hardware a skill needs](#hardware-a-skill-needs)
+* [Is the skill still earning its place?](#is-the-skill-still-earning-its-place)
 * [In CI: one job](#in-ci-one-job)
 * [In CI: the full pipeline](#in-ci-the-full-pipeline)
 * [Versions](#versions)
@@ -29,6 +30,27 @@ to tick through, see [checklist.md](checklist.md).
 Every skill ships one dataset at `<skill>/evals/evals.json`. A prompt alone
 grades routing; add expectations and it also runs end to end. How to write one
 is in [authoring-evals.md](authoring-evals.md).
+
+By default a skill needs three evaluations that expect it to fire and two that
+expect it not to, and a skill with no dataset at all fails the structural
+check. That is the bar a new catalogue should hold, and it is the wrong bar for
+an existing one: a repo adopting skillscope over fifty skills written before it
+cannot write two hundred and fifty prompts before its first green run, and the
+alternative it reaches for is to not run the checks. `--min-positive` and
+`--min-negative` lower the bar so the folder, frontmatter and reference checks
+can start working immediately, and get raised as the datasets land. Zero for
+both turns the dataset requirement off; a skill that ships a dataset anyway is
+still read against whatever the bar is.
+
+**Where that bar may be set is the point.** It is a flag, so under CI it is a
+line in the workflow, which is a path a repo can put behind branch protection
+and code owners. There is no file in the repo under test, none inside a skill,
+and no environment variable the CLI will read. The bar a skill is measured
+against is not the skill author's to set: were it a file beside the skill, the
+same pull request that adds a thin dataset could lower the number it is judged
+by, and a reviewer would have to notice the second change to understand the
+first. The applied bar is printed at the top of every structural run, passing
+or failing, so a report always says what it was holding skills to.
 
 ## Configuring the repo under test
 
@@ -47,6 +69,8 @@ places to disagree.
 | `--exclude-url` | `excluded_urls` | none | Regexes matching URLs the external reference check leaves alone. For hosts that are auth-gated or that answer a runner's IP with a 403. |
 | `--skill-files` | `skill_files` | none | Files every skill must ship beside its `SKILL.md`, such as a governance card. |
 | `--skill-sections` | `skill_sections` | none | `##` headings each of those markdown files must have something under, such as `Description,Owner,License`. |
+| `--min-positive` | `min_positive` | `3` | Evaluations a skill needs with `skill_should_trigger: true`. |
+| `--min-negative` | `min_negative` | `2` | Evaluations it needs with `skill_should_trigger: false`. Zero for both means a skill need not ship a dataset at all. |
 | `--behavior-runner` | `behavior_runner` | `["ubuntu-latest"]` | `runs-on` labels for a behavioral leg. |
 | `--behavior-os` | `behavior_os` | `Linux` | Platforms a skill runs on when its `machine.yml` does not narrow them. |
 | `--scoped-runner` | `scoped_runner` | reuses `behavior_runner` | Base labels for a leg whose skill asks for hardware labels. |
@@ -250,6 +274,135 @@ Legs with a scoped environment run as a separate job, because a job's
 credentials are fixed before its matrix expands. A repo that declares no scoped
 environment gets one matrix, labels and all.
 
+## Is the skill still earning its place?
+
+A behavioral run says a skill's cases pass. It cannot say they pass *because
+of* the skill, and those are different claims: an expectation any competent
+agent meets is a measurement of the model with the skill's name on it.
+
+`skillscope staleness` runs the same cases twice, once with the skill
+installed and once with nothing installed, and reports which ones moved.
+
+```bash
+skillscope staleness --skill my-skill
+```
+
+On the default engine this needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
+in the environment and refuses to start without one, the same way `routing`
+does and for a stronger version of the same reason: the key is what lets the
+run redirect the CLI away from the runner's own config dir, and the baseline
+half has to be a room with no skills in it. Without it, every skill installed
+on the machine joins the baseline, and a case one of them solves there is
+reported as a case the skill under test was not needed for. A plain `claude
+login` is enough for `behavioral` and is not enough here. `--engine
+claude-code` needs no key for this, since its guest has no user-level skills
+at all.
+
+The report leads with what each half cost, because that is the cheaper
+question and often the more useful answer. An agent holding the skill goes
+straight to the work; an agent without it explores. On the first real run of
+this command the graded half finished in 2m23s and the baseline was still
+going half an hour later, with every case passing on both sides -- a skill
+plainly earning its keep, which a verdict table alone reports as `no_signal`
+throughout.
+
+| Half | Wall time | Model calls | Tokens | Cost |
+| --- | --- | --- | --- | --- |
+| with the skill | 2m23s | 37 | 184220 | n/a |
+| nothing installed | 28m00s+ | 214 | 1044901 | n/a |
+
+A `+` marks a half the `--timeout` stopped: that row is a floor, not a
+measurement. Cost reads `n/a` unless the provider supplies pricing, which a
+gateway generally does not and which inspect's own registry supplies for no
+model at all; `SKILLSCOPE_MODEL_PRICING` is the way in. **A missing cost is a
+missing number and not a zero** -- dollars arrive with a run's final event,
+which a half the bound stopped never reaches, so the half that spent *more*
+is the likelier one to show nothing. Tokens and wall clock are the reliable
+columns.
+
+Then the verdicts. Three, and an error state:
+
+| Verdict | Means |
+| --- | --- |
+| `earns_it` | passed with the skill, failed without it -- the case discriminates |
+| `harmful` | failed with the skill, passed without it -- the skill steered the agent wrong |
+| `no_signal` | came out the same both ways |
+| `ungraded` | nothing could be concluded: every attempt errored on one side or both, a grader never answered, a case was missing from a side, or the baseline was not the empty room it claimed to be |
+
+Three rather than more. Earlier versions split out whether the skill fired,
+whether a case claimed anything positive at all, and whether a shared failure
+was a broken case or a hard one. All three are still reported, as counts and
+notes beside the verdict rather than as verdicts of their own. None of them
+was a different answer to the question this command asks; each was one of
+these answers with a caveat attached.
+
+A verdict says what changed, not why. So the graded side also records whether
+the agent *reached for* the skill, using the same detector the routing leg
+uses: installing a skill does not make an agent use it, and "installed and the
+outcome differed" is a weaker claim than "the skill fired and the outcome
+differed". A case that moved without the skill firing is still `earns_it` --
+the outcome did differ -- but it is counted and flagged above the case table,
+so the headline share can be discounted by a reader who cares. Guard rails,
+`unexpected_behavior`, are kept out of the verdict entirely, since a good one
+holds whether or not the skill is installed; they are counted on their own,
+and in both directions. A guard broken *with* the skill installed is the
+serious finding. A guard the **baseline** broke and the installed side held
+is the opposite one, and the report says so: the skill stopped the agent
+doing the forbidden thing. Both sides can reach the same answer with only one
+of them wrecking something on the way, and no verdict in the table can
+express that. The first real run of this command found one unprompted, an
+unaided agent attempting a `sudo` write on a case the skill kept read-only.
+
+`no_signal` is the verdict worth acting on, and it is three findings wearing
+one name. The pass counts and the advice column say which you are holding:
+
+* **both sides passed** -- the agent already does this unaided, so the case is
+  not evidence about the skill. Either the skill has stopped mattering or the
+  case never tested it, and the second is more common, which makes this as
+  much a check on the dataset as on the skill.
+* **both sides failed** -- a broken case or a hard one. Nothing here has been
+  shown to work well enough to then ask whether the skill is why, so this
+  points at the case rather than the skill.
+* **a side disagreed with itself** -- only possible above one attempt. The
+  baseline managed it at least once, which is not the same finding as a case
+  both sides managed every time. Re-run before reading anything into it.
+
+A case that claims nothing positive at all is `no_signal` too, since neither
+side can meet a claim that was never made. The advice column says so rather
+than calling it broken: its guard rails were still checked, and the case is
+working exactly as written.
+
+### Spending less on a run
+
+Both halves of a comparison are agent passes, and the baseline is the slower
+one: an agent holding the skill goes straight to the work, and an agent
+without it explores. Three flags decide what a run costs.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--attempts N` | 1 | Run every case N times on each side. Costs N times as much. A side counts as having passed when **any** of its attempts did, so a higher N is a harder question rather than a steadier reading of the same one: `earns_it` at three attempts needs the baseline to have failed all three times, and a baseline that passes once in three takes the case to `no_signal`. Verdicts compare with verdicts from runs at the same N, not across different ones. What you gain is the counts printed beside each verdict: `3/3` against `0/3` is a result, `3/3` against `1/3` is a baseline that managed it once, and `2/3` against `1/3` is two sides that both disagreed with themselves. The advice column calls that last one out rather than letting it read as a dead case. |
+| `--max-cases N` | every case | Grade only the first N cases of each selected skill, after `--only` and `--extended` have chosen them. Both sides run the same N, and the report says the run did not cover the whole suite. |
+| `--concurrency N` | inspect's default | How many cases may be in flight at once. Where the wall clock goes on the baseline half. Raise it as far as the engine's sandboxes and the model's rate limits allow. |
+
+Budget more wall clock than a `behavioral` run of the same cases, and more
+than double it. `--timeout` defaults to twice what the single-pass commands
+use for that reason. Both passes share one `--timeout`, and the baseline is
+reliably the slower half: the agent holding the skill goes straight to the
+work, while the one without it explores. On a two-case skill the graded pass
+took 2m23s and the baseline had not finished its second case half an hour
+later. A bound that expires partway reports the unreached cases as `ungraded`,
+after the graded half has already been paid for.
+
+No verdict it reaches fails a run, for the reason the `claude-code` leg does
+not gate either: the agent is nondeterministic on both sides, so a single pair
+is a place to look rather than a verdict. An expired `--timeout` or a refused
+run still exits non-zero, because those are statements about the run rather
+than about a skill. [`tools/benchmark_engines.py`](../tools/benchmark_engines.py)
+is the shape of the honest version of this comparison — it measures agreement
+against how much one engine already disagrees with itself — and a staleness
+number deserves the same scepticism. It also costs twice what `behavioral`
+costs, which is why no workflow runs it for you.
+
 ## Which engine grades a run
 
 Two choices decide what runs the cases, and they are separate: `--engine` is
@@ -274,15 +427,23 @@ combining one with a different `--harness` is refused.
 `$SKILLSCOPE_ENGINE`. Each harness names models its own way and has its own
 default; `--model opus`, `sonnet` and `haiku` mean the right thing for every
 harness, and CI holds each harness to one model. A report from one harness is its
-own result and is not comparable with another's. How a harness works, and how to
+own result and is not comparable with another's, and for a harness judged through its
+own CLI that includes how strictly its expectations were judged: the verdict comes from
+the same model family that produced the run, not from an independent one. How a harness works, and how to
 add one, is in [harnesses.md](harnesses.md).
 
-**`copilot` today runs routing only.** It authenticates from
-`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`, needs no model credential,
-and in Actions needs `permissions: copilot-requests: write` in the calling
-workflow. `behavioral` is refused on it until the judge that grades its
-expectations is available through the harness. Its preflight sends one real
-prompt, which is billed like any other.
+**`copilot` needs no model credential.** It authenticates from
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN`, and in Actions needs
+`permissions: copilot-requests: write` in the calling workflow. Both `routing` and
+`behavioral` run on it. The LLM judge that grades `expected_behavior` and
+`unexpected_behavior` is the same CLI, credential and model as the agent, asked one
+question with no tool offered and nothing pre-approved; it sees text only, so an
+image artifact is named to it and not shown. Its preflight, and each judged
+expectation, send one real prompt, billed like any other. Copilot reports its skills
+through `copilot skill list --json` rather than at session start, so a `routing` run
+asks it once per case and names any skill nobody staged; `behavioral` does not run
+the room check. The CLI's own built-in skills are present in every room and are not
+counted as extras, though they can still win a prompt.
 
 Where the agent runs is the axis worth choosing along: the host measures the machine as it is, with whatever else is installed
 on it, and the sandbox measures the skill alone. When the two disagree, the
@@ -299,14 +460,25 @@ case's grade -- it is offered for every prompt, so it changes every decision at
 once while the run still reports a clean accuracy. `claude-code` is the only
 leg immune by construction: its guest has no `~/.claude` to contribute.
 
-The host leg cannot read the CLI's session-init event, so it has no way to
-notice such contamination or report it -- and therefore refuses to run a
-routing leg at all unless one of the harness's credential variables is set
-(see [harnesses.md](harnesses.md): `ANTHROPIC_API_KEY` or
-`ANTHROPIC_AUTH_TOKEN` for Claude Code, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or
-`GITHUB_TOKEN` for Copilot CLI), which is what lets it redirect the CLI's
-config dir away from the runner's own. Refusing beats being
-quietly wrong about every case.
+On Claude Code the host leg reads the CLI's session-init event, so a stray skill
+is named in the report as an extra; the sandboxed leg never sees that event
+(`inspect_swe` does not surface it). Copilot CLI does not announce its skills at
+all, so skillscope asks it what a session would load (`copilot skill list`, no
+model call), and a stray skill is named in the report the same way. Even so, the
+host leg refuses to run a routing leg at all unless one of the harness's
+credential variables is set (see [harnesses.md](harnesses.md):
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` for Claude Code,
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` for Copilot CLI), which is
+what lets it redirect the CLI's config dir away from the runner's own. A room
+that was checked and found contaminated is still not the room that was asked
+for, and refusing beats being quietly wrong about every case.
+
+`staleness` is stricter, and not on the same terms. It has no leg for any
+harness but Claude Code yet, so it refuses any `--harness` other than
+`claude-code` whatever credentials are present, rather than scaling the
+refusal per harness the way routing does. On Claude Code it then asks routing's
+question as well, because there the empty room is not one input to the
+measurement, it is the measurement.
 
 Both legs stop at the decision, by different routes. `claude-code`'s calls
 cross inspect's bridge, so the one that reveals the decision is declined
@@ -411,6 +583,8 @@ Naming several, and holding them to different bars:
 | `behavioral` | `required` | `required`, `optional`, or `off`. |
 | `runner` | `ubuntu-latest` | `runs-on` for every job: one label, or a JSON array of them. |
 | `min_accuracy` | `1` | The routing bar. `0` reports the score without gating on it. |
+| `min_positive` | (skillscope's own) | Evaluations a skill needs with `skill_should_trigger: true`. |
+| `min_negative` | (skillscope's own) | Evaluations it needs with `skill_should_trigger: false`. Zero for both means a skill need not ship a dataset. |
 | `api_key` | (none) | The model API key, mapped from the caller's vault. One secret, not the whole set. |
 | `api_key_secret` | `ANTHROPIC_API_KEY` | Name to look up under `secrets: inherit`, if you would rather pass the vault than map one key. |
 | `api_base_url` | (none) | Base URL of the gateway that issued the key. Blank talks to the provider directly. |
