@@ -1962,6 +1962,48 @@ class TestPathsASkillWritesAboutItself(unittest.TestCase):
         self.body("Run `scripts/detect.py`.\n")
         self.assertEqual(structure.errors(), [])
 
+    def test_a_path_rooted_at_another_variable_is_not_the_skills_own(self) -> None:
+        # Only SKILL_DIR roots a path at the skill. Any other variable roots it
+        # in a layout this check cannot see, so the mention is not the skill to
+        # answer for, and this is a gate: reporting it fails a healthy skill.
+        # Both spellings matter. Stripping just the variable leaves a leading
+        # slash for the braced form, which the absolute-path guard happens to
+        # drop, and a bare name for the other, which nothing drops.
+        self.body(
+            "Run `${CLAUDE_PLUGIN_ROOT}/skills/demo-skill/scripts/detect.py`.\n"
+            "Or `$CLAUDE_PLUGIN_ROOT/skills/demo-skill/scripts/detect.py`.\n"
+            "Or `$HOME/.claude/skills/demo-skill/scripts/detect.py`.\n"
+        )
+        self.assertEqual(structure.errors(), [])
+
+    def test_markdown_in_the_dataset_is_not_the_skills_prose(self) -> None:
+        # evals/ is test data. A stale path inside a fixture is the fixture to
+        # answer for, and gating the skill on it would gate on test material.
+        self.body("Run `scripts/detect.py`.\n")
+        self.body(
+            "Read `Upstream/Repo/skills/demo-skill/scripts/detect.py`.\n",
+            where="evals/fixtures/case.md",
+        )
+        self.assertEqual(structure.errors(), [])
+
+    def test_markdown_in_a_hidden_directory_is_not_the_skills_prose(self) -> None:
+        # A dot-directory inside the skill is tooling rather than prose an
+        # agent is ever handed to read.
+        self.body("Run `scripts/detect.py`.\n")
+        self.body(
+            "Read `Upstream/Repo/skills/demo-skill/scripts/detect.py`.\n",
+            where=".internal/notes.md",
+        )
+        self.assertEqual(structure.errors(), [])
+
+    def test_a_file_in_a_hidden_directory_does_not_ship(self) -> None:
+        # Nothing vendors a dot-directory, so a file in one is not what a
+        # mention ending in that name is pointing at.
+        (self.folder / ".internal").mkdir(parents=True, exist_ok=True)
+        (self.folder / ".internal" / "helper.py").write_text("", encoding="utf-8")
+        self.body("Read `Upstream/Repo/skills/demo-skill/.internal/helper.py`.\n")
+        self.assertEqual(structure.errors(), [])
+
 
 class TestARepoWhereNoSkillWasFound(unittest.TestCase):
     """Grading nothing is reported, because a green check for it would lie."""

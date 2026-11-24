@@ -103,7 +103,12 @@ _BARE_URL = re.compile(r"https?://[^\s<>\"'`\\)\]}]+")
 _PATH_MENTION = re.compile(r"[\w./\-]+/[\w.\-]+\.[A-Za-z0-9]{1,6}")
 # `${SKILL_DIR}/scripts/launch.sh` is rooted at the skill, so the tail is what
 # has to resolve. Strip the variable rather than reading the rest as absolute.
-_SHELL_VAR_PREFIX = re.compile(r"\$\{?\w+\}?/")
+_SKILL_ROOT_PREFIX = re.compile(r"\$\{?SKILL_DIR\}?/")
+# Any other variable roots the path where this check cannot follow: a plugin's
+# install directory, a home directory, a mount named at runtime. The mention
+# goes whole, because stripping only the variable leaves a path shape that
+# resolves from nowhere and reads as the skill's own broken path.
+_FOREIGN_VAR_PATH = re.compile(r"\$\{?\w+\}?/[\w./\-]*")
 # Trailing punctuation belongs to the sentence, not to the URL.
 _URL_TAIL = ".,;:!?'\""
 
@@ -267,7 +272,9 @@ def path_mentions(text: str) -> set[str]:
     """
     return {
         match.group(0).strip("`'\"(),")
-        for match in _PATH_MENTION.finditer(_SHELL_VAR_PREFIX.sub("", text))
+        for match in _PATH_MENTION.finditer(
+            _FOREIGN_VAR_PATH.sub(" ", _SKILL_ROOT_PREFIX.sub("", text))
+        )
     }
 
 
