@@ -6,16 +6,18 @@ SPDX-License-Identifier: MIT
 
 # What a skill has to do to pass
 
-Skillscope grades a skill three ways. This page lists what each one wants from
+Skillscope grades a skill four ways. This page lists what each one wants from
 you, in order.
 
 1. **Structural** — are the files the right shape? No agent, no cost, seconds.
 2. **Routing** — when someone types a prompt, does the right skill switch on?
 3. **Behavioral** — once it is on, does it do the job?
+4. **Staleness** — is the skill what makes the difference, or would the model
+   have managed without it?
 
 Run `skillscope structural` first. It checks everything in section 1 for free.
-Routing and behavioral both run those same checks before they spend anything,
-so while section 1 is red, nothing else will run at all.
+The three graders that spend money all run those same checks before they
+spend anything, so while section 1 is red, nothing else will run at all.
 
 Why each rule exists is in [usage.md](usage.md). How to write the dataset is in
 [authoring-evals.md](authoring-evals.md).
@@ -63,9 +65,20 @@ where it should.
 * [ ] Every `id` is different from every other id **in the whole repo**, not
       just in this file. Routing puts all the skills' prompts in one run, so
       the ids meet.
-* [ ] At least 3 entries say `skill_should_trigger: true` and at least 2 say
-      `false`. Only this file counts; `extended_evals.json` does not.
+* [ ] Enough of each kind: by default 3 entries saying
+      `skill_should_trigger: true` and 2 saying `false`. Only this file
+      counts; `extended_evals.json` does not.
 * [ ] If an entry has a `workspace`, that directory exists under the skill.
+
+That 3-and-2 bar is `--min-positive` and `--min-negative`, so a catalogue of
+skills written before these checks existed can lower it and raise it again as
+the datasets land, rather than leaving the folder, frontmatter and reference
+checks switched off until every dataset is written. Zero for both stops
+requiring a dataset at all; a skill that ships one anyway is still read
+against whatever the bar is. Every structural run prints the bar it applied,
+passing or failing. It is a flag and nothing else — no file in the repo under
+test, none inside a skill, no environment variable — because the bar a skill
+is measured against is not the skill author's to set.
 
 Which keys an entry may use depends on its own `skill_should_trigger`:
 
@@ -171,7 +184,51 @@ said about it. An agent claiming it avoided something is not evidence.
 * [ ] Anything that must exist before the prompt runs is put there by
       `workspace`, or by `evals/hooks.py` when a JSON file cannot express it.
 
-## 4. In CI
+## 4. Staleness
+
+Runs the behavioral cases twice, once with the skill installed and once with
+nothing installed, and reports which ones moved. A behavioral run says the
+cases pass. It cannot say they pass *because of* the skill, and those are
+different claims: an expectation any competent agent meets is a measurement
+of the model with the skill's name on it.
+
+Nothing new to write. It reads the `evals.json` you already have.
+
+Unlike the other three, this one does not gate. A completed run always exits
+0: both sides are nondeterministic, so a verdict is somewhere to look rather
+than a build failure. Only a deadline that expired fails, that being a
+statement about the run rather than about the skill.
+
+| Verdict | Means |
+| --- | --- |
+| `earns_it` | passed with the skill, failed without it — the case discriminates |
+| `harmful` | failed with the skill, passed without it — the skill steered the agent wrong |
+| `no_signal` | came out the same both ways |
+| `ungraded` | one side or both could not be graded |
+
+* [ ] The case claims something the skill will *do* — `expected_behavior`,
+      `logs_contain` or `files_exist`. Only those decide a verdict.
+* [ ] On the default engine, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is
+      set. A `claude login` is enough for behavioral and is not enough here:
+      the key is what redirects the CLI away from the runner's own config
+      directory, and the baseline half has to be a room with no skills in it.
+      Without that, every skill on the machine joins the baseline, and a case
+      one of them solves there reads as a case this skill was not needed for.
+      `--engine claude-code` needs no key, its guest having no user-level
+      skills at all.
+
+`unexpected_behavior` is deliberately not one of the claims that decide a
+verdict. A guard rail exists to catch a future edit that starts doing the
+forbidden thing, so a well-written one holds whether or not the skill is
+installed. Counting it would mark the checks most worth keeping as dead
+weight, and push an author to delete them.
+
+`--attempts N` runs every case N times a side, and a side counts as passed
+when **any** of its attempts did, so a higher N is a harder question rather
+than a steadier reading of the same one. Verdicts compare with verdicts from
+runs at the same N, not across different ones.
+
+## 5. In CI
 
 Two workflows will run these graders for you. They are not interchangeable:
 each accepts its own set of inputs, and passing one of the other's fails.
@@ -247,6 +304,7 @@ skillscope structural                        # section 1, free
 skillscope structural --external             # the same, plus checking web links
 skillscope routing --routing-room my-skill,its-neighbour
 skillscope behavioral --skill my-skill
+skillscope staleness --skill my-skill        # section 4, needs a key
 ```
 
 Reports are printed, written to `$GITHUB_STEP_SUMMARY` under Actions, and
