@@ -669,6 +669,7 @@ jobs:
         with:
           name: behavioral-report-${{ matrix.skill }}-${{ matrix.os }}
           path: .skillscope/
+          include-hidden-files: true
           if-no-files-found: warn
 
   # Behavioral legs on hardware with its own environment. Those bring scoped
@@ -737,6 +738,7 @@ jobs:
         with:
           name: behavioral-report-${{ matrix.skill }}-${{ matrix.os }}-${{ matrix.environment }}
           path: .skillscope/
+          include-hidden-files: true
           if-no-files-found: warn
 
   # Single aggregate result, so a caller can gate on one check:
