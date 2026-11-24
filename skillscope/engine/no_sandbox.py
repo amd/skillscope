@@ -51,12 +51,15 @@ STOP_REASON_KEY = "skillscope_host_stop_reason"
 # rather than spelled inline because the mapper reads it back.
 STOP_RESULT = "result"
 
-# The room check, read off the CLI's `system/init` event: which of the skills
-# this run installed the agent actually reported seeing, and which it reported
-# that nobody installed. Only this leg can answer -- `claude-code` drives the
-# CLI through `inspect_swe`, which does not surface the init event -- so these
-# stay unset there and `cli.cmd_routing` says the check did not run rather than
-# letting an empty list read as a clean room.
+# The room check: which of the skills this run installed the agent actually
+# reported seeing, and which it reported that nobody installed. Two sources fill
+# these keys. A harness that announces its skills at session start does it
+# through the CLI's `system/init` event. One that does not is asked instead, by
+# `Harness.room`, before the case runs. If a harness ever did both, the init
+# event is read later in the stream and overwrites the answer from `room`. Only
+# this leg can answer -- `claude-code` drives the CLI through `inspect_swe`,
+# which surfaces neither -- so these stay unset there and `cli.cmd_routing` says
+# the check did not run rather than letting an empty list read as a clean room.
 VISIBLE_SKILLS_KEY = "skillscope_visible_skills"
 EXTRA_SKILLS_KEY = "skillscope_extra_skills"
 
@@ -417,6 +420,7 @@ def harness_solver(
     extra_flags: list[str] | None = None,
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
+    install: bool = True,
 ):
     """Solver: install the skill, run the real CLI once, record what it did.
 
@@ -453,6 +457,12 @@ def harness_solver(
     which skill fired, and everything after that is paid for and unread. Left
     `None`, this runs through `inspect_ai.util.subprocess` exactly as before.
 
+    `install` is what separates a graded run from its baseline. False stages
+    nothing, so the agent meets the prompt with no skill at all -- the failure
+    `install_skill` exists to prevent, asked for on purpose and labelled as
+    such by the caller. `skillscope staleness` runs both and compares them;
+    nothing else should pass False.
+
     A factory rather than the rule itself because the solver is built once and
     run for every sample, while a budget counts *per case*. Handed a single
     rule, its tally would carry from one case into the next and the room would
@@ -469,7 +479,8 @@ def harness_solver(
             from inspect_ai.util import subprocess as sandbox_subprocess
 
             workspace = await _workspace()
-            install_skill(skill_dir, workspace, harness.skills_dir)
+            if install:
+                install_skill(skill_dir, workspace, harness.skills_dir)
             prompt = state.input_text
 
             spec = harnesses.RunSpec(
@@ -490,6 +501,24 @@ def harness_solver(
             # One per case, not one per run: it may remember what it has read,
             # and the next case must not inherit that.
             normalize = harness.normalizer()
+
+            if room_names:
+                # A harness that does not announce its skills at session start
+                # can still be asked what a session here would load, once per
+                # case and without a model call. Off the event loop: it blocks.
+                async with _subprocess_concurrency():
+                    listed = await asyncio.to_thread(harness.room, workspace, env)
+                if listed is not None:
+                    seen = {name.lower() for name in listed}
+                    known = {name.lower() for name in room_names}
+                    state.store.set(
+                        VISIBLE_SKILLS_KEY,
+                        [name for name in room_names if name.lower() in seen],
+                    )
+                    state.store.set(
+                        EXTRA_SKILLS_KEY,
+                        [name for name in listed if name.lower() not in known],
+                    )
 
             events: list[dict] = []
             if stop_when_factory is None:
@@ -548,6 +577,7 @@ def claude_code_no_sandbox(
     extra_flags: list[str] | None = None,
     stop_when_factory: Callable[[], Callable[[dict], str | None]] | None = None,
     room_names: list[str] | None = None,
+    install: bool = True,
 ):
     """`harness_solver` with Claude Code, the harness every caller has used."""
     return harness_solver(
@@ -559,4 +589,5 @@ def claude_code_no_sandbox(
         extra_flags,
         stop_when_factory,
         room_names,
+        install,
     )
