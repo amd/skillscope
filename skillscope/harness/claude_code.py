@@ -43,6 +43,13 @@ class ClaudeCode(Harness):
         return engine_routing.host_cost_flags(max_budget_usd)
 
     def command(self, spec: RunSpec) -> list[str]:
+        if spec.tool_free:
+            # Claude Code's judge is its inspect model. Building this command
+            # with permissions skipped would run a question with the run of the
+            # machine, so refuse rather than ignore the request.
+            raise NotImplementedError(
+                "claude-code is judged through its inspect model, not through the CLI"
+            )
         cmd = [
             self.binary, "-p",
             "--output-format", "stream-json", "--verbose",

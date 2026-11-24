@@ -16,7 +16,7 @@ description: >-
 
 inputs:
   command:
-    description: 'The skillscope subcommand: structural, routing, behavioral, select, list-skills, template.'
+    description: 'The skillscope subcommand: structural, routing, behavioral, staleness, select, list-skills, template.'
     required: true
   args:
     description: "Further arguments for the subcommand, shell-quoted."
@@ -47,8 +47,10 @@ inputs:
     default: "true"
   install-claude:
     description: >-
-      Install Node and the claude CLI. Needed by `routing` and `behavioral`,
-      pointless for `structural` and `select`.
+      Install Node and the claude CLI. Needed by `routing`, `behavioral` and
+      `staleness` -- staleness drives the behavioral leg for both of its
+      halves, so it needs the CLI exactly as much. Pointless for `structural`
+      and `select`.
     required: false
     default: "false"
   node-version:

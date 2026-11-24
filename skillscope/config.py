@@ -61,6 +61,15 @@ DEFAULT_SKILL_GLOBS = ("./*",)
 DEFAULT_BEHAVIOR_RUNNER = ("ubuntu-latest",)
 DEFAULT_BEHAVIOR_OS = ("Linux",)
 
+# Tier 0, the bar every skill clears before it can ship: five prompts, no
+# hardware, no assertions, enforced structurally so a thin dataset fails
+# without spending a token. These are the defaults, not the rule -- a repo
+# adopting this harness over an existing catalogue lowers them, and raises them
+# again as the datasets land. Where that decision may be made is the point of
+# `min_positive` on Config below.
+DEFAULT_MIN_POSITIVE = 3
+DEFAULT_MIN_NEGATIVE = 2
+
 # The two answers `--routing-room` takes instead of a list of names: every
 # skill in the repo that ships a dataset, and no routing run at all. Both are
 # words rather than shapes of an empty flag, because saying nothing means "work
@@ -122,6 +131,24 @@ class Config:
     # a skill says what hardware it needs, not who pays for it.
     scoped_gate: str = ""
     scoped_environment: str = ""
+
+    # How many of a skill's evaluations must expect it to fire, and how many
+    # must expect it not to. Zero for both means a skill need not ship a
+    # dataset at all, which is how a catalogue adopts the structural checks
+    # before it has written one.
+    #
+    # This is reachable from the command line and from nowhere else, and that
+    # is the design rather than an omission. The bar a skill is held to is not
+    # the skill author's to set: a file inside a skill, or at the repo root,
+    # would let the same pull request that adds a thin dataset also lower the
+    # number it is measured against, and the reviewer would have to notice the
+    # second change to understand the first. On the command line it lives in
+    # the workflow, which is a path a repo can put behind branch protection and
+    # code owners. There is deliberately no environment variable either: a
+    # self-hosted runner's environment is set by whoever administers the
+    # machine, which is not the same set of people who review a workflow diff.
+    min_positive: int = DEFAULT_MIN_POSITIVE
+    min_negative: int = DEFAULT_MIN_NEGATIVE
 
     @property
     def skills(self) -> dict[str, Path]:
@@ -286,6 +313,31 @@ def wants_no_skills(value: object) -> bool:
     return _is_sentinel(value, NO_SKILLS)
 
 
+def _bar(value: object, flag: str, default: int) -> int:
+    """A non-negative count from a flag, a workflow input, or a test fixture.
+
+    Blank means the default, so a workflow input nobody filled in is the same
+    as no flag at all. Anything else has to be a whole number that is not
+    negative: a bar of -1 would read as "off" to whoever wrote it and as "every
+    count clears it" to the code, and those are the same outcome reached by
+    accident. Zero is the way to say off, and it says it once.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        count = int(str(value).strip())
+    except ValueError:
+        raise SystemExit(
+            f"error: {flag} takes a whole number, not {value!r}."
+        ) from None
+    if count < 0:
+        raise SystemExit(
+            f"error: {flag} cannot be negative (got {count}). Zero is how a "
+            "repo says this bar does not apply yet."
+        )
+    return count
+
+
 def build(
     root: Path | None = None,
     *,
@@ -301,6 +353,8 @@ def build(
     scoped_runner: object = None,
     scoped_gate: str = "",
     scoped_environment: str = "",
+    min_positive: object = None,
+    min_negative: object = None,
     dataset_skills: list[str] | None = None,
 ) -> Config:
     """A Config from loose values: what the CLI hands over after parsing.
@@ -347,6 +401,8 @@ def build(
         scoped_runner=_items(scoped_runner, "--scoped-runner"),
         scoped_gate=(scoped_gate or "").strip(),
         scoped_environment=(scoped_environment or "").strip(),
+        min_positive=_bar(min_positive, "--min-positive", DEFAULT_MIN_POSITIVE),
+        min_negative=_bar(min_negative, "--min-negative", DEFAULT_MIN_NEGATIVE),
     )
 
 
