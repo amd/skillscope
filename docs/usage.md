@@ -500,7 +500,7 @@ the same numbers with none of the isolation.
 
 Podman needs three things, and each was discovered by the next one failing:
 
-* `uv tool install 'skillscope[podman] @ git+https://github.com/amd/skillscope'`.
+* `uv tool install --system-certs 'skillscope[podman] @ git+https://github.com/amd/skillscope'`.
   The provider is registered by a separate package through an entry point, so the
   podman binary alone is not enough. The extra has to be asked for against the
   repository URL: the `skillscope` name on PyPI belongs to an unrelated project,
