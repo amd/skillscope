@@ -2290,6 +2290,60 @@ class TestRoutingGate(unittest.TestCase):
         self.assertIsNotNone(self.gate(0, 12, bar=0, activations=0))
 
 
+class TestAMissingSkillFailsTheRunItself(unittest.TestCase):
+    """The gate reached through the run, not called on its own.
+
+    `TestRoutingGate` hands `routing_gate` a list it built itself, which says
+    the gate works but not that anything gives it one. Deleting the argument
+    at the call site leaves all of it green. This drives the path the CLI
+    takes: an outcome that looked at the room and did not see `beta`, through
+    `summarize` into `_finish_routing`, down to the code the command returns.
+    """
+
+    ROOM = {"alpha": None, "beta": None}
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+        for name in self.ROOM:
+            self.repo.skill(name, dataset=tier0_dataset(name))
+        self.repo.activate()
+        patch = mock.patch.object(cli, "_write_report", lambda *a, **k: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def finish(self, visible: list[str]) -> tuple[int, str]:
+        """Run the real finish path over one outcome that saw `visible`."""
+        args = cli.build_parser().parse_args(
+            ["routing", "--engine", "claude-code-no-sandbox", "--skip-preflight"]
+        )
+        outcome = routing.Outcome(
+            id="c", category="k", skill="alpha", prompt="p", expect="alpha",
+            observed="alpha", verdict="correct_trigger", passed=True,
+            stop_reason="skill_activated", elapsed_s=1.0, tool_calls=1,
+            visible_skills=visible,
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = cli._finish_routing(
+                args, [outcome], dict(self.ROOM), time.time(),
+                isolated=True, sandbox="host", sandbox_isolated=False,
+            )
+        return code, stderr.getvalue()
+
+    def test_a_skill_that_never_reached_the_session_fails_the_run(self) -> None:
+        # Every case for `beta` would read as a missed trigger, so the run
+        # reports a plausible number for a room nobody asked for.
+        code, stderr = self.finish(["alpha"])
+        self.assertEqual(code, 1)
+        self.assertIn("[routing]", stderr)
+        self.assertIn("beta", stderr)
+
+    def test_a_room_that_arrived_whole_does_not_fail(self) -> None:
+        code, stderr = self.finish(["alpha", "beta"])
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+
+
 class TestActivationDetection(unittest.TestCase):
     SKILLS = ["local-ai-use", "local-ai-app-integration", "serving-llms-on-instinct"]
 
