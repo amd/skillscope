@@ -1597,6 +1597,132 @@ class TestTier0(unittest.TestCase):
         self.assertIn("no eval dataset", errors[0])
 
 
+class TestTheBodyLimitIsTheRepos(unittest.TestCase):
+    """The body limit is configuration, and the format limits beside it are not.
+
+    A name over 64 characters and a description over 1024 are truncated by the
+    runtime, so no repo may differ from them. Nothing truncates a long body, so
+    how long one may be is the repo's call. These tests pin that difference,
+    because the three live side by side and the next person to touch them will
+    read them as one kind of thing.
+    """
+
+    def setUp(self) -> None:
+        self.repo = Repo(self)
+
+    def _skill_with_body(self, name: str, lines: int) -> None:
+        folder = self.repo.skill(name, dataset=tier0_dataset(name))
+        body = "\n".join(f"line {i}" for i in range(lines))
+        (folder / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Does {name} things.\n---\n\n{body}\n",
+            encoding="utf-8",
+        )
+
+    def test_the_default_is_what_it_has_always_been(self) -> None:
+        self._skill_with_body("long-skill", config.DEFAULT_MAX_BODY_LINES + 1)
+        self.repo.activate()
+        errors = structure.skill_errors("long-skill")
+        self.assertTrue(any("body is" in e for e in errors), errors)
+
+    def test_exactly_at_the_limit_passes(self) -> None:
+        self._skill_with_body("exact-skill", config.DEFAULT_MAX_BODY_LINES)
+        self.repo.activate()
+        self.assertEqual(
+            [e for e in structure.skill_errors("exact-skill") if "body is" in e], []
+        )
+
+    def test_a_raised_limit_accepts_what_the_default_rejects(self) -> None:
+        self._skill_with_body("long-skill", 600)
+        self.repo.activate()
+        self.assertTrue(any("body is" in e for e in structure.skill_errors("long-skill")))
+        self.repo.reactivate(max_body_lines=1000)
+        self.assertEqual(
+            [e for e in structure.skill_errors("long-skill") if "body is" in e], []
+        )
+
+    def test_zero_says_nothing_about_length(self) -> None:
+        self._skill_with_body("enormous-skill", 5000)
+        self.repo.activate(max_body_lines=0)
+        self.assertEqual(
+            [e for e in structure.skill_errors("enormous-skill") if "body is" in e], []
+        )
+
+    def test_turning_it_off_leaves_the_format_limits_alone(self) -> None:
+        """The point of the split: `0` is about length, not about the format."""
+        folder = self.repo.skill("bad-skill", dataset=tier0_dataset("bad"))
+        (folder / "SKILL.md").write_text(
+            "---\nname: bad-skill\ndescription: " + "x" * 1100 + "\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        self.repo.activate(max_body_lines=0)
+        errors = structure.skill_errors("bad-skill")
+        self.assertTrue(any("description" in e for e in errors), errors)
+
+    def test_the_limit_is_not_settable_from_inside_a_skill(self) -> None:
+        folder = self.repo.skill("long-skill", dataset=tier0_dataset("long"))
+        body = "\n".join(f"line {i}" for i in range(600))
+        (folder / "SKILL.md").write_text(
+            f"---\nname: long-skill\ndescription: Long.\n---\n\n{body}\n",
+            encoding="utf-8",
+        )
+        (folder / "skillscope.json").write_text(
+            '{"max_body_lines": 0}', encoding="utf-8"
+        )
+        self.repo.activate()
+        self.assertTrue(any("body is" in e for e in structure.skill_errors("long-skill")))
+
+    def test_a_limit_that_is_not_a_count_is_refused(self) -> None:
+        for value in ("-1", "lots"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit) as caught:
+                    config.build(self.repo.root, max_body_lines=value)
+                self.assertIn("--max-body-lines", str(caught.exception))
+
+    def test_a_blank_limit_is_the_default(self) -> None:
+        cfg = config.build(self.repo.root, max_body_lines="")
+        self.assertEqual(cfg.max_body_lines, config.DEFAULT_MAX_BODY_LINES)
+
+    def test_the_limit_is_not_settable_from_the_environment(self) -> None:
+        """No environment fallback, for the same reason the dataset bars have none.
+
+        A self-hosted runner's environment is set by whoever administers the
+        machine, who is not the person reviewing the workflow diff.
+        """
+        self._skill_with_body("long-skill", 600)
+        for key in ("SKILLSCOPE_MAX_BODY_LINES", "SKILLSCOPE_BODY_LINES"):
+            os.environ[key] = "0"
+            self.addCleanup(os.environ.pop, key, None)
+        self.repo.activate()
+        self.assertTrue(any("body is" in e for e in structure.skill_errors("long-skill")))
+
+    def test_the_flag_reaches_the_check_through_argparse(self) -> None:
+        """End to end, the way CI runs it: a flag, not a config object.
+
+        `config.build` agreeing with the check says nothing about whether the
+        command line reaches either of them.
+        """
+        self._skill_with_body("long-skill", 600)
+        self.repo.activate()
+
+        previous = config.use(None)
+        self.addCleanup(config.use, previous)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = cli.main(
+                [
+                    "--repo",
+                    str(self.repo.root),
+                    "structural",
+                    "--skills-dir",
+                    "./*",
+                    "--max-body-lines",
+                    "0",
+                ]
+            )
+        self.assertEqual(code, 0, stdout.getvalue())
+        self.assertIn("body limit: off", stdout.getvalue())
+
+
 class TestTheDatasetBarIsTheRepos(unittest.TestCase):
     """The coverage bar is configuration, and only the command line sets it.
 
@@ -2023,12 +2149,12 @@ class TestSkillStructure(unittest.TestCase):
         self.assertTrue(any("`description` is" in e for e in structure.errors()))
 
     def test_a_body_past_the_limit_is_reference_material_in_the_wrong_file(self) -> None:
-        lines = "\n".join(f"line {i}" for i in range(structure.MAX_BODY_LINES + 1))
+        lines = "\n".join(f"line {i}" for i in range(config.DEFAULT_MAX_BODY_LINES + 1))
         self.declares("name: demo-skill\ndescription: Does things.", f"\n{lines}\n")
         self.assertTrue(any("sibling files" in e for e in structure.errors()))
 
     def test_blank_lines_around_the_body_do_not_count_against_it(self) -> None:
-        lines = "\n".join(f"line {i}" for i in range(structure.MAX_BODY_LINES))
+        lines = "\n".join(f"line {i}" for i in range(config.DEFAULT_MAX_BODY_LINES))
         self.declares("name: demo-skill\ndescription: Does things.", f"\n\n{lines}\n\n\n")
         self.assertEqual(structure.errors(), [])
 

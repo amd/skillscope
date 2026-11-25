@@ -20,7 +20,7 @@ So these rules are checked where they cost nothing:
     matches the folder it is in.
   * ``description`` is a non-empty string of at most
     :data:`MAX_DESCRIPTION_LENGTH` characters.
-  * the body is at most :data:`MAX_BODY_LINES` lines.
+  * the body is at most ``max_body_lines`` lines, which the repo sets.
 
 Then whatever else the repo requires of every skill, which is a policy rather
 than a format and so arrives as configuration: ``skill_files`` names files each
@@ -50,10 +50,13 @@ SKILL_FILE = "SKILL.md"
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
-# Past this, a body is reference material rather than instructions, and an
-# agent reads it in full every time the skill loads. Sibling files linked from
-# SKILL.md are read only when they are needed.
-MAX_BODY_LINES = 500
+# How long a body may run to is `max_body_lines` on the config, not a constant
+# here, because it is the one limit in this file that the format does not set.
+# A name over 64 characters and a description over 1024 are truncated by the
+# runtime that loads them; a long body is not. What it costs is an agent reading
+# the whole thing on every activation, which is a real cost and a gradual one,
+# and how much of it a repo will carry is that repo's call. See
+# `DEFAULT_MAX_BODY_LINES` in config.py.
 
 # Names an agent runtime reserves for itself.
 RESERVED_NAME_SUBSTRINGS = ("anthropic", "claude")
@@ -219,6 +222,10 @@ def _description_errors(description: object) -> list[str]:
 
 
 def _body_errors(body: str) -> list[str]:
+    limit = config.active().max_body_lines
+    if not limit:
+        return []
+
     # Surrounding blank lines are not content: the blank line after the closing
     # `---` should not count against a skill.
     lines = body.splitlines()
@@ -226,11 +233,11 @@ def _body_errors(body: str) -> list[str]:
         lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
-    if len(lines) <= MAX_BODY_LINES:
+    if len(lines) <= limit:
         return []
     return [
         (
-            f"body is {len(lines)} lines; the format allows {MAX_BODY_LINES}. "
+            f"body is {len(lines)} lines; this repo allows {limit}. "
             "Move reference material into sibling files and link to them, so "
             "an agent reads it when it needs it rather than on every load."
         )
