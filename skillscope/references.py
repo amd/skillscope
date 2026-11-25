@@ -95,6 +95,20 @@ _HTML_ATTRIBUTE = re.compile(
     r"(?:href|src)\s*=\s*[\"'](?P<target>[^\"']+)[\"']", re.IGNORECASE
 )
 _BARE_URL = re.compile(r"https?://[^\s<>\"'`\\)\]}]+")
+
+# A path written as prose or inside a code span: at least one directory segment
+# and a file extension. Skills point at their own scripts and data this way
+# (`Run scripts/detect.py`, `Read data/epyc.json`), which is deliberately not a
+# markdown link, so `_targets` never sees it.
+_PATH_MENTION = re.compile(r"[\w./\-]+/[\w.\-]+\.[A-Za-z0-9]{1,6}")
+# `${SKILL_DIR}/scripts/launch.sh` is rooted at the skill, so the tail is what
+# has to resolve. Strip the variable rather than reading the rest as absolute.
+_SKILL_ROOT_PREFIX = re.compile(r"\$\{?SKILL_DIR\}?/")
+# Any other variable roots the path where this check cannot follow: a plugin's
+# install directory, a home directory, a mount named at runtime. The mention
+# goes whole, because stripping only the variable leaves a path shape that
+# resolves from nowhere and reads as the skill's own broken path.
+_FOREIGN_VAR_PATH = re.compile(r"\$\{?\w+\}?/[\w./\-]*")
 # Trailing punctuation belongs to the sentence, not to the URL.
 _URL_TAIL = ".,;:!?'\""
 
@@ -246,6 +260,22 @@ def collect(
                     seen.add(key)
                     found.append(Reference(path, number, target))
     return found
+
+
+def path_mentions(text: str) -> set[str]:
+    """Every path-shaped token in the text, code spans and fences included.
+
+    `collect` deliberately ignores code, because a link inside a fence is an
+    illustration rather than a promise. A *path* inside a fence is the opposite:
+    it is how a skill tells an agent which of its own files to run or read, so
+    this reads the raw text.
+    """
+    return {
+        match.group(0).strip("`'\"(),")
+        for match in _PATH_MENTION.finditer(
+            _FOREIGN_VAR_PATH.sub(" ", _SKILL_ROOT_PREFIX.sub("", text))
+        )
+    }
 
 
 def anchors(text: str) -> set[str]:

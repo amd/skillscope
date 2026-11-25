@@ -208,6 +208,7 @@ names — and resolves what it finds.
 | Check | What it reads | When |
 | --- | --- | --- |
 | internal | relative paths, root-relative paths, and heading anchors, against the files on disk | always, and a paid run waits on it |
+| shipped paths | paths named in prose and in code spans, resolved against both the file that names them and the skill root | always, and a paid run waits on it |
 | external | every `http(s)` URL, fetched | only with `--external`, or the `external_references` job |
 
 The split is by failure mode, not by effort. The internal half is deterministic
