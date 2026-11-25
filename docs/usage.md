@@ -243,9 +243,10 @@ which is where a repo that has never measured its prompts should start; anything
 in between holds a bar short of perfect. The bar is over the cases that were
 *graded*: a case whose own run errored counts towards neither side of it,
 because a timeout says nothing about routing. No value turns off the
-infrastructure checks — a run where nothing was graded, or where no skill
-activated anywhere, fails at any bar, since those numbers are an artifact
-rather than a result.
+infrastructure checks — a run where nothing was graded, where no skill
+activated anywhere, or where a skill the room asked for never reached the
+session, fails at any bar, since those numbers are an artifact rather than a
+result.
 
 Two failure modes are worth knowing before reading a report. A routing case that
 ends without the agent either activating a skill or answering is reported as an
