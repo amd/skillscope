@@ -141,7 +141,7 @@ def _frontmatter(text: str) -> tuple[dict | None, str, str]:
             "to match a prompt against, so the skill is never loaded."
         )
 
-    import yaml  # noqa: PLC0415 -- keeps the run path stdlib-only
+    import yaml  # noqa: PLC0415 -- importing this module stays cheap
 
     # Any exception, not only YAMLError: PyYAML rejects some input with
     # ValueError, AttributeError or KeyError (a tag whose value it cannot
