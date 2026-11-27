@@ -102,6 +102,9 @@ the repo under test — worth adding to `.gitignore`.
 
 ## Development
 
+How to contribute, and the checks a pull request has to pass, are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ```bash
 python -m pip install -e .
 python -m unittest discover -s tests -t .

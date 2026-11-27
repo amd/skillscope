@@ -1,0 +1,82 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
+name: Eval failure
+description: A verdict looks wrong — a case passes or fails when it should not, or a score changes between identical runs.
+title: "[Eval failure] <skill> / <case id> — <short summary>"
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is for when **Skillscope's grading** looks wrong. If the grading is right and the skill is what misbehaves, report it to the repo that owns the skill. If Skillscope crashes or errors out before it reaches a verdict, use the *Bug report* template.
+
+        Remove secrets, internal hostnames and private paths from transcripts and reports before pasting them.
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Which command?
+      options:
+        - structural
+        - routing
+        - behavioral
+        - staleness
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What looks wrong?
+      options:
+        - "False fail — the case failed, but the agent did what the case asks"
+        - "False pass — the case passed, but the agent did not do what the case asks"
+        - "Unstable — identical runs give different verdicts or scores"
+        - "Judge — the judge's verdict contradicts what the transcript shows"
+        - "Something else (describe below)"
+    validations:
+      required: true
+
+  - type: input
+    id: case
+    attributes:
+      label: Skill and case
+      description: The skill name and the case `id` from its `evals/evals.json`, and a link to the dataset if it is public.
+      placeholder: e.g. my-skill / my-skill-positive-3
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: What Skillscope reported, and why you think it is wrong
+      description: |
+        Paste the case, the verdict, and the evidence: the relevant part of the report (the markdown summary, or the JSON under `.skillscope/runs/`) and of the agent's transcript. For an unstable verdict, say how many runs you compared and what each gave.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Skillscope version
+      description: The ref your workflow pins (e.g. `reusable.yml@v0.1.3`), or the output of `python -c "import skillscope; print(skillscope.__version__)"`, or a commit.
+    validations:
+      required: true
+
+  - type: input
+    id: setup
+    attributes:
+      label: Harness, engine, model and effort
+      description: The `--harness`, `--engine`, `--model` and `--effort` the run used, or "defaults".
+      placeholder: e.g. claude-code, host, opus, high
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it run?
+      options:
+        - GitHub Actions (reusable workflow or action)
+        - Locally

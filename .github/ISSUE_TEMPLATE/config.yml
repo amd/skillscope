@@ -1,0 +1,11 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
+contact_links:
+  - name: Report a security vulnerability
+    url: https://www.amd.com/en/resources/product-security.html
+    about: Do not open a public issue. Report it through AMD Product Security, as SECURITY.md describes.
+  - name: Propose a skill, or report a problem in one
+    url: https://github.com/amd/skills/issues/new/choose
+    about: Skillscope ships no skills. The AMD skills catalog has its own templates.

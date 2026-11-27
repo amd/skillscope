@@ -1,0 +1,36 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
+name: Feature request
+description: Something else Skillscope does not do yet — a check, a harness, an engine, a workflow input, a report field.
+title: "[Feature] <short summary>"
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If what you need is to grade a particular skill that Skillscope cannot handle yet, the *Skill support request* template asks the right questions.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what stops you today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What you would like
+      description: The behaviour you want, as a command, flag, workflow input or report change if you have one in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds you use now, or other designs you rejected and why.
