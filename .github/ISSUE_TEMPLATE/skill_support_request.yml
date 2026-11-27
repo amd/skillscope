@@ -1,0 +1,53 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
+name: Skill support request
+description: You have a skill Skillscope cannot grade yet — a layout, an expectation or a prerequisite it does not handle.
+title: "[Skill support] <what the skill needs>"
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Skillscope is a test harness: it **ships no skills**. To propose a new skill, or to report a problem with the content of a skill in the AMD catalog, use the [amd/skills issue templates](https://github.com/amd/skills/issues/new/choose) instead.
+
+        Use this template when you have a skill, in any repo, that Skillscope cannot grade the way it needs to be graded.
+
+  - type: dropdown
+    id: gap
+    attributes:
+      label: What gets in the way?
+      options:
+        - "Discovery — Skillscope does not find the skill or its dataset where it lives"
+        - "Dataset — the case cannot be expressed in evals/evals.json"
+        - "Expectation — the behaviour to check has no matching assertion"
+        - "Environment — hardware, a container image or a prerequisite the run cannot provide"
+        - "Harness — the agent the skill targets is not a supported harness"
+        - "Something else (describe below)"
+    validations:
+      required: true
+
+  - type: input
+    id: skill
+    attributes:
+      label: The skill
+      description: A link to the skill folder if it is public, or a short description of it if not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: What you need Skillscope to do
+      description: |
+        Describe the case you want to write and what it should check, what you tried (the dataset, `evals/machine.yml`, flags), and what Skillscope did instead. [docs/authoring-evals.md](https://github.com/amd/skillscope/blob/main/docs/authoring-evals.md) describes what a dataset can express today.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Skillscope version
+      description: The ref your workflow pins (e.g. `reusable.yml@v0.1.3`), or the output of `python -c "import skillscope; print(skillscope.__version__)"`, or a commit.

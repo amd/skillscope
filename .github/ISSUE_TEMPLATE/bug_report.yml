@@ -1,0 +1,73 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
+name: Bug report
+description: Skillscope itself breaks — a crash, a wrong error, or a flag or workflow input that does not do what the docs say.
+title: "[Bug] <short summary>"
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If a run completes but its **verdict** looks wrong, use the *Eval failure* template instead.
+        Remove secrets, internal hostnames and private paths from anything you paste here.
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The command and flags you ran, or the workflow step and its `with:` block. A minimal skill folder and `evals/evals.json` that trigger it help most.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: The error or the part of the report that shows the problem.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Skillscope version
+      description: The ref your workflow pins (e.g. `reusable.yml@v0.1.3`), or the output of `python -c "import skillscope; print(skillscope.__version__)"`, or a commit.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it run?
+      options:
+        - GitHub Actions (reusable workflow or action)
+        - Locally on Linux
+        - Locally on Windows
+        - Locally on macOS
+        - Other (say in the steps above)
+    validations:
+      required: true
+
+  - type: input
+    id: setup
+    attributes:
+      label: Command, engine and harness
+      description: The command (`structural`, `routing`, `behavioral`, `staleness`, ...), `--engine` (`host` or `sandbox`) and `--harness` (`claude-code` or `copilot`), if they apply.
+      placeholder: e.g. behavioral, --engine sandbox, --harness claude-code
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: e.g. 3.12

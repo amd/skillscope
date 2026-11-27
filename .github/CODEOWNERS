@@ -1,0 +1,13 @@
+# Copyright Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
+# Code owners for Skillscope.
+#
+# The last matching pattern wins, so the catch-all below must stay first if any
+# path-specific overrides are added later.
+#
+# @amd/skillscope is requested for review automatically on every pull request.
+# Manage who reviews by editing the team membership, not this file.
+
+* @amd/skillscope
